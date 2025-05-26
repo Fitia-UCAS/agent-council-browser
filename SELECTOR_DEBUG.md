@@ -61,4 +61,4 @@ The console will now show:
 - All available buttons with their HTML
 - Which selectors were tried and which worked
 
-This will help us update the selectors to match the current website structure. 
+This will help us update the selectors to match the current website structure.

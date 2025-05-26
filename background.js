@@ -392,4 +392,4 @@ async function checkConnectionStatus() {
 }
 
 // Periodic connection check - removed as it's not needed
-// The popup will request status when it opens 
+// The popup will request status when it opens

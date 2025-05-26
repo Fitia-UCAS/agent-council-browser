@@ -290,4 +290,4 @@ Unlike many modern web projects, this extension:
 - ✅ Works directly with Chrome's built-in APIs
 - ✅ Loads external libraries via CDN
 
-This makes it easy to modify, debug, and deploy without complex tooling. 
+This makes it easy to modify, debug, and deploy without complex tooling.

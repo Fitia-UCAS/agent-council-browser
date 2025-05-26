@@ -38,4 +38,4 @@ function validateSelector(selector, context) {
       error: error.message
     };
   }
-} 
+}

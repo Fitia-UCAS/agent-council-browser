@@ -114,4 +114,4 @@ chromeEX/
 4. ✅ Task 2: selectors.js
 5. ✅ Task 3: sidepanel.html
 6. ✅ Task 4: styles.css
-7. ⏳ Task 5: sidepanel.js 
+7. ⏳ Task 5: sidepanel.js

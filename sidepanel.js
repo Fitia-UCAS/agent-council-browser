@@ -482,4 +482,4 @@ def mock_response():
             lastUpdatedText.textContent = now.toLocaleTimeString();
         }
     }
-}); 
+});
