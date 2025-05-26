@@ -1,0 +1,209 @@
+/**
+ * Test suite for selectors.js validation
+ * Tests DOM selector structure and completeness
+ */
+
+// Mock selectors for testing
+let LLM_SELECTORS;
+
+// Load selectors.js for testing
+async function loadSelectors() {
+  try {
+    // Import the selectors module
+    const module = await import('../selectors.js');
+    LLM_SELECTORS = module.LLM_SELECTORS;
+    return LLM_SELECTORS;
+  } catch (error) {
+    console.error('Failed to load selectors.js:', error);
+    return null;
+  }
+}
+
+// Test suite
+const selectorsTests = {
+  
+  testSelectorsStructure() {
+    console.log('Testing selectors structure...');
+    if (!LLM_SELECTORS) {
+      throw new Error('LLM_SELECTORS not loaded');
+    }
+    
+    // Test that we have both LLM providers
+    const expectedProviders = ['gemini', 'chatgpt'];
+    for (const provider of expectedProviders) {
+      if (!LLM_SELECTORS[provider]) {
+        throw new Error(`Missing provider: ${provider}`);
+      }
+    }
+    
+    console.log('✅ All required providers present');
+    return true;
+  },
+
+  testGeminiSelectors() {
+    console.log('Testing Gemini selectors...');
+    const gemini = LLM_SELECTORS.gemini;
+    
+    const requiredSelectors = [
+      'input',
+      'sendButton', 
+      'responseArea',
+      'lastResponseBlock',
+      'doneIndicator'
+    ];
+    
+    for (const selector of requiredSelectors) {
+      if (!gemini[selector]) {
+        throw new Error(`Missing Gemini selector: ${selector}`);
+      }
+      
+      if (typeof gemini[selector] !== 'string') {
+        throw new Error(`Gemini selector ${selector} must be a string`);
+      }
+      
+      if (gemini[selector].trim() === '') {
+        throw new Error(`Gemini selector ${selector} cannot be empty`);
+      }
+    }
+    
+    console.log('✅ All Gemini selectors present and valid');
+    return true;
+  },
+
+  testChatGPTSelectors() {
+    console.log('Testing ChatGPT selectors...');
+    const chatgpt = LLM_SELECTORS.chatgpt;
+    
+    const requiredSelectors = [
+      'input',
+      'sendButton',
+      'responseArea', 
+      'lastResponseBlock',
+      'doneIndicator'
+    ];
+    
+    for (const selector of requiredSelectors) {
+      if (!chatgpt[selector]) {
+        throw new Error(`Missing ChatGPT selector: ${selector}`);
+      }
+      
+      if (typeof chatgpt[selector] !== 'string') {
+        throw new Error(`ChatGPT selector ${selector} must be a string`);
+      }
+      
+      if (chatgpt[selector].trim() === '') {
+        throw new Error(`ChatGPT selector ${selector} cannot be empty`);
+      }
+    }
+    
+    console.log('✅ All ChatGPT selectors present and valid');
+    return true;
+  },
+
+  testSelectorFormat() {
+    console.log('Testing selector format...');
+    
+    const allSelectors = [
+      ...Object.values(LLM_SELECTORS.gemini),
+      ...Object.values(LLM_SELECTORS.chatgpt)
+    ];
+    
+    for (const selector of allSelectors) {
+      // Basic CSS selector validation
+      if (!selector.match(/^[#.]?[\w\-\[\]="':*\s,>+~()]+$/)) {
+        console.warn(`⚠️  Potentially invalid CSS selector: ${selector}`);
+      }
+    }
+    
+    console.log('✅ Selector format validation complete');
+    return true;
+  },
+
+  testSelectorUniqueness() {
+    console.log('Testing selector uniqueness...');
+    
+    const geminiSelectors = Object.values(LLM_SELECTORS.gemini);
+    const chatgptSelectors = Object.values(LLM_SELECTORS.chatgpt);
+    
+    // Check for duplicates within each provider
+    const geminiSet = new Set(geminiSelectors);
+    const chatgptSet = new Set(chatgptSelectors);
+    
+    if (geminiSet.size !== geminiSelectors.length) {
+      throw new Error('Duplicate selectors found in Gemini configuration');
+    }
+    
+    if (chatgptSet.size !== chatgptSelectors.length) {
+      throw new Error('Duplicate selectors found in ChatGPT configuration');
+    }
+    
+    console.log('✅ All selectors are unique within their providers');
+    return true;
+  },
+
+  testMetadata() {
+    console.log('Testing selector metadata...');
+    
+    // Check if metadata exists
+    if (LLM_SELECTORS.metadata) {
+      const metadata = LLM_SELECTORS.metadata;
+      
+      if (metadata.lastUpdated) {
+        const lastUpdated = new Date(metadata.lastUpdated);
+        if (isNaN(lastUpdated.getTime())) {
+          throw new Error('Invalid lastUpdated date format');
+        }
+      }
+      
+      if (metadata.version) {
+        if (typeof metadata.version !== 'string') {
+          throw new Error('Version must be a string');
+        }
+      }
+      
+      console.log('✅ Metadata validation passed');
+    } else {
+      console.log('ℹ️  No metadata found (optional)');
+    }
+    
+    return true;
+  }
+};
+
+// Run all tests
+async function runSelectorsTests() {
+  console.log('🧪 Starting selectors.js tests...\n');
+  
+  try {
+    await loadSelectors();
+    
+    if (!LLM_SELECTORS) {
+      throw new Error('Could not load selectors.js');
+    }
+    
+    // Run all tests
+    selectorsTests.testSelectorsStructure();
+    selectorsTests.testGeminiSelectors();
+    selectorsTests.testChatGPTSelectors();
+    selectorsTests.testSelectorFormat();
+    selectorsTests.testSelectorUniqueness();
+    selectorsTests.testMetadata();
+    
+    console.log('\n🎉 All selectors tests passed!');
+    return true;
+    
+  } catch (error) {
+    console.error('\n❌ Selectors test failed:', error.message);
+    return false;
+  }
+}
+
+// Export for use in other test files
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { selectorsTests, runSelectorsTests };
+}
+
+// Auto-run if this file is loaded directly
+if (typeof window !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', runSelectorsTests);
+} 

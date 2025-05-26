@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Multi-LLM Coder",
+  "version": "0.1.0",
+  "description": "Send prompts to multiple LLM providers (Gemini and ChatGPT) simultaneously and compare responses side-by-side",
+  
+  "permissions": [
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  
+  "host_permissions": [
+    "https://gemini.google.com/*",
+    "https://chat.openai.com/*",
+    "https://chatgpt.com/*"
+  ],
+  
+  "background": {
+    "service_worker": "background.js"
+  },
+  
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Click to open Multi-LLM Coder"
+  },
+  
+  "author": "Multi-LLM Coder Team",
+  "homepage_url": "https://github.com/multi-llm-coder/extension"
+} 
