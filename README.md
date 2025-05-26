@@ -21,6 +21,7 @@ A powerful Chrome extension that allows developers to send prompts simultaneousl
 3. **Enable Developer Mode** by toggling the switch in the top-right corner
 4. **Click "Load unpacked"** and select the folder containing the extension files
 5. **Pin the extension** by clicking the puzzle piece icon and pinning "Multi-LLM Coder"
+6. **Open the side panel** from Chrome's toolbar and select "Multi-LLM Coder" to launch the extension
 
 ### Method 2: Manual Installation
 
@@ -32,7 +33,7 @@ A powerful Chrome extension that allows developers to send prompts simultaneousl
    - `background.js`
    - `selectors.js`
    - `styles.css`
-3. Follow steps 2-5 from Method 1
+3. Follow steps 2-6 from Method 1
 
 ## 📖 Usage
 
