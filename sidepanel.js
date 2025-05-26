@@ -16,13 +16,17 @@ document.addEventListener('DOMContentLoaded', function() {
     const charCount = document.getElementById('char-count');
     const useGemini = document.getElementById('use-gemini');
     const useChatGPT = document.getElementById('use-chatgpt');
+    const sendToChatGPT = document.getElementById('send-to-chatgpt');
+    const sendToGemini = document.getElementById('send-to-gemini');
     
     console.log('📋 DOM elements found:', {
         promptInput: !!promptInput,
         sendButton: !!sendButton,
         charCount: !!charCount,
         useGemini: !!useGemini,
-        useChatGPT: !!useChatGPT
+        useChatGPT: !!useChatGPT,
+        sendToChatGPT: !!sendToChatGPT,
+        sendToGemini: !!sendToGemini
     });
     
     // Tab elements
@@ -70,6 +74,14 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         if (useChatGPT) {
             useChatGPT.addEventListener('change', updateSendButtonState);
+        }
+
+        // Forward buttons
+        if (sendToChatGPT) {
+            sendToChatGPT.addEventListener('click', handleSendToChatGPT);
+        }
+        if (sendToGemini) {
+            sendToGemini.addEventListener('click', handleSendToGemini);
         }
         
         // Tab buttons
@@ -159,6 +171,46 @@ document.addEventListener('DOMContentLoaded', function() {
         // Update status
         if (geminiSelected) updateLLMStatus('gemini', 'Sending...');
         if (chatgptSelected) updateLLMStatus('chatgpt', 'Sending...');
+    }
+
+    function handleSendToChatGPT() {
+        const content = document.getElementById('gemini-content')?.textContent?.trim();
+        if (!content) {
+            showToast('No Gemini response to send', 'warning');
+            return;
+        }
+
+        showToast('Forwarding to ChatGPT...', 'info');
+        showLoading();
+        updateLLMStatus('chatgpt', 'Sending...');
+
+        if (chrome && chrome.runtime) {
+            chrome.runtime.sendMessage({
+                type: 'SEND_PROMPT',
+                prompt: content,
+                targets: { chatgpt: true }
+            });
+        }
+    }
+
+    function handleSendToGemini() {
+        const content = document.getElementById('chatgpt-content')?.textContent?.trim();
+        if (!content) {
+            showToast('No ChatGPT response to send', 'warning');
+            return;
+        }
+
+        showToast('Forwarding to Gemini...', 'info');
+        showLoading();
+        updateLLMStatus('gemini', 'Sending...');
+
+        if (chrome && chrome.runtime) {
+            chrome.runtime.sendMessage({
+                type: 'SEND_PROMPT',
+                prompt: content,
+                targets: { gemini: true }
+            });
+        }
     }
     
     function handleBackgroundMessage(message, sender, sendResponse) {
@@ -482,4 +534,4 @@ def mock_response():
             lastUpdatedText.textContent = now.toLocaleTimeString();
         }
     }
-}); 
+});
