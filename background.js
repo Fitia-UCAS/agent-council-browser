@@ -9,13 +9,15 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 // Safe message sending function
-async function sendMessageToPopup(message) {
+function sendMessageToPopup(message) {
     try {
-        // Try to send message using the standard API
-        chrome.runtime.sendMessage(message);
+        chrome.runtime.sendMessage(message, () => {
+            if (chrome.runtime.lastError) {
+                console.log('No popup to receive message:', message.type);
+            }
+        });
     } catch (error) {
-        // If it fails, it means no popup is listening
-        console.log('No popup to receive message:', message.type);
+        console.log('Failed to send message:', message.type, error);
     }
 }
 

@@ -101,7 +101,7 @@
         btn.style.color = '#fff';
         btn.style.borderRadius = '4px';
         btn.addEventListener('click', (e) => {
-            e.stopPropagation();
+            e.preventDefault();
             forwardEnabled = !forwardEnabled;
             btn.style.background = forwardEnabled ? '#4caf50' : '#333';
         });
