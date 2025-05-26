@@ -247,6 +247,7 @@ function simpleInteraction(prompt, llmType) {
                 'textarea[placeholder*="Enter a prompt"]',
                 'textarea[placeholder*="Ask"]',
                 'textarea',
+                'input[type="text"]',
                 '[contenteditable="true"]'
             ]
         };
@@ -285,6 +286,7 @@ function simpleInteraction(prompt, llmType) {
         // Find send button
         const buttonSelectors = [
             'button[data-testid*="send"]',
+            'button[aria-label="Send message"]',
             'button[aria-label*="Send"]',
             'button[type="submit"]',
             'button:has(svg)',
