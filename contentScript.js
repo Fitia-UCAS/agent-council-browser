@@ -26,20 +26,56 @@
         return null;
     }
 
+    function findSendButton() {
+        const selectors = [
+            'button[data-testid*="send"]',
+            'button[aria-label*="Send"]',
+            'button[type="submit"]',
+            'button:has(svg)',
+            'button:last-of-type'
+        ];
+        for (const sel of selectors) {
+            const btns = document.querySelectorAll(sel);
+            for (const btn of btns) {
+                if (btn && !btn.disabled && btn.offsetParent !== null) {
+                    return btn;
+                }
+            }
+        }
+        return null;
+    }
+
     function attachListeners() {
         const input = findInput();
-        if (!input) return;
-        input.addEventListener('keydown', evt => {
-            if (!evt.isTrusted) return;
-            if (evt.key === 'Enter' && !evt.shiftKey && forwardEnabled) {
-                const prompt = input.value || input.textContent || '';
+        const sendBtn = findSendButton();
+        if (input && !input.dataset.mlcForwardKey) {
+            input.addEventListener('keydown', evt => {
+                if (!evt.isTrusted) return;
+                if (evt.key === 'Enter' && !evt.shiftKey && forwardEnabled) {
+                    const prompt = input.value || input.textContent || '';
+                    chrome.runtime.sendMessage({
+                        type: 'FORWARD_PROMPT',
+                        from: isChatGPT ? 'chatgpt' : 'gemini',
+                        prompt
+                    });
+                }
+            });
+            input.dataset.mlcForwardKey = 'true';
+        }
+
+        if (sendBtn && !sendBtn.dataset.mlcForwardClick) {
+            sendBtn.addEventListener('click', () => {
+                if (!forwardEnabled) return;
+                const srcInput = findInput();
+                const prompt = srcInput?.value || srcInput?.textContent || '';
                 chrome.runtime.sendMessage({
                     type: 'FORWARD_PROMPT',
                     from: isChatGPT ? 'chatgpt' : 'gemini',
                     prompt
                 });
-            }
-        });
+            });
+            sendBtn.dataset.mlcForwardClick = 'true';
+        }
     }
 
     function addToggleButton() {
