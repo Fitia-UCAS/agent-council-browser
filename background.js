@@ -28,11 +28,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             handleSendPrompt(message);
             sendResponse({ status: 'received' });
             break;
+        case 'FORWARD_PROMPT':
+            handleForwardPrompt(message);
+            sendResponse({ status: 'forward_received' });
+            break;
         case 'CHECK_CONNECTION':
             checkConnectionStatus().then(status => {
-                sendResponse({ 
+                sendResponse({
                     type: 'CONNECTION_STATUS',
-                    status: status 
+                    status: status
                 });
             });
             return true; // Keep message channel open for async response
@@ -57,6 +61,16 @@ async function handleSendPrompt(message) {
     
     if (targets.chatgpt) {
         await processLLM('chatgpt', prompt);
+    }
+}
+
+function handleForwardPrompt(message) {
+    const { from, prompt } = message;
+    if (!prompt) return;
+    if (from === 'chatgpt') {
+        processLLM('gemini', prompt);
+    } else if (from === 'gemini') {
+        processLLM('chatgpt', prompt);
     }
 }
 
@@ -295,16 +309,18 @@ function simpleInteraction(prompt, llmType) {
         
         if (!sendButton) {
             // Try Enter key as fallback
-            inputElement.dispatchEvent(new KeyboardEvent('keydown', {
-                key: 'Enter',
-                code: 'Enter',
-                keyCode: 13,
-                bubbles: true
-            }));
+            const enterDown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true });
+            const enterUp = new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true });
+            inputElement.dispatchEvent(enterDown);
+            inputElement.dispatchEvent(enterUp);
             return { success: true, method: 'enter_key' };
         }
-        
-        // Click send button
+
+        // Click send button using mouse events
+        const mouseDown = new MouseEvent('mousedown', { bubbles: true });
+        const mouseUp = new MouseEvent('mouseup', { bubbles: true });
+        sendButton.dispatchEvent(mouseDown);
+        sendButton.dispatchEvent(mouseUp);
         sendButton.click();
         return { success: true, method: 'button_click' };
         
