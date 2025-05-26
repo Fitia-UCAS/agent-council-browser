@@ -51,4 +51,4 @@
 1. Test actual prompt sending to verify selectors work
 2. Update selectors if websites have changed
 3. Add error recovery for selector failures
-4. Consider adding retry logic for transient failures 
+4. Consider adding retry logic for transient failures

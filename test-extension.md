@@ -44,4 +44,4 @@
 - No more "Could not establish connection" errors
 - No more async response errors
 - Proper tab detection for both LLM services
-- Clean messaging between popup and background script 
+- Clean messaging between popup and background script

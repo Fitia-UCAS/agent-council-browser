@@ -60,4 +60,4 @@ To see what's happening:
 
 ## If Still Not Working
 
-The console will show exactly which selector worked or failed, making it easy to identify what needs to be updated. 
+The console will show exactly which selector worked or failed, making it easy to identify what needs to be updated.
