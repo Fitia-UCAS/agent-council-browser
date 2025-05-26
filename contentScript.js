@@ -69,8 +69,9 @@
         }
 
         if (sendBtn && !sendBtn.dataset.mlcForwardClick) {
-            sendBtn.addEventListener('click', () => {
+            sendBtn.addEventListener('click', (evt) => {
                 if (!forwardEnabled) return;
+                if (evt.target.id === 'mlc-forward-toggle') return;
                 const srcInput = findInput();
                 const prompt = srcInput?.value || srcInput?.textContent || '';
                 chrome.runtime.sendMessage({
@@ -78,7 +79,7 @@
                     from: isChatGPT ? 'chatgpt' : 'gemini',
                     prompt
                 });
-            });
+            }, true);
             sendBtn.dataset.mlcForwardClick = 'true';
         }
     }
@@ -101,7 +102,6 @@
         btn.style.borderRadius = '4px';
         btn.addEventListener('click', (e) => {
             e.preventDefault();
-            e.stopPropagation();
             forwardEnabled = !forwardEnabled;
             btn.style.background = forwardEnabled ? '#4caf50' : '#333';
         });
