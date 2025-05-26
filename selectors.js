@@ -13,8 +13,8 @@ const LLM_SELECTORS = {
   },
   
   chatgpt: {
-    input: '#prompt-textarea, textarea[placeholder*="Message"], [data-testid="prompt-textarea"]',
-    sendButton: 'button[data-testid="send-button"], button[aria-label*="Send"], [data-testid="fruitjuice-send-button"]',
+    input: '#prompt-textarea, textarea[data-testid="prompt-textarea"], textarea[placeholder*="Message"], textarea[data-id="root"], textarea, [contenteditable="true"]',
+    sendButton: 'button[data-testid="send-button"], button[data-testid="fruitjuice-send-button"], button[aria-label="Send"], button[aria-label*="Send"], button[type="submit"]',
     responseArea: '[data-testid="conversation-turn"], .conversation-content, [role="main"]',
     lastResponseBlock: '[data-testid="conversation-turn"]:last-child .markdown, .message:last-child, .response:last-child',
     doneIndicator: 'button[aria-label*="Stop"]:not([disabled]), .stop-button:not([style*="display: none"])'

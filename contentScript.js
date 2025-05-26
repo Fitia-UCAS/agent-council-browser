@@ -37,7 +37,12 @@
         for (const sel of selectors) {
             const btns = document.querySelectorAll(sel);
             for (const btn of btns) {
-                if (btn && !btn.disabled && btn.offsetParent !== null) {
+                if (
+                    btn &&
+                    btn.id !== 'mlc-forward-toggle' &&
+                    !btn.disabled &&
+                    btn.offsetParent !== null
+                ) {
                     return btn;
                 }
             }
@@ -84,6 +89,7 @@
         if (!input || !input.parentElement) return;
         const btn = document.createElement('button');
         btn.id = 'mlc-forward-toggle';
+        btn.type = 'button';
         btn.textContent = isChatGPT ? '⇄ Gemini' : '⇄ ChatGPT';
         btn.style.marginLeft = '4px';
         btn.style.cursor = 'pointer';
@@ -93,7 +99,9 @@
         btn.style.background = '#333';
         btn.style.color = '#fff';
         btn.style.borderRadius = '4px';
-        btn.addEventListener('click', () => {
+        btn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
             forwardEnabled = !forwardEnabled;
             btn.style.background = forwardEnabled ? '#4caf50' : '#333';
         });
