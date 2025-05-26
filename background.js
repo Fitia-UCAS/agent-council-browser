@@ -9,13 +9,15 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 // Safe message sending function
-async function sendMessageToPopup(message) {
+function sendMessageToPopup(message) {
     try {
-        // Try to send message using the standard API
-        chrome.runtime.sendMessage(message);
+        chrome.runtime.sendMessage(message, () => {
+            if (chrome.runtime.lastError) {
+                console.log('No popup to receive message:', message.type);
+            }
+        });
     } catch (error) {
-        // If it fails, it means no popup is listening
-        console.log('No popup to receive message:', message.type);
+        console.log('Failed to send message:', message.type, error);
     }
 }
 
@@ -238,6 +240,7 @@ function simpleInteraction(prompt, llmType) {
         const inputSelectors = {
             chatgpt: [
                 '#prompt-textarea',
+                'textarea[data-testid="prompt-textarea"]',
                 'textarea[placeholder*="Message"]',
                 'textarea[data-id="root"]',
                 'textarea',
@@ -286,6 +289,7 @@ function simpleInteraction(prompt, llmType) {
         // Find send button
         const buttonSelectors = [
             'button[data-testid*="send"]',
+            'button[aria-label="Send"]',
             'button[aria-label="Send message"]',
             'button[aria-label*="Send"]',
             'button[type="submit"]',
@@ -324,6 +328,13 @@ function simpleInteraction(prompt, llmType) {
         sendButton.dispatchEvent(mouseDown);
         sendButton.dispatchEvent(mouseUp);
         sendButton.click();
+
+        // Also trigger Enter key as a fallback in case click is ignored
+        const enterDown = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true });
+        const enterUp = new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true });
+        inputElement.dispatchEvent(enterDown);
+        inputElement.dispatchEvent(enterUp);
+
         return { success: true, method: 'button_click' };
         
     } catch (error) {
