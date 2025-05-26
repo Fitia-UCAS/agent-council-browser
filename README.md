@@ -165,4 +165,129 @@ If you encounter issues:
 1. Check this README for troubleshooting steps
 2. Look at the browser console for error messages
 3. Create an issue on the project repository
-4. Include browser version, extension version, and error details 
+4. Include browser version, extension version, and error details
+
+## 📦 Dependencies & Installation
+
+### System Requirements
+- **Google Chrome** (version 88 or higher)
+- **Developer Mode** enabled in Chrome Extensions
+- **Internet Connection** (for LLM website access)
+
+### No Traditional Dependencies Required
+This Chrome extension is built with vanilla JavaScript and doesn't require Node.js, npm, or any build tools. All dependencies are either:
+- Built into Chrome (Extension APIs)
+- Loaded from CDN (highlight.js)
+- Native Web APIs
+
+### Quick Setup Script
+For a streamlined setup process, you can use this script:
+
+```bash
+#!/bin/bash
+# Multi-LLM Coder Extension Setup Script
+
+echo "🚀 Setting up Multi-LLM Coder Chrome Extension..."
+
+# Check if Chrome is installed
+if ! command -v google-chrome &> /dev/null && ! command -v chrome &> /dev/null; then
+    echo "❌ Google Chrome not found. Please install Chrome first."
+    echo "   Download from: https://www.google.com/chrome/"
+    exit 1
+fi
+
+echo "✅ Chrome detected"
+
+# Clone or download the repository
+if [ ! -d "chromeEX" ]; then
+    echo "📥 Downloading extension files..."
+    # If using git:
+    # git clone <repository-url> chromeEX
+    # Or download and extract manually
+    echo "   Please ensure all extension files are in the current directory"
+fi
+
+# Verify required files
+required_files=("manifest.json" "sidepanel.html" "sidepanel.js" "background.js" "selectors.js" "styles.css")
+missing_files=()
+
+for file in "${required_files[@]}"; do
+    if [ ! -f "$file" ]; then
+        missing_files+=("$file")
+    fi
+done
+
+if [ ${#missing_files[@]} -ne 0 ]; then
+    echo "❌ Missing required files:"
+    printf '   - %s\n' "${missing_files[@]}"
+    exit 1
+fi
+
+echo "✅ All required files present"
+
+# Run tests (optional)
+if [ -f "tests/test-runner.html" ]; then
+    echo "🧪 Test files available"
+    echo "   Open tests/test-runner.html in Chrome to run validation tests"
+fi
+
+echo ""
+echo "🎉 Setup complete! Next steps:"
+echo "   1. Open Chrome and go to chrome://extensions/"
+echo "   2. Enable 'Developer mode' (toggle in top-right)"
+echo "   3. Click 'Load unpacked' and select this directory"
+echo "   4. Open Gemini (gemini.google.com) and ChatGPT (chat.openai.com)"
+echo "   5. Click the extension icon to start using Multi-LLM Coder"
+echo ""
+echo "📚 For detailed instructions, see the Installation section in README.md"
+```
+
+### Manual Verification
+To verify your setup, check that you have these files:
+
+```bash
+# Verify all required files are present
+ls -la manifest.json sidepanel.html sidepanel.js background.js selectors.js styles.css
+
+# Optional: Run a simple HTTP server to preview the UI
+python3 -m http.server 8000
+# Then visit: http://localhost:8000/sidepanel.html
+```
+
+### Development Dependencies (Optional)
+If you want to contribute to the project or run tests:
+
+```bash
+# For running a local HTTP server (testing UI)
+python3 -m http.server 8000
+
+# For code formatting (if you have prettier installed globally)
+npx prettier --write "*.js" "*.html" "*.css"
+
+# For linting (if you have eslint installed globally)  
+npx eslint *.js
+```
+
+### External Dependencies
+The extension automatically loads these external resources:
+- **highlight.js** (v11.9.0) - For syntax highlighting in code blocks
+- **Material Icons** - For UI icons
+- **Chrome Extension APIs** - Built into Chrome browser
+
+### Troubleshooting Dependencies
+If the extension doesn't work properly:
+
+1. **Check Chrome Version**: Ensure you're using Chrome 88+
+2. **Verify Files**: Run the verification script above
+3. **Test Network**: Ensure you can access gemini.google.com and chat.openai.com
+4. **Check Console**: Open Chrome DevTools and look for any error messages
+
+### No Build Process Required
+Unlike many modern web projects, this extension:
+- ✅ Requires no compilation or build step
+- ✅ Uses no package managers (npm, yarn, etc.)
+- ✅ Has no node_modules directory
+- ✅ Works directly with Chrome's built-in APIs
+- ✅ Loads external libraries via CDN
+
+This makes it easy to modify, debug, and deploy without complex tooling. 
