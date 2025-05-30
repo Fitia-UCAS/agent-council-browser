@@ -1,4 +1,5 @@
 # dump_repo.py  (safe version: skips data files)
+# dump_repo.py  (safe version: skips data files)
 import os, pathlib, textwrap
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -10,7 +11,7 @@ CODE_EXTS = {
     ".py", ".ipynb", ".js", ".ts", ".tsx", ".jsx",
     ".java", ".go", ".rb", ".rs", ".cpp", ".c", ".h",
     ".md", ".toml", ".yaml", ".yml", ".jsonnet",
-    ".html", ".css", ".scss", ".sh", ".bat", ".ps1",".lock",".env",'.toml', '.md'
+    ".html", ".css", ".scss", ".sh", ".bat", ".ps1",".lock",".env",'.toml'
 }
 
 # Or:  folders we want to ignore entirely
@@ -22,11 +23,15 @@ SKIP_FILES = {                      # ALWAYS ignore these exact names
     "uv.lock",
     "LICENSE",
     "pyproject.toml",
+    "repo_dump.md",  # <-- Add this line to skip the output file
 }
-SKIP_EXTS  = {".toml"}              # ignore any file ending with these ext’s
+SKIP_EXTS  = {".toml", '.md'}              # ignore any file ending with these ext's
 # ---------------------------------------------------------------------------
 
 def should_include(p: pathlib.Path) -> bool:
+    # Skip the output file itself
+    if p.resolve() == OUT.resolve():  # <-- Add this check as well for extra safety
+        return False
     if any(part in SKIP_DIRS for part in p.parts):
         return False
     if p.name in SKIP_FILES:
@@ -39,6 +44,7 @@ def should_include(p: pathlib.Path) -> bool:
         return False
     return True
 
+# ... rest of the code remains the same ...
 def md_header(rel):
     lang = rel.suffix.lstrip(".") or "text"
     return f"\n\n---\n\n### `{rel}`\n\n{lang}"
