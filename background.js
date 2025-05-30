@@ -201,7 +201,11 @@ async function injectAndExecute(tabId, llmType, prompt) {
 }
 
 // This function is injected and executed in the context of the target LLM's page
-function simpleInteraction(prompt, llmType) {
+// ... (keep all other parts of background.js from the previous good version) ...
+// ... (including onInstalled, sendMessageToPopup, onMessage, handleSendPrompt, handleForwardPrompt, processLLM, findLLMTab, injectAndExecute, checkConnectionStatus) ...
+
+// THIS IS THE FUNCTION THAT GETS INJECTED AND EXECUTED IN THE TARGET PAGE
+async function simpleInteraction(prompt, llmType) { // Added async here for the setTimeout
     console.log(`[SimpleInteraction INJECTED] Attempting on ${llmType} with prompt: "${prompt.substring(0, 50)}..."`);
 
     try {
@@ -210,13 +214,13 @@ function simpleInteraction(prompt, llmType) {
 
         const inputSelectors = {
             chatgpt: [
-                '#prompt-textarea', // Primary target
+                '#prompt-textarea',
                 'textarea[data-testid="prompt-textarea"]',
                 'textarea[placeholder*="Message"]',
                 'textarea[data-id="root"]',
-                'textarea' 
+                'textarea'
             ],
-            gemini: [ // Gemini uses a contenteditable div
+            gemini: [ // Gemini primarily uses a contenteditable div
                 'div.ql-editor[role="textbox"]',        // Specific Gemini input
                 '.ql-editor.textarea',                  // Another common pattern
                 'div[contenteditable="true"][aria-label*="prompt"]',
@@ -230,7 +234,7 @@ function simpleInteraction(prompt, llmType) {
         if (!currentInputSelectors) {
             const errMsg = `[SimpleInteraction INJECTED] Unknown llmType for input selectors: ${llmType}`;
             console.error(errMsg);
-            return { success: false, error: errMsg };
+            return { success: false, error: errMsg, details: { stage: 'find_input_selectors' } };
         }
 
         for (const selector of currentInputSelectors) {
@@ -244,66 +248,70 @@ function simpleInteraction(prompt, llmType) {
         if (!inputElement) {
             const errMsg = `[SimpleInteraction INJECTED] No input element found for ${llmType} after trying all selectors.`;
             console.error(errMsg);
-            return { success: false, error: `No input element found for ${llmType}` };
+            return { success: false, error: errMsg, details: { stage: 'find_input_element' } };
         }
         console.log(`[SimpleInteraction INJECTED] Successfully found input for ${llmType}:`, inputElement);
+        inputElement.focus(); // Focus the element first
 
-        // Set the prompt
-        if (inputElement.isContentEditable || inputElement.contentEditable === 'true') {
-            console.log(`[SimpleInteraction INJECTED] Setting prompt for contentEditable element (${llmType})`);
-            inputElement.focus(); // Focus first
-            document.execCommand('selectAll', false, null); // Select all existing content
-            document.execCommand('insertText', false, prompt); // Replace with new prompt
-            // inputElement.textContent = prompt; // Simpler, but insertText might trigger more events
-        } else if (inputElement.tagName === 'TEXTAREA') {
-            console.log(`[SimpleInteraction INJECTED] Setting prompt for TEXTAREA (${llmType})`);
-            inputElement.focus(); // Focus first
-             // More robust way to set value for framework-controlled textarea
+        // --- Setting the prompt ---
+        if (llmType === 'chatgpt' && inputElement.tagName === 'TEXTAREA') {
+            console.log(`[SimpleInteraction INJECTED] Setting prompt for ChatGPT TEXTAREA`);
             const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
             if (nativeInputValueSetter) {
-                 nativeInputValueSetter.call(inputElement, prompt);
-            } else { // Fallback if descriptor not found (less likely)
+                nativeInputValueSetter.call(inputElement, prompt);
+            } else {
                 inputElement.value = prompt;
             }
-        } else { // General input fields
-            console.log(`[SimpleInteraction INJECTED] Setting prompt for standard input element (${llmType})`);
-            inputElement.focus(); // Focus first
+            inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            inputElement.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            inputElement.dispatchEvent(new KeyboardEvent('keydown',  { key: ' ', keyCode: 32, bubbles: true, composed: true }));
+            inputElement.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', keyCode: 32, bubbles: true, composed: true }));
+            console.log(`[SimpleInteraction INJECTED] Dispatched events for ChatGPT TEXTAREA.`);
+
+        } else if ((llmType === 'gemini' && (inputElement.isContentEditable || inputElement.contentEditable === 'true')) ||
+                   (inputElement.isContentEditable || inputElement.contentEditable === 'true')) { // General contentEditable case
+            console.log(`[SimpleInteraction INJECTED] Setting prompt for contentEditable element (${llmType})`);
+            document.execCommand('selectAll', false, null);
+            const insertSuccess = document.execCommand('insertText', false, prompt);
+            console.log(`[SimpleInteraction INJECTED] Used document.execCommand('insertText'). Success: ${insertSuccess}.`);
+            inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true })); // Ensure input event fires for contentEditable too
+        } else { // Fallback for other input types (e.g. Gemini using a textarea which is rare)
+            console.log(`[SimpleInteraction INJECTED] Setting prompt for standard input/textarea element (${llmType})`);
             inputElement.value = prompt;
+            inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            inputElement.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
         }
 
-        // Trigger events to make the site recognize the change
-        console.log(`[SimpleInteraction INJECTED] Dispatching input and change events for ${llmType}`);
-        inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-        inputElement.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-        // For some frameworks, a keydown event might be needed to update internal state for height adjustment, etc.
-        inputElement.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true, composed: true }));
-        inputElement.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', bubbles: true, composed: true }));
+        // Verification Step
+        await new Promise(resolve => setTimeout(resolve, 50));
+        const currentText = (inputElement.isContentEditable || inputElement.contentEditable === 'true') ? inputElement.textContent : inputElement.value;
+        console.log(`[SimpleInteraction INJECTED] Text in input field for ${llmType} after setting: "${currentText.substring(0,100)}..."`);
+        if (!currentText.includes(prompt.substring(0, Math.min(prompt.length, 50)))) {
+            console.warn(`[SimpleInteraction INJECTED] WARNING: Prompt may not have been set correctly for ${llmType}. Expected start: "${prompt.substring(0,50)}...", Got: "${currentText.substring(0,50)}..."`);
+        }
 
 
-        console.log(`[SimpleInteraction INJECTED] Prompt set for ${llmType}. Current value/textContent:`, inputElement.value || inputElement.textContent);
-
-        // Find send button
+        // --- Find and click send button ---
         const buttonSelectors = {
              chatgpt: [
                 'button[data-testid="send-button"]',
                 'button[data-testid="fruitjuice-send-button"]',
-                'button[aria-label*="Send message" i]', // Case insensitive aria-label
+                'button[aria-label="Send message" i]',
                 'form button[type="submit"]',
-                // More specific selector for the button with the paper plane icon
-                'button[class*="bottom"] span[data-state]' // ChatGPT's typical send button structure if no testid
+                'button[class*="bottom"] span[data-state="closed"]',
+                'button:has(svg > path[d*="M7 11L12 6L17 11M12 18V7"])'
             ],
-            gemini: [
-                'button[aria-label="Send message"]',
-                'button[data-testid="send-button"]',
-                'button.send-button', // if class exists
-                // Gemini often has a button with an SVG directly inside it
-                'button:has(svg[aria-label="Send message"])'
+            gemini: [ // Gemini send button selectors
+                'button[aria-label="Send message"]',      // Primary target for Gemini
+                'button[data-testid="send-button"]',      // If available
+                'button.send-button',                     // If class is used
+                'button:has(svg[aria-label="Send message"])', // Button containing the send SVG
+                'button.send-button-container button'     // A common pattern in Gemini
             ],
             generic: [
                 'button[type="submit"]',
                 'button[aria-label*="Send" i]',
                 'button:has(svg)',
-                'button:last-of-type' // Risky
             ]
         };
         
@@ -315,7 +323,9 @@ function simpleInteraction(prompt, llmType) {
             const buttons = document.querySelectorAll(selector);
             for (const btn of buttons) {
                 const style = window.getComputedStyle(btn);
-                if (btn && !btn.disabled && btn.offsetParent !== null && style.display !== 'none' && style.visibility !== 'hidden') {
+                if (btn && !btn.disabled && btn.offsetParent !== null && 
+                    style.display !== 'none' && style.visibility !== 'hidden' && 
+                    btn.offsetHeight > 0 && btn.offsetWidth > 0) {
                     sendButton = btn;
                     console.log(`[SimpleInteraction INJECTED] Found send button for ${llmType} with: ${selector}`, sendButton);
                     break;
@@ -326,37 +336,25 @@ function simpleInteraction(prompt, llmType) {
         
         if (!sendButton) {
             console.warn(`[SimpleInteraction INJECTED] No send button found for ${llmType} via selectors. Attempting Enter key on input.`);
-            // Simulate Enter key press on the input element
             inputElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, composed: true }));
-            // Some apps might need keyup as well
-            // inputElement.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, composed: true }));
             console.log(`[SimpleInteraction INJECTED] Dispatched Enter keydown to input for ${llmType}.`);
-            return { success: true, method: `enter_key_fallback_on_input_for_${llmType}` };
+            return { success: true, method: `enter_key_fallback_on_input_for_${llmType}`, details: { stage: 'send_enter_fallback' } };
         }
         
         console.log(`[SimpleInteraction INJECTED] Clicking send button for ${llmType}:`, sendButton);
-        // Robust click
-        sendButton.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, composed: true }));
-        sendButton.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, composed: true }));
+        sendButton.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, composed: true, cancelable: true }));
+        sendButton.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, composed: true, cancelable: true }));
         sendButton.click();
         
-        // The dev branch already had a post-click Enter key dispatch.
-        // This can be useful if the click doesn't always register the submission.
-        // However, it might also cause double sends if the click *and* Enter both work.
-        // Let's make it a slightly delayed optional reinforcement.
-        setTimeout(() => {
-            console.log(`[SimpleInteraction INJECTED] (Reinforcement) Dispatching Enter to input for ${llmType} after button click.`);
-            inputElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true, composed: true }));
-        }, 150);
-
-        return { success: true, method: `button_click_for_${llmType}` };
+        return { success: true, method: `button_click_for_${llmType}`, details: { stage: 'send_button_click' } };
         
     } catch (error) {
-        const errMsg = `[SimpleInteraction INJECTED] Error during interaction with ${llmType}: ${error.message}`;
-        console.error(errMsg, error.stack);
-        return { success: false, error: errMsg };
+        const errMsg = `[SimpleInteraction INJECTED] Error during interaction with ${llmType}: ${error.message} (Stack: ${error.stack})`;
+        console.error(errMsg, error);
+        return { success: false, error: errMsg, details: { stage: 'main_catch_block', errorMessage: error.message } };
     }
 }
+// ... (rest of background.js like checkConnectionStatus) ...
 
 
 async function checkConnectionStatus() {
