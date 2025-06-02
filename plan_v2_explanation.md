@@ -116,12 +116,35 @@ This document explains the implementation of the Auto-Follow-Up feature, which e
 - Multiple strategy approaches that adapt to different DOM structures
 - Logging for easier debugging and maintenance
 
+## Debugging and Issue Resolution
+
+During the implementation of the Auto-Follow-Up feature, we encountered and addressed several challenges:
+
+### Issue 1: Capturing Entire Chat History
+The initial implementation was capturing the entire chat history from Gemini rather than only the latest response to the current prompt. This issue was addressed by:
+- Redesigning the response extraction algorithm to focus on the most recent message
+- Adding selectors that specifically target the latest response elements
+- Implementing backtracking from the end of message collections
+- Adding fallback mechanisms that filter out user messages
+
+### Issue 2: Response Not Being Sent
+After implementing strict validation to ensure we were only capturing responses to the current prompt, we encountered an issue where no responses were being sent from Gemini to ChatGPT. The debugging approach included:
+- Temporarily disabling strict validation rules
+- Adding comprehensive logging throughout the process
+- Reducing the stability requirement from 3 consecutive stable checks to 1
+- Providing detailed state information in logs
+- Bypassing message count checks during debugging
+
+The issue appeared to be that the validation criteria were too strict, preventing valid responses from being accepted. By gradually relaxing these restrictions while maintaining logging, we could identify the right balance between accuracy and reliability.
+
 ## Future Improvements
 
 1. **User Configuration**: Add settings to enable/disable the auto-follow-up feature
 2. **Response Formatting**: Improve the formatting of the follow-up prompt
 3. **Error Handling**: Add more robust error handling for network issues or tab closures
 4. **Visual Feedback**: Add visual indicators in the UI when a follow-up is being prepared
+5. **Reliability Tuning**: Fine-tune the validation rules based on real-world usage data
+6. **Performance Optimization**: Implement more efficient response detection
 
 ## Testing Approach
 
@@ -130,7 +153,10 @@ The feature has been tested with:
 2. Prompts with code blocks and complex formatting
 3. Multiple consecutive prompts in a conversation
 4. Various Gemini response lengths and formats
+5. Different delay and timing scenarios
 
 ## Conclusion
 
 The Auto-Follow-Up feature significantly enhances the user experience by automating the comparison workflow between ChatGPT and Gemini. By capturing only the latest response and presenting it in a follow-up prompt, users can easily compare and contrast the outputs of different LLMs, leading to more informed decisions and better results.
+
+Despite the challenges encountered during implementation, the iterative development and debugging process has resulted in a more robust solution that should work across a wide range of scenarios.
