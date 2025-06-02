@@ -78,11 +78,12 @@ The auto-follow-up feature has been implemented with significant improvements to
 ### Current Issues
 1. ✅ FIXED: The Gemini response capture was getting all the chat history instead of only capturing the latest response.
 
-2. ✅ FIXED: The extension was not waiting for Gemini to complete its answer to the current prompt, instead sending previous responses back to ChatGPT. This has been fixed with:
-   - Implemented proper prompt-response pairing with unique promptIds
-   - Added timestamp tracking to ensure responses correspond to the current prompt
-   - Created a notification system between background script and content script
-   - Enhanced response validation with multiple checks to prevent capturing stale responses
+2. ⚠️ IN PROGRESS: The extension stopped sending any responses from Gemini back to ChatGPT:
+   - Initial fix with strict validation was preventing valid responses from being accepted
+   - Temporarily disabled strict validation and reduced stability requirement from 3 to 1
+   - Added extensive debug logging to diagnose the exact issue
+   - This should allow responses to be sent while we diagnose the underlying cause
+   - Current hypothesis: The strict validation criteria and prompt-response pairing was too restrictive
 
 ### Next Steps
 1. **Final Testing**:
