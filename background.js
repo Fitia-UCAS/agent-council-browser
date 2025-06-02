@@ -21,6 +21,29 @@ function sendMessageToPopup(message) {
     }
 }
 
+// FOLLOW-UP STATE FOR AUTO PROMPT V2
+const defaultFollowUpState = {
+    originalPrompt: null,
+    originalSourceLLM: null, // 'chatgpt' | 'gemini'
+    originalChatGPTTabId: null,
+    geminiResponseContentForFollowUp: null,
+    geminiResponseScraped: false,
+    promptTimestamp: 0, // Track when the prompt was sent
+    promptId: null, // Unique ID for this prompt-response cycle
+    waitingForResponse: false // Flag to track when we're waiting for a response
+};
+let activeFollowUpState = { ...defaultFollowUpState };
+
+function resetFollowUpState() {
+    activeFollowUpState = { ...defaultFollowUpState };
+    console.log('[MLC FollowUp] Follow-up state reset.');
+}
+
+// Generate a unique ID for each prompt-response cycle
+function generatePromptId() {
+    return 'prompt_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
 // Message handling
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[MLC Background] Received message:', message);
@@ -31,8 +54,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ status: 'received', type: message.type });
             break;
         case 'FORWARD_PROMPT':
-            handleForwardPrompt(message);
+            handleForwardPrompt(message, sender);
             sendResponse({ status: 'forward_received', type: message.type });
+            break;
+        case 'GEMINI_RESPONSE_CAPTURED':
+            handleGeminiResponse(message);
+            sendResponse({ status: 'gemini_response_received', type: message.type });
             break;
         case 'CHECK_CONNECTION':
             checkConnectionStatus().then(status => {
@@ -65,7 +92,7 @@ async function handleSendPrompt(message) {
     }
 }
 
-function handleForwardPrompt(message) {
+function handleForwardPrompt(message, sender) {
     const { from, prompt } = message;
     console.log('[MLC Background] Processing FORWARD_PROMPT:', { from, prompt: `"${prompt.substring(0,50)}..."` });
     if (!prompt) {
@@ -76,6 +103,40 @@ function handleForwardPrompt(message) {
     let targetLLM = null;
     if (from === 'chatgpt') {
         targetLLM = 'gemini';
+        // Initialise follow-up state – we only need to trigger when origin is ChatGPT
+        resetFollowUpState();
+
+        // Generate a unique prompt ID and store timestamp
+        const promptId = generatePromptId();
+        const timestamp = Date.now();
+
+        // Set up the follow-up state with more tracking info
+        activeFollowUpState.originalPrompt = prompt;
+        activeFollowUpState.originalSourceLLM = 'chatgpt';
+        activeFollowUpState.originalChatGPTTabId = sender?.tab?.id || null;
+        activeFollowUpState.promptTimestamp = timestamp;
+        activeFollowUpState.promptId = promptId;
+        activeFollowUpState.waitingForResponse = true;
+
+        console.log('[MLC FollowUp] Initialized follow-up tracking:', activeFollowUpState);
+
+        // Send a message to the Gemini tab to notify it of the new prompt
+        chrome.tabs.query({ url: "*://gemini.google.com/*" }, (tabs) => {
+            if (tabs && tabs.length > 0) {
+                const geminiTab = tabs[0];
+                try {
+                    chrome.tabs.sendMessage(geminiTab.id, {
+                        type: 'NEW_PROMPT_SENT',
+                        promptId,
+                        timestamp,
+                        prompt: prompt.substring(0, 100) // Send a snippet for debugging
+                    });
+                    console.log(`[MLC FollowUp] Notified Gemini tab ${geminiTab.id} of new prompt`);
+                } catch (err) {
+                    console.error('[MLC FollowUp] Error notifying Gemini tab:', err);
+                }
+            }
+        });
     } else if (from === 'gemini') {
         targetLLM = 'chatgpt';
     }
@@ -85,6 +146,118 @@ function handleForwardPrompt(message) {
         processLLM(targetLLM, prompt);
     } else {
         console.error('[MLC Background] Unknown "from" field for FORWARD_PROMPT:', from);
+    }
+}
+
+function handleGeminiResponse(message) {
+    if (activeFollowUpState.originalSourceLLM !== 'chatgpt') {
+        console.log('[MLC FollowUp] Gemini response received but no pending ChatGPT-origin interaction. Ignoring.');
+        return;
+    }
+
+    if (!activeFollowUpState.waitingForResponse) {
+        console.log('[MLC FollowUp] Gemini response received but we are not waiting for a response. Ignoring.');
+        return;
+    }
+
+    // Check if enough time has passed since the prompt was sent
+    // This ensures we're capturing a response to our current prompt, not a previous one
+    const timeSincePrompt = Date.now() - activeFollowUpState.promptTimestamp;
+    const minimumDelayMs = 2000; // 2 seconds minimum delay
+
+    if (timeSincePrompt < minimumDelayMs) {
+        console.log(`[MLC FollowUp] Received Gemini response too quickly (${timeSincePrompt}ms). This is likely a previous response. Ignoring.`);
+        return;
+    }
+
+    // Check if the response has a promptId and it matches our current one
+    if (message.promptId && message.promptId !== activeFollowUpState.promptId) {
+        console.log(`[MLC FollowUp] Received response for promptId ${message.promptId} but we're waiting for ${activeFollowUpState.promptId}. Ignoring.`);
+        return;
+    }
+
+    console.log(`[MLC FollowUp] Valid Gemini response received after ${timeSincePrompt}ms from prompt.`);
+    activeFollowUpState.geminiResponseContentForFollowUp = message.content;
+    activeFollowUpState.geminiResponseScraped = true;
+    activeFollowUpState.waitingForResponse = false; // No longer waiting
+
+    console.log('[MLC FollowUp] Stored Gemini response, attempting trigger.');
+    triggerFollowUpIfReady();
+}
+
+function triggerFollowUpIfReady() {
+    if (
+        activeFollowUpState.originalSourceLLM === 'chatgpt' &&
+        activeFollowUpState.geminiResponseScraped &&
+        activeFollowUpState.geminiResponseContentForFollowUp &&
+        activeFollowUpState.originalChatGPTTabId
+    ) {
+        console.log('[MLC FollowUp] Conditions met, injecting follow-up prompt.');
+        const followUpPromptText = `I also asked Gemini the same question here's his answer:\n${activeFollowUpState.geminiResponseContentForFollowUp}\n\nCould you read your answer and his answer to see if you can enhance yours or if everything's good.`;
+        injectFollowUpIntoChatGPT(activeFollowUpState.originalChatGPTTabId, followUpPromptText);
+        resetFollowUpState();
+    } else {
+        console.log('[MLC FollowUp] Not ready for follow-up yet.', activeFollowUpState);
+    }
+}
+
+async function injectFollowUpIntoChatGPT(tabId, promptText) {
+    try {
+        console.log(`[MLC FollowUp] Injecting follow-up into ChatGPT tab ${tabId}.`);
+        const results = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: simpleInteraction_InjectOnly,
+            args: [promptText, 'chatgpt']
+        });
+        if (results && results[0] && results[0].result && results[0].result.success) {
+            console.log('[MLC FollowUp] Follow-up prompt injected successfully.');
+        } else {
+            console.error('[MLC FollowUp] Failed to inject follow-up prompt.', results);
+        }
+    } catch (error) {
+        console.error('[MLC FollowUp] Error during follow-up injection:', error);
+    }
+}
+
+// Inject-only variant: sets text but does NOT send.
+function simpleInteraction_InjectOnly(prompt, llmType) {
+    console.log(`[SimpleInteraction_InjectOnly INJECTED] (${llmType}) attempting to set prompt length ${prompt.length}.`);
+    try {
+        const inputSelectors = {
+            chatgpt: [
+                '#prompt-textarea',
+                'textarea[data-testid="prompt-textarea"]',
+                'textarea[placeholder*="Message"]',
+                'textarea'
+            ]
+        };
+        const selectors = inputSelectors[llmType] || [];
+        let inputEl = null;
+        for (const sel of selectors) {
+            inputEl = document.querySelector(sel);
+            if (inputEl) break;
+        }
+        if (!inputEl) {
+            console.error('[SimpleInteraction_InjectOnly INJECTED] No input element found.');
+            return { success:false, error:'input_not_found' };
+        }
+        inputEl.focus();
+        if (inputEl.tagName === 'TEXTAREA') {
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+            setter ? setter.call(inputEl, prompt) : (inputEl.value = prompt);
+            inputEl.dispatchEvent(new Event('input', { bubbles:true, composed:true }));
+        } else if (inputEl.isContentEditable || inputEl.contentEditable === 'true') {
+            document.execCommand('selectAll', false, null);
+            document.execCommand('insertText', false, prompt);
+            inputEl.dispatchEvent(new Event('input', { bubbles:true, composed:true }));
+        } else {
+            inputEl.value = prompt;
+            inputEl.dispatchEvent(new Event('input', { bubbles:true, composed:true }));
+        }
+        return { success:true };
+    } catch(e) {
+        console.error('[SimpleInteraction_InjectOnly INJECTED] Exception', e);
+        return { success:false, error:e.message };
     }
 }
 

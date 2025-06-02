@@ -292,14 +292,117 @@
             let isCapturing = false;
             let captureComplete = false;
             let lastCaptureTime = 0;
-            
+            let lastMessageCount = 0; // Track message count to detect new responses
+            let pendingPromptTimestamp = 0; // Track when the last prompt was sent
+            let responseCaptureDelayMs = 2000; // Minimum delay after prompt before capturing
+            let currentPromptId = null; // ID of the current prompt we're waiting for
+
+            // Listen for messages from background script about new prompts
+            chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+                if (message.type === 'NEW_PROMPT_SENT') {
+                    console.log(`[MLC GeminiCapture] Received notification of new prompt sent: ${message.promptId}`);
+
+                    // Store the prompt ID and timestamp
+                    currentPromptId = message.promptId;
+                    pendingPromptTimestamp = message.timestamp;
+
+                    // Reset capture state
+                    captureComplete = false;
+                    isCapturing = false;
+                    stableCounter = 0;
+                    lastResponseText = '';
+
+                    // Reset message count after a short delay to allow the prompt to appear in the UI
+                    setTimeout(() => {
+                        lastMessageCount = countMessages();
+                        console.log(`[MLC GeminiCapture] Updated message count to ${lastMessageCount} after prompt notification`);
+                    }, 500);
+
+                    if (sendResponse) sendResponse({ received: true });
+                }
+                return true; // Keep the message channel open for async response
+            });
+
+            // Check message count to detect if a new response has been added
+            function countMessages() {
+                const allMessages = document.querySelectorAll('[data-message-id], .conversation-turn, .message-container');
+                return allMessages.length;
+            }
+
+            // Initialize by counting current messages
+            setTimeout(() => {
+                lastMessageCount = countMessages();
+                console.log(`[MLC GeminiCapture] Initial message count: ${lastMessageCount}`);
+            }, 1000);
+
+            // Listen for our own prompt being sent to Gemini
+            if (findInput() && findSendButton()) {
+                const input = findInput();
+                const sendBtn = findSendButton();
+
+                // Monitor send button clicks to detect when our prompt is sent
+                if (sendBtn) {
+                    sendBtn.addEventListener('click', () => {
+                        pendingPromptTimestamp = Date.now();
+                        console.log(`[MLC GeminiCapture] Prompt sent at ${pendingPromptTimestamp}, waiting for response...`);
+                        // Reset capture state
+                        isCapturing = false;
+                        captureComplete = false;
+                        stableCounter = 0;
+                        lastResponseText = '';
+                    }, true);
+                }
+
+                // Also monitor Enter key in the input field
+                if (input) {
+                    input.addEventListener('keydown', evt => {
+                        if (evt.key === 'Enter' && !evt.shiftKey) {
+                            pendingPromptTimestamp = Date.now();
+                            console.log(`[MLC GeminiCapture] Prompt sent via Enter key at ${pendingPromptTimestamp}, waiting for response...`);
+                            // Reset capture state
+                            isCapturing = false;
+                            captureComplete = false;
+                            stableCounter = 0;
+                            lastResponseText = '';
+                        }
+                    });
+                }
+            }
+
             // Function to check if we can capture now
             function canCapture() {
                 // Don't capture too frequently
                 const now = Date.now();
-                if (now - lastCaptureTime < 5000) {
+
+                // If we haven't seen a prompt sent recently, don't capture
+                if (pendingPromptTimestamp === 0) {
+                    console.log('[MLC GeminiCapture] No pending prompt detected yet');
                     return false;
                 }
+
+                // Don't capture until a minimum delay after the prompt was sent
+                if (now - pendingPromptTimestamp < responseCaptureDelayMs) {
+                    console.log(`[MLC GeminiCapture] Too soon after prompt (${now - pendingPromptTimestamp}ms), waiting...`);
+                    return false;
+                }
+
+                // Check if the message count has increased since our prompt was sent
+                const currentMessageCount = countMessages();
+                if (currentMessageCount <= lastMessageCount) {
+                    console.log(`[MLC GeminiCapture] No new messages detected (${currentMessageCount} ≤ ${lastMessageCount})`);
+                    return false;
+                }
+
+                // Update our tracking of message count
+                lastMessageCount = currentMessageCount;
+
+                // Don't capture if we've captured too recently
+                if (now - lastCaptureTime < 5000) {
+                    console.log('[MLC GeminiCapture] Too soon after last capture');
+                    return false;
+                }
+
+                console.log('[MLC GeminiCapture] Can capture now: prompt sent and new message detected');
                 return true;
             }
             
@@ -489,13 +592,18 @@
                     
                     chrome.runtime.sendMessage({
                         type: 'GEMINI_RESPONSE_CAPTURED',
-                        content: responseText
+                        content: responseText,
+                        promptId: currentPromptId, // Include the prompt ID this response is for
+                        timestamp: Date.now(),
+                        responseDelay: pendingPromptTimestamp ? (Date.now() - pendingPromptTimestamp) : null
                     }, response => {
                         if (chrome.runtime.lastError) {
                             console.error('[MLC GeminiCapture] Error sending message:', chrome.runtime.lastError);
                         } else {
                             console.log('[MLC GeminiCapture] Message sent successfully:', response);
                             captureComplete = true;
+                            // Reset the promptId as we've handled this prompt-response cycle
+                            currentPromptId = null;
                         }
                     });
                     
