@@ -275,4 +275,173 @@
         attachListeners();
     }, 2500); // Slightly increased delay
 
+    if (isGemini) {
+        /* ------------------------------------------------------------------
+           Gemini response capture for Auto Follow-up
+           ------------------------------------------------------------------ */
+        function observeGeminiResponses() {
+            const responseContainerSelectors = [
+                'main > div[role="main"]',
+                '.gemini-chat-responses',
+                'div[data-message-container="responses"]',
+                'div[data-conversation-container]',
+                'main' // fallback
+            ];
+
+            const stopGeneratingSelectors = [
+                'button[aria-label*="Stop generating"]',
+                'button[aria-label*="Stop respond"]',
+                'button:has(svg[aria-label*="Stop"])',
+                'button.stop-generating-button',
+                'div[data-generating="true"]',
+                'div[data-generating-indicator]'
+            ];
+
+            const responseTextSelectors = [
+                'div.response-container div.markdown',
+                'div[data-message-index][data-message-author="gemini"]',
+                'div.markdown-content',
+                'div.gemini-response-text',
+                'div.message[data-author="assistant"]',
+                'div.message-content div.markdown',
+                'div.response-text-container',
+                'div.markdown',
+                'div[data-message-index]'
+            ];
+
+            let lastSentHash = null;
+            let detectionAttempts = 0;
+            let lastResponseLength = 0;
+            let stableResponseCounter = 0;
+
+            function computeHash(text) {
+                return text ? text.slice(0, 200) : '';
+            }
+
+            function findElement(selectors) {
+                for (const selector of selectors) {
+                    const element = document.querySelector(selector);
+                    if (element) {
+                        console.log(`[MLC GeminiCapture] Found element with selector: ${selector}`);
+                        return element;
+                    }
+                }
+                return null;
+            }
+
+            function isResponseComplete() {
+                // No stop generating button visible
+                const isGenerating = document.querySelector(stopGeneratingSelectors.join(', '));
+                if (isGenerating) {
+                    console.log('[MLC GeminiCapture] Still generating - stop button found');
+                    return false;
+                }
+
+                // Input field is enabled
+                const inputField = document.querySelector('div.ql-editor[role="textbox"]');
+                const inputDisabled = inputField && (inputField.getAttribute('aria-disabled') === 'true');
+                if (inputDisabled) {
+                    console.log('[MLC GeminiCapture] Still generating - input field disabled');
+                    return false;
+                }
+
+                // Check for completion indicators (regenerate buttons often appear when complete)
+                const regenerateButton = document.querySelector('button[aria-label*="Regenerate"], button[aria-label*="Modify"], button[aria-label*="New chat"]');
+                if (regenerateButton) {
+                    console.log('[MLC GeminiCapture] Response likely complete - regenerate button found');
+                }
+
+                // Check for loading indicators
+                const loadingIndicator = document.querySelector('.loading-indicator, .generating-indicator, div[data-generating="true"]');
+                if (loadingIndicator) {
+                    console.log('[MLC GeminiCapture] Still generating - loading indicator found');
+                    return false;
+                }
+
+                return true;
+            }
+
+            function extractResponseText() {
+                const container = findElement(responseContainerSelectors);
+                if (!container) {
+                    console.log('[MLC GeminiCapture] No response container found');
+                    return '';
+                }
+
+                const chunks = [];
+
+                // Try each selector individually
+                responseTextSelectors.forEach(selector => {
+                    const elements = container.querySelectorAll(selector);
+                    if (elements.length > 0) {
+                        console.log(`[MLC GeminiCapture] Found ${elements.length} elements with selector: ${selector}`);
+                    }
+
+                    elements.forEach(el => {
+                        const text = el.innerText || el.textContent;
+                        if (text && text.trim()) chunks.push(text.trim());
+                    });
+                });
+
+                return chunks.join('\n\n').trim();
+            }
+
+            const observer = new MutationObserver(() => {
+                try {
+                    // If we've detected stability for some time, don't keep checking too frequently
+                    if (detectionAttempts > 20) return;
+
+                    detectionAttempts++;
+
+                    const fullText = extractResponseText();
+                    if (!fullText) return;
+
+                    const currentLength = fullText.length;
+                    console.log(`[MLC GeminiCapture] Response length: ${currentLength}, previous: ${lastResponseLength}, stable count: ${stableResponseCounter}`);
+
+                    // If text length hasn't changed for 3 consecutive checks
+                    // and we don't see a "generating" indicator, consider it complete
+                    if (currentLength === lastResponseLength) {
+                        stableResponseCounter++;
+                    } else {
+                        stableResponseCounter = 0;
+                        lastResponseLength = currentLength;
+                    }
+
+                    // Consider complete if text is stable for 3 checks OR explicit completion detected
+                    const isComplete = (stableResponseCounter >= 3) || isResponseComplete();
+
+                    if (isComplete) {
+                        console.log('[MLC GeminiCapture] Response appears complete, checking for changes...');
+                        const currentHash = computeHash(fullText);
+                        if (currentHash && currentHash !== lastSentHash) {
+                            lastSentHash = currentHash;
+                            console.log('[MLC GeminiCapture] Final response detected. Length:', fullText.length);
+                            chrome.runtime.sendMessage({
+                                type: 'GEMINI_RESPONSE_CAPTURED',
+                                content: fullText
+                            });
+                            detectionAttempts = 30; // Stop checking for a while
+                            setTimeout(() => { detectionAttempts = 0; }, 2000); // Reset after 2 seconds
+                        }
+                    }
+                } catch (err) {
+                    console.error('[MLC GeminiCapture] Observer error', err);
+                }
+            });
+
+            const target = document.body;
+            observer.observe(target, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                characterData: true
+            });
+            console.log('[MLC GeminiCapture] Enhanced MutationObserver started.');
+        }
+
+        // Delay to let the page stabilize
+        setTimeout(observeGeminiResponses, 3000);
+    }
+
 })();
