@@ -39,8 +39,12 @@ Implement an automatic follow-up feature where when a user sends a prompt from C
 - [ ] Consider adding user-configurable options (enable/disable feature)
 
 ## Current Status
-The auto-follow-up feature has been fully implemented and enhanced with significant improvements to solve the Gemini response detection issue. Key improvements include:
+The auto-follow-up feature has been implemented with significant improvements to the Gemini response detection system, but there's still an issue to address.
 
+### Known Issue
+Currently, the Gemini response capture is getting all the chat history instead of only capturing the latest response to the specific prompt. This needs to be fixed so that only the most recent response from Gemini is sent to ChatGPT for the follow-up prompt.
+
+### Improvements Made
 1. **Background.js**:
    - State tracking for auto-follow-up requests
    - Message handling for Gemini responses
@@ -48,12 +52,12 @@ The auto-follow-up feature has been fully implemented and enhanced with signific
    - Text-only injection function for ChatGPT
 
 2. **ContentScript.js (Gemini)**:
-   - **FIXED: Completely redesigned response detection system**
+   - Redesigned response detection system with multiple strategies
    - Multi-strategy approach to extract response text:
      - Strategy 1: Direct targeting of message elements by data attributes
      - Strategy 2: Markdown content elements that typically contain responses
      - Strategy 3: Fallback to DOM structure analysis for potential response containers
-     - Last resort: Main element text filtering
+     - Strategy 4: Main element text filtering as a last resort
    - Simplified response completion detection (stop button, input field state)
    - Added both observer-based and interval-based checking for higher reliability
    - Better stability detection with clear logging
@@ -66,10 +70,15 @@ The auto-follow-up feature has been fully implemented and enhanced with signific
    - Usage instructions added
 
 ### Next Steps
-The feature is ready for testing with the new Gemini response detection system. Key test scenarios include:
-1. Basic prompts from ChatGPT to Gemini and back
-2. Prompts with code blocks or complex formatting
-3. Multiple consecutive prompts
-4. Different network conditions and response times
+1. **Immediate Fix Required**:
+   - Update `getResponseText()` function to only extract the latest/most recent response from Gemini, not the entire chat history
+   - Add more targeted selectors to distinguish between old and new responses
+   - Implement better context tracking to identify which response corresponds to the current prompt
 
-After successful testing, this branch can be merged into the main branch.
+2. **Testing After Fix**:
+   - Basic prompts from ChatGPT to Gemini and back
+   - Prompts with code blocks or complex formatting
+   - Multiple consecutive prompts in a conversation (to verify only latest response is captured)
+   - Different network conditions and response times
+
+Once the latest-response-only issue is fixed, the branch can be merged into the main branch.
