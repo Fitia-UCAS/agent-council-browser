@@ -322,94 +322,133 @@
                 return true;
             }
             
-            // Function to extract response text using multiple strategies
+            // Function to extract response text using multiple strategies - ONLY the latest response
             function getResponseText() {
-                console.log('[MLC GeminiCapture] Attempting to extract response text...');
-                
-                // Strategy 1: Look for message elements
-                const messages = document.querySelectorAll('[data-message-id], [data-message-author="gemini"], [data-testid="gemini-response"]');
+                console.log('[MLC GeminiCapture] Attempting to extract LATEST response text only...');
+
+                // Strategy 1: Look for message elements with specific focus on the last/latest response
+                const messages = document.querySelectorAll('[data-message-id], [data-message-author="gemini"], [data-testid="gemini-response"], div[role="region"][aria-label*="response"], .conversation-turn:not(.user)');
                 if (messages.length > 0) {
                     console.log(`[MLC GeminiCapture] Found ${messages.length} message elements`);
-                    // Get the last message which is likely from Gemini
-                    for (let i = messages.length - 1; i >= 0; i--) {
-                        const message = messages[i];
-                        // Check if this appears to be a Gemini response
-                        if (!message.classList.contains('user-message') && 
-                            !message.hasAttribute('data-author-is-user')) {
-                            
-                            const text = message.innerText || message.textContent;
+                    // Get the last message which is the latest Gemini response
+                    const lastMessage = messages[messages.length - 1];
+
+                    // Check if this appears to be a Gemini response (not user message)
+                    if (!lastMessage.classList.contains('user-message') &&
+                        !lastMessage.hasAttribute('data-author-is-user')) {
+
+                        // First, try to find markdown content within this message specifically
+                        const markdownInMessage = lastMessage.querySelector('.markdown, .markdown-content, div[data-testid="markdown-content"]');
+                        if (markdownInMessage) {
+                            const markdownText = markdownInMessage.innerText || markdownInMessage.textContent;
+                            if (markdownText && markdownText.trim()) {
+                                console.log('[MLC GeminiCapture] Found latest message with markdown content');
+                                return markdownText.trim();
+                            }
+                        }
+
+                        // If no specific markdown container, use the whole message text
+                        const text = lastMessage.innerText || lastMessage.textContent;
+                        if (text && text.trim()) {
+                            console.log('[MLC GeminiCapture] Found latest message text with strategy 1');
+                            return text.trim();
+                        }
+                    }
+                }
+
+                // Strategy 2: Look for the last markdown content element (likely the latest response)
+                const markdownElements = document.querySelectorAll('.markdown, .markdown-content, div[data-testid="markdown-content"]');
+                if (markdownElements.length > 0) {
+                    console.log(`[MLC GeminiCapture] Found ${markdownElements.length} markdown elements, focusing on last one`);
+
+                    // Get only the last markdown element
+                    const lastMarkdown = markdownElements[markdownElements.length - 1];
+
+                    // Filter out user messages
+                    const isUserMessage = lastMarkdown.closest('[data-author-is-user="true"], .user-message, .user-query');
+                    if (!isUserMessage) {
+                        const text = lastMarkdown.innerText || lastMarkdown.textContent;
+                        if (text && text.trim()) {
+                            console.log('[MLC GeminiCapture] Found latest message text with strategy 2');
+                            return text.trim();
+                        }
+                    }
+                }
+
+                // Strategy 3: Look for conversation turns (message blocks) and get the last Gemini one
+                const conversationTurns = document.querySelectorAll('.conversation-turn, .message-container, [data-message-container]');
+                if (conversationTurns.length > 0) {
+                    // Start from the end to find the last Gemini response
+                    for (let i = conversationTurns.length - 1; i >= 0; i--) {
+                        const turn = conversationTurns[i];
+
+                        // Skip if it's a user message
+                        if (turn.classList.contains('user-message') ||
+                            turn.classList.contains('user-query') ||
+                            turn.hasAttribute('data-author-is-user') ||
+                            turn.querySelector('.user-message, .user-query')) {
+                            continue;
+                        }
+
+                        // This is likely a Gemini response - get its text
+                        const text = turn.innerText || turn.textContent;
+                        if (text && text.trim()) {
+                            console.log('[MLC GeminiCapture] Found latest message text with strategy 3');
+                            return text.trim();
+                        }
+                    }
+                }
+
+                // Strategy 4: Find visual indicators of the latest response
+                // Gemini often has a clear visual break between messages
+                const responseIndicators = document.querySelectorAll('.response-block:last-child, .gemini-response:last-child, .model-response:last-child');
+                if (responseIndicators.length > 0) {
+                    const lastIndicator = responseIndicators[responseIndicators.length - 1];
+                    const text = lastIndicator.innerText || lastIndicator.textContent;
+                    if (text && text.trim()) {
+                        console.log('[MLC GeminiCapture] Found latest message text with strategy 4');
+                        return text.trim();
+                    }
+                }
+
+                // Last resort - Look at the timestamp/date elements to identify the latest response
+                const timeElements = document.querySelectorAll('time, [data-timestamp], .message-timestamp');
+                if (timeElements.length > 0) {
+                    let latestTime = 0;
+                    let latestResponseElement = null;
+
+                    for (let i = 0; i < timeElements.length; i++) {
+                        const timeEl = timeElements[i];
+                        // Try to get a timestamp from the element
+                        const timestamp = timeEl.getAttribute('datetime') ||
+                                          timeEl.getAttribute('data-timestamp') ||
+                                          timeEl.textContent;
+
+                        if (timestamp) {
+                            const time = new Date(timestamp).getTime();
+                            if (time > latestTime) {
+                                latestTime = time;
+                                // Get the parent message container
+                                latestResponseElement = timeEl.closest('.message, .response, [data-message-id]');
+                            }
+                        }
+                    }
+
+                    if (latestResponseElement) {
+                        // Verify it's not a user message
+                        if (!latestResponseElement.classList.contains('user-message') &&
+                            !latestResponseElement.hasAttribute('data-author-is-user')) {
+
+                            const text = latestResponseElement.innerText || latestResponseElement.textContent;
                             if (text && text.trim()) {
-                                console.log('[MLC GeminiCapture] Found message text with strategy 1');
+                                console.log('[MLC GeminiCapture] Found latest message text with last resort timestamp strategy');
                                 return text.trim();
                             }
                         }
                     }
                 }
-                
-                // Strategy 2: Look for markdown content
-                const markdownElements = document.querySelectorAll('.markdown, .markdown-content, div[data-testid="markdown-content"]');
-                if (markdownElements.length > 0) {
-                    console.log(`[MLC GeminiCapture] Found ${markdownElements.length} markdown elements`);
-                    // Concatenate all markdown elements (some may be part of the same response)
-                    const texts = [];
-                    markdownElements.forEach(element => {
-                        // Filter out user messages if possible
-                        const isUserMessage = element.closest('[data-author-is-user="true"], .user-message');
-                        if (!isUserMessage) {
-                            const text = element.innerText || element.textContent;
-                            if (text && text.trim()) texts.push(text.trim());
-                        }
-                    });
-                    
-                    if (texts.length > 0) {
-                        console.log('[MLC GeminiCapture] Found message text with strategy 2');
-                        return texts.join('\n\n');
-                    }
-                }
-                
-                // Strategy 3: Simple selection of any elements that might contain the response
-                // This is a fallback for when the DOM structure changes
-                const potentialElements = document.querySelectorAll('main div[role="presentation"] > div > div > div');
-                if (potentialElements.length > 0) {
-                    console.log(`[MLC GeminiCapture] Found ${potentialElements.length} potential elements`);
-                    
-                    // Examine elements to find ones that might contain response text
-                    for (let i = 0; i < potentialElements.length; i++) {
-                        const element = potentialElements[i];
-                        // Skip elements that are too small
-                        if (element.offsetHeight < 30) continue;
-                        
-                        // Skip elements that have input fields (likely user input area)
-                        if (element.querySelector('textarea, div[role="textbox"]')) continue;
-                        
-                        const text = element.innerText || element.textContent;
-                        if (text && text.trim() && text.length > 20) {
-                            console.log('[MLC GeminiCapture] Found message text with strategy 3');
-                            return text.trim();
-                        }
-                    }
-                }
-                
-                // Last resort - try to get any text from the main element
-                const mainElement = document.querySelector('main');
-                if (mainElement) {
-                    const userInputArea = document.querySelector('div.ql-editor[role="textbox"]')?.closest('div[role="presentation"]');
-                    if (userInputArea) {
-                        // Remove the user input area from consideration
-                        const mainText = Array.from(mainElement.childNodes)
-                            .filter(node => node !== userInputArea)
-                            .map(node => node.innerText || node.textContent)
-                            .filter(Boolean)
-                            .join('\n\n');
-                            
-                        if (mainText && mainText.trim()) {
-                            console.log('[MLC GeminiCapture] Found message text with last resort strategy');
-                            return mainText.trim();
-                        }
-                    }
-                }
-                
-                console.log('[MLC GeminiCapture] No response text found');
+
+                console.log('[MLC GeminiCapture] No latest response text found');
                 return '';
             }
             
