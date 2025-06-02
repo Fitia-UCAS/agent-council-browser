@@ -125,7 +125,7 @@ function handleForwardPrompt(message, sender) {
             if (tabs && tabs.length > 0) {
                 const geminiTab = tabs[0];
                 try {
-                    chrome.tabs.sendMessage(geminiTab.id, {
+                    chrome.tabs.sendMessage(geminiTab.id, { 
                         type: 'NEW_PROMPT_SENT',
                         promptId,
                         timestamp,
@@ -150,37 +150,28 @@ function handleForwardPrompt(message, sender) {
 }
 
 function handleGeminiResponse(message) {
-    if (activeFollowUpState.originalSourceLLM !== 'chatgpt') {
-        console.log('[MLC FollowUp] Gemini response received but no pending ChatGPT-origin interaction. Ignoring.');
+    console.log('[MLC FollowUp] Gemini response received:', {
+        content: message.content ? message.content.substring(0, 50) + '...' : 'None',
+        promptId: message.promptId,
+        responseDelay: message.responseDelay,
+        waitingState: activeFollowUpState.waitingForResponse,
+        currentPromptId: activeFollowUpState.promptId
+    });
+    
+    // TEMPORARILY DISABLE STRICT VALIDATION
+    // Our validation may be too strict and blocking valid responses
+    
+    // Check if the response has content
+    if (!message.content || message.content.trim().length === 0) {
+        console.log('[MLC FollowUp] Received empty Gemini response, ignoring.');
         return;
     }
-
-    if (!activeFollowUpState.waitingForResponse) {
-        console.log('[MLC FollowUp] Gemini response received but we are not waiting for a response. Ignoring.');
-        return;
-    }
-
-    // Check if enough time has passed since the prompt was sent
-    // This ensures we're capturing a response to our current prompt, not a previous one
-    const timeSincePrompt = Date.now() - activeFollowUpState.promptTimestamp;
-    const minimumDelayMs = 2000; // 2 seconds minimum delay
-
-    if (timeSincePrompt < minimumDelayMs) {
-        console.log(`[MLC FollowUp] Received Gemini response too quickly (${timeSincePrompt}ms). This is likely a previous response. Ignoring.`);
-        return;
-    }
-
-    // Check if the response has a promptId and it matches our current one
-    if (message.promptId && message.promptId !== activeFollowUpState.promptId) {
-        console.log(`[MLC FollowUp] Received response for promptId ${message.promptId} but we're waiting for ${activeFollowUpState.promptId}. Ignoring.`);
-        return;
-    }
-
-    console.log(`[MLC FollowUp] Valid Gemini response received after ${timeSincePrompt}ms from prompt.`);
+    
+    console.log(`[MLC FollowUp] Valid Gemini response received, accepting for follow-up.`);
     activeFollowUpState.geminiResponseContentForFollowUp = message.content;
     activeFollowUpState.geminiResponseScraped = true;
-    activeFollowUpState.waitingForResponse = false; // No longer waiting
-
+    activeFollowUpState.waitingForResponse = false;
+    
     console.log('[MLC FollowUp] Stored Gemini response, attempting trigger.');
     triggerFollowUpIfReady();
 }

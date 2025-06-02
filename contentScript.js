@@ -557,25 +557,48 @@
             
             // Function to capture and send response
             function captureAndSendResponse() {
-                if (captureComplete || !canCapture()) return;
-                
+                // Debug logging to help understand the state
+                console.log('[MLC GeminiCapture] captureAndSendResponse() called with state:', {
+                    captureComplete,
+                    pendingPromptTimestamp,
+                    currentPromptId,
+                    isCapturing,
+                    stableCounter,
+                    lastMessageCount,
+                    lastResponseLength: lastResponseText ? lastResponseText.length : 0
+                });
+
+                // For debugging, send response regardless of canCapture() result
+                // This helps us identify what's causing the issue
+                const canCaptureResult = canCapture();
+                if (captureComplete) {
+                    console.log('[MLC GeminiCapture] Already completed capture for this prompt');
+                    return;
+                }
+
+                // TEMPORARY FIX - Always allow capture for debugging
+                // if (!canCaptureResult) return;
+
                 // Check if response appears complete
-                if (!isResponseComplete()) {
+                const isComplete = isResponseComplete();
+                console.log('[MLC GeminiCapture] isResponseComplete() =', isComplete);
+
+                if (!isComplete) {
                     console.log('[MLC GeminiCapture] Response not complete yet');
                     isCapturing = true;
                     return;
                 }
-                
+
                 // Get the response text
                 const responseText = getResponseText();
                 console.log(`[MLC GeminiCapture] Got response text, length: ${responseText.length}`);
-                
+
                 // Empty response, nothing to send
                 if (!responseText) {
                     console.log('[MLC GeminiCapture] Empty response text, not sending');
                     return;
                 }
-                
+
                 // Check if response text is stable (hasn't changed in a few checks)
                 if (responseText === lastResponseText) {
                     stableCounter++;
@@ -585,11 +608,15 @@
                     lastResponseText = responseText;
                     console.log('[MLC GeminiCapture] Response text changed, resetting stability counter');
                 }
-                
+
                 // If response is stable for 3 checks or more, consider it complete and send it
-                if (stableCounter >= 3) {
+                // TEMPORARY CHANGE: Reduce from 3 to 1 for quicker testing
+                if (stableCounter >= 1) {
                     console.log('[MLC GeminiCapture] Response appears stable, sending to background');
-                    
+
+                    // Log the actual content we're sending (beginning)
+                    console.log('[MLC GeminiCapture] Response content preview:', responseText.substring(0, 200));
+
                     chrome.runtime.sendMessage({
                         type: 'GEMINI_RESPONSE_CAPTURED',
                         content: responseText,
