@@ -83,16 +83,31 @@ This document explains the implementation of the Auto-Follow-Up feature, which e
 - Targeted selection of :last-child elements in response containers
 - Using timestamp information when available to identify the most recent response
 
-### 3. Cross-Tab Communication
+### 3. Ensuring Responses Match Current Prompt
+
+**Challenge**: The extension was capturing and forwarding previous responses instead of waiting for the new response to the current prompt.
+
+**Solution**: Implemented a robust prompt-response pairing system:
+- Created a unique ID (promptId) for each prompt-response cycle
+- Added timestamp tracking to measure response timing and detect stale responses
+- Implemented direct messaging between background and content scripts to notify when a new prompt is sent
+- Enhanced validation with multiple checks before accepting a response:
+  - Verifying enough time has passed since the prompt was sent
+  - Checking that message count has increased since the prompt was sent
+  - Including promptId with the response to ensure correct pairing
+  - Tracking waitingForResponse state to prevent capturing unrelated responses
+
+### 4. Cross-Tab Communication
 
 **Challenge**: Coordinating actions between ChatGPT and Gemini tabs requires robust message passing.
 
 **Solution**:
-- Enhanced message types (`FORWARD_PROMPT`, `GEMINI_RESPONSE_CAPTURED`)
+- Enhanced message types (`FORWARD_PROMPT`, `GEMINI_RESPONSE_CAPTURED`, `NEW_PROMPT_SENT`)
 - State tracking in the background script to maintain context between messages
 - Tab ID tracking to ensure actions target the correct tabs
+- Bidirectional communication to synchronize prompt-response state
 
-### 4. DOM Structure Resilience
+### 5. DOM Structure Resilience
 
 **Challenge**: LLM websites can change their DOM structure, breaking selectors.
 

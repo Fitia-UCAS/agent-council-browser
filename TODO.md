@@ -41,8 +41,14 @@ Implement an automatic follow-up feature where when a user sends a prompt from C
 ## Current Status
 The auto-follow-up feature has been implemented with significant improvements to the Gemini response detection system, but there's still an issue to address.
 
-### Known Issue
-Currently, the Gemini response capture is getting all the chat history instead of only capturing the latest response to the specific prompt. This needs to be fixed so that only the most recent response from Gemini is sent to ChatGPT for the follow-up prompt.
+### Known Issues
+1. ✅ FIXED: The Gemini response capture was getting all the chat history instead of only capturing the latest response.
+
+2. CURRENT ISSUE: The extension is not waiting for Gemini to complete its answer to the current prompt. Instead, it's immediately sending the previous response back to ChatGPT:
+   - In the first interaction, there's no previous response, so nothing is sent back
+   - In the second interaction, it immediately sends the first response
+   - This is happening because the response detection isn't properly linked to the current prompt
+   - We need to implement a mechanism to ensure we only capture responses that are generated after our prompt is sent
 
 ### Improvements Made
 1. **Background.js**:
@@ -69,11 +75,20 @@ Currently, the Gemini response capture is getting all the chat history instead o
    - Data flow documented for clarity
    - Usage instructions added
 
+### Current Issues
+1. ✅ FIXED: The Gemini response capture was getting all the chat history instead of only capturing the latest response.
+
+2. ✅ FIXED: The extension was not waiting for Gemini to complete its answer to the current prompt, instead sending previous responses back to ChatGPT. This has been fixed with:
+   - Implemented proper prompt-response pairing with unique promptIds
+   - Added timestamp tracking to ensure responses correspond to the current prompt
+   - Created a notification system between background script and content script
+   - Enhanced response validation with multiple checks to prevent capturing stale responses
+
 ### Next Steps
-1. **Immediate Fix Required**:
-   - Update `getResponseText()` function to only extract the latest/most recent response from Gemini, not the entire chat history
-   - Add more targeted selectors to distinguish between old and new responses
-   - Implement better context tracking to identify which response corresponds to the current prompt
+1. **Final Testing**:
+   - Test the complete prompt-response-follow-up flow with the new tracking system
+   - Verify that responses are correctly associated with their prompts
+   - Test multiple consecutive interactions to ensure proper prompt-response pairing
 
 2. **Testing After Fix**:
    - Basic prompts from ChatGPT to Gemini and back
