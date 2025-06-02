@@ -280,164 +280,235 @@
            Gemini response capture for Auto Follow-up
            ------------------------------------------------------------------ */
         function observeGeminiResponses() {
-            const responseContainerSelectors = [
-                'main > div[role="main"]',
-                '.gemini-chat-responses',
-                'div[data-message-container="responses"]',
-                'div[data-conversation-container]',
-                'main' // fallback
-            ];
-
-            const stopGeneratingSelectors = [
-                'button[aria-label*="Stop generating"]',
-                'button[aria-label*="Stop respond"]',
-                'button:has(svg[aria-label*="Stop"])',
-                'button.stop-generating-button',
-                'div[data-generating="true"]',
-                'div[data-generating-indicator]'
-            ];
-
-            const responseTextSelectors = [
-                'div.response-container div.markdown',
-                'div[data-message-index][data-message-author="gemini"]',
-                'div.markdown-content',
-                'div.gemini-response-text',
-                'div.message[data-author="assistant"]',
-                'div.message-content div.markdown',
-                'div.response-text-container',
-                'div.markdown',
-                'div[data-message-index]'
-            ];
-
-            let lastSentHash = null;
-            let detectionAttempts = 0;
-            let lastResponseLength = 0;
-            let stableResponseCounter = 0;
-
-            function computeHash(text) {
-                return text ? text.slice(0, 200) : '';
-            }
-
-            function findElement(selectors) {
-                for (const selector of selectors) {
-                    const element = document.querySelector(selector);
-                    if (element) {
-                        console.log(`[MLC GeminiCapture] Found element with selector: ${selector}`);
-                        return element;
-                    }
+            console.log('[MLC GeminiCapture] Starting Gemini response capture...');
+            
+            // Simple approach: Target the most stable selector combinations
+            // Based on recent Gemini UI structure
+            const stopGeneratingSelector = 'button[aria-label*="Stop generating"], button[aria-label*="Stop respond"]';
+            
+            // Track response state
+            let lastResponseText = '';
+            let stableCounter = 0;
+            let isCapturing = false;
+            let captureComplete = false;
+            let lastCaptureTime = 0;
+            
+            // Function to check if we can capture now
+            function canCapture() {
+                // Don't capture too frequently
+                const now = Date.now();
+                if (now - lastCaptureTime < 5000) {
+                    return false;
                 }
-                return null;
+                return true;
             }
-
+            
+            // Function to check if response is complete
             function isResponseComplete() {
-                // No stop generating button visible
-                const isGenerating = document.querySelector(stopGeneratingSelectors.join(', '));
-                if (isGenerating) {
+                // Check for stop generation button (absent when complete)
+                const stopButton = document.querySelector(stopGeneratingSelector);
+                if (stopButton) {
                     console.log('[MLC GeminiCapture] Still generating - stop button found');
                     return false;
                 }
-
-                // Input field is enabled
+                
+                // Check if input is active
                 const inputField = document.querySelector('div.ql-editor[role="textbox"]');
-                const inputDisabled = inputField && (inputField.getAttribute('aria-disabled') === 'true');
-                if (inputDisabled) {
+                if (inputField && inputField.getAttribute('aria-disabled') === 'true') {
                     console.log('[MLC GeminiCapture] Still generating - input field disabled');
                     return false;
                 }
-
-                // Check for completion indicators (regenerate buttons often appear when complete)
-                const regenerateButton = document.querySelector('button[aria-label*="Regenerate"], button[aria-label*="Modify"], button[aria-label*="New chat"]');
-                if (regenerateButton) {
-                    console.log('[MLC GeminiCapture] Response likely complete - regenerate button found');
-                }
-
-                // Check for loading indicators
-                const loadingIndicator = document.querySelector('.loading-indicator, .generating-indicator, div[data-generating="true"]');
-                if (loadingIndicator) {
-                    console.log('[MLC GeminiCapture] Still generating - loading indicator found');
-                    return false;
-                }
-
+                
                 return true;
             }
-
-            function extractResponseText() {
-                const container = findElement(responseContainerSelectors);
-                if (!container) {
-                    console.log('[MLC GeminiCapture] No response container found');
-                    return '';
-                }
-
-                const chunks = [];
-
-                // Try each selector individually
-                responseTextSelectors.forEach(selector => {
-                    const elements = container.querySelectorAll(selector);
-                    if (elements.length > 0) {
-                        console.log(`[MLC GeminiCapture] Found ${elements.length} elements with selector: ${selector}`);
-                    }
-
-                    elements.forEach(el => {
-                        const text = el.innerText || el.textContent;
-                        if (text && text.trim()) chunks.push(text.trim());
-                    });
-                });
-
-                return chunks.join('\n\n').trim();
-            }
-
-            const observer = new MutationObserver(() => {
-                try {
-                    // If we've detected stability for some time, don't keep checking too frequently
-                    if (detectionAttempts > 20) return;
-
-                    detectionAttempts++;
-
-                    const fullText = extractResponseText();
-                    if (!fullText) return;
-
-                    const currentLength = fullText.length;
-                    console.log(`[MLC GeminiCapture] Response length: ${currentLength}, previous: ${lastResponseLength}, stable count: ${stableResponseCounter}`);
-
-                    // If text length hasn't changed for 3 consecutive checks
-                    // and we don't see a "generating" indicator, consider it complete
-                    if (currentLength === lastResponseLength) {
-                        stableResponseCounter++;
-                    } else {
-                        stableResponseCounter = 0;
-                        lastResponseLength = currentLength;
-                    }
-
-                    // Consider complete if text is stable for 3 checks OR explicit completion detected
-                    const isComplete = (stableResponseCounter >= 3) || isResponseComplete();
-
-                    if (isComplete) {
-                        console.log('[MLC GeminiCapture] Response appears complete, checking for changes...');
-                        const currentHash = computeHash(fullText);
-                        if (currentHash && currentHash !== lastSentHash) {
-                            lastSentHash = currentHash;
-                            console.log('[MLC GeminiCapture] Final response detected. Length:', fullText.length);
-                            chrome.runtime.sendMessage({
-                                type: 'GEMINI_RESPONSE_CAPTURED',
-                                content: fullText
-                            });
-                            detectionAttempts = 30; // Stop checking for a while
-                            setTimeout(() => { detectionAttempts = 0; }, 2000); // Reset after 2 seconds
+            
+            // Function to extract response text using multiple strategies
+            function getResponseText() {
+                console.log('[MLC GeminiCapture] Attempting to extract response text...');
+                
+                // Strategy 1: Look for message elements
+                const messages = document.querySelectorAll('[data-message-id], [data-message-author="gemini"], [data-testid="gemini-response"]');
+                if (messages.length > 0) {
+                    console.log(`[MLC GeminiCapture] Found ${messages.length} message elements`);
+                    // Get the last message which is likely from Gemini
+                    for (let i = messages.length - 1; i >= 0; i--) {
+                        const message = messages[i];
+                        // Check if this appears to be a Gemini response
+                        if (!message.classList.contains('user-message') && 
+                            !message.hasAttribute('data-author-is-user')) {
+                            
+                            const text = message.innerText || message.textContent;
+                            if (text && text.trim()) {
+                                console.log('[MLC GeminiCapture] Found message text with strategy 1');
+                                return text.trim();
+                            }
                         }
                     }
+                }
+                
+                // Strategy 2: Look for markdown content
+                const markdownElements = document.querySelectorAll('.markdown, .markdown-content, div[data-testid="markdown-content"]');
+                if (markdownElements.length > 0) {
+                    console.log(`[MLC GeminiCapture] Found ${markdownElements.length} markdown elements`);
+                    // Concatenate all markdown elements (some may be part of the same response)
+                    const texts = [];
+                    markdownElements.forEach(element => {
+                        // Filter out user messages if possible
+                        const isUserMessage = element.closest('[data-author-is-user="true"], .user-message');
+                        if (!isUserMessage) {
+                            const text = element.innerText || element.textContent;
+                            if (text && text.trim()) texts.push(text.trim());
+                        }
+                    });
+                    
+                    if (texts.length > 0) {
+                        console.log('[MLC GeminiCapture] Found message text with strategy 2');
+                        return texts.join('\n\n');
+                    }
+                }
+                
+                // Strategy 3: Simple selection of any elements that might contain the response
+                // This is a fallback for when the DOM structure changes
+                const potentialElements = document.querySelectorAll('main div[role="presentation"] > div > div > div');
+                if (potentialElements.length > 0) {
+                    console.log(`[MLC GeminiCapture] Found ${potentialElements.length} potential elements`);
+                    
+                    // Examine elements to find ones that might contain response text
+                    for (let i = 0; i < potentialElements.length; i++) {
+                        const element = potentialElements[i];
+                        // Skip elements that are too small
+                        if (element.offsetHeight < 30) continue;
+                        
+                        // Skip elements that have input fields (likely user input area)
+                        if (element.querySelector('textarea, div[role="textbox"]')) continue;
+                        
+                        const text = element.innerText || element.textContent;
+                        if (text && text.trim() && text.length > 20) {
+                            console.log('[MLC GeminiCapture] Found message text with strategy 3');
+                            return text.trim();
+                        }
+                    }
+                }
+                
+                // Last resort - try to get any text from the main element
+                const mainElement = document.querySelector('main');
+                if (mainElement) {
+                    const userInputArea = document.querySelector('div.ql-editor[role="textbox"]')?.closest('div[role="presentation"]');
+                    if (userInputArea) {
+                        // Remove the user input area from consideration
+                        const mainText = Array.from(mainElement.childNodes)
+                            .filter(node => node !== userInputArea)
+                            .map(node => node.innerText || node.textContent)
+                            .filter(Boolean)
+                            .join('\n\n');
+                            
+                        if (mainText && mainText.trim()) {
+                            console.log('[MLC GeminiCapture] Found message text with last resort strategy');
+                            return mainText.trim();
+                        }
+                    }
+                }
+                
+                console.log('[MLC GeminiCapture] No response text found');
+                return '';
+            }
+            
+            // Function to capture and send response
+            function captureAndSendResponse() {
+                if (captureComplete || !canCapture()) return;
+                
+                // Check if response appears complete
+                if (!isResponseComplete()) {
+                    console.log('[MLC GeminiCapture] Response not complete yet');
+                    isCapturing = true;
+                    return;
+                }
+                
+                // Get the response text
+                const responseText = getResponseText();
+                console.log(`[MLC GeminiCapture] Got response text, length: ${responseText.length}`);
+                
+                // Empty response, nothing to send
+                if (!responseText) {
+                    console.log('[MLC GeminiCapture] Empty response text, not sending');
+                    return;
+                }
+                
+                // Check if response text is stable (hasn't changed in a few checks)
+                if (responseText === lastResponseText) {
+                    stableCounter++;
+                    console.log(`[MLC GeminiCapture] Response text stable: ${stableCounter}/3`);
+                } else {
+                    stableCounter = 0;
+                    lastResponseText = responseText;
+                    console.log('[MLC GeminiCapture] Response text changed, resetting stability counter');
+                }
+                
+                // If response is stable for 3 checks or more, consider it complete and send it
+                if (stableCounter >= 3) {
+                    console.log('[MLC GeminiCapture] Response appears stable, sending to background');
+                    
+                    chrome.runtime.sendMessage({
+                        type: 'GEMINI_RESPONSE_CAPTURED',
+                        content: responseText
+                    }, response => {
+                        if (chrome.runtime.lastError) {
+                            console.error('[MLC GeminiCapture] Error sending message:', chrome.runtime.lastError);
+                        } else {
+                            console.log('[MLC GeminiCapture] Message sent successfully:', response);
+                            captureComplete = true;
+                        }
+                    });
+                    
+                    // Reset for next capture
+                    isCapturing = false;
+                    lastCaptureTime = Date.now();
+                    
+                    // Stop checking for a while to avoid duplicate captures
+                    setTimeout(() => {
+                        captureComplete = false;
+                    }, 10000);
+                }
+            }
+            
+            // Set up mutation observer to detect response changes
+            const observer = new MutationObserver(() => {
+                try {
+                    // Only proceed if we're capturing or if response might be complete
+                    if (isCapturing || isResponseComplete()) {
+                        captureAndSendResponse();
+                    }
                 } catch (err) {
-                    console.error('[MLC GeminiCapture] Observer error', err);
+                    console.error('[MLC GeminiCapture] Observer error:', err);
                 }
             });
-
-            const target = document.body;
-            observer.observe(target, {
+            
+            // Start observing the document
+            observer.observe(document.body, {
                 childList: true,
                 subtree: true,
-                attributes: true,
                 characterData: true
             });
-            console.log('[MLC GeminiCapture] Enhanced MutationObserver started.');
+            
+            console.log('[MLC GeminiCapture] Response observer started');
+            
+            // Also check periodically in case mutation observer misses something
+            const checkInterval = setInterval(() => {
+                if (document.hidden) return; // Don't check if the tab is not visible
+                
+                try {
+                    captureAndSendResponse();
+                } catch (err) {
+                    console.error('[MLC GeminiCapture] Interval check error:', err);
+                }
+            }, 2000);
+            
+            // Clean up when navigating away
+            window.addEventListener('beforeunload', () => {
+                clearInterval(checkInterval);
+                observer.disconnect();
+                console.log('[MLC GeminiCapture] Cleaned up observers');
+            });
         }
 
         // Delay to let the page stabilize
