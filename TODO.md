@@ -39,7 +39,7 @@ Implement an automatic follow-up feature where when a user sends a prompt from C
 - [ ] Consider adding user-configurable options (enable/disable feature)
 
 ## Current Status
-The auto-follow-up feature has been fully implemented and enhanced. Key improvements include:
+The auto-follow-up feature has been fully implemented and enhanced with significant improvements to solve the Gemini response detection issue. Key improvements include:
 
 1. **Background.js**:
    - State tracking for auto-follow-up requests
@@ -48,11 +48,17 @@ The auto-follow-up feature has been fully implemented and enhanced. Key improvem
    - Text-only injection function for ChatGPT
 
 2. **ContentScript.js (Gemini)**:
-   - Enhanced response detection with multiple redundant selectors
-   - Multiple detection methods (stop button, input field state, regenerate buttons)
-   - Text stability detection for better completion identification
-   - Extensive logging for debugging purposes
-   - Throttling to prevent excessive processing
+   - **FIXED: Completely redesigned response detection system**
+   - Multi-strategy approach to extract response text:
+     - Strategy 1: Direct targeting of message elements by data attributes
+     - Strategy 2: Markdown content elements that typically contain responses
+     - Strategy 3: Fallback to DOM structure analysis for potential response containers
+     - Last resort: Main element text filtering
+   - Simplified response completion detection (stop button, input field state)
+   - Added both observer-based and interval-based checking for higher reliability
+   - Better stability detection with clear logging
+   - Added capture throttling and completion tracking
+   - Callback handling for message sending confirmation
 
 3. **Documentation**:
    - README updated with feature description
@@ -60,7 +66,7 @@ The auto-follow-up feature has been fully implemented and enhanced. Key improvem
    - Usage instructions added
 
 ### Next Steps
-The feature is ready for testing. Key test scenarios include:
+The feature is ready for testing with the new Gemini response detection system. Key test scenarios include:
 1. Basic prompts from ChatGPT to Gemini and back
 2. Prompts with code blocks or complex formatting
 3. Multiple consecutive prompts
