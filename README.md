@@ -11,6 +11,7 @@ A powerful Chrome extension designed to streamline your workflow with Large Lang
 -   **Multi-LLM Support**: Interact with Gemini and ChatGPT.
 -   **Side Panel Interface**: Persistent UI for sending prompts to both LLMs and comparing responses.
 -   **In-Page Forwarding**: Toggle buttons injected into ChatGPT and Gemini pages to send the current prompt to the other LLM.
+-   **Auto Follow-up**: When forwarding from ChatGPT to Gemini, after both LLMs respond, the extension automatically inserts Gemini's response into ChatGPT for a comparative follow-up.
 -   **Response Comparison**: View responses side-by-side in the side panel.
 -   **Dark Theme**: Professional dark theme optimized for developers.
 -   **Real-time Status**: Live connection status in the side panel.
@@ -58,6 +59,9 @@ A powerful Chrome extension designed to streamline your workflow with Large Lang
 4.  **Type and Send Your Prompt**: Write your message in the current LLM's input field and send it as you normally would (e.g., by pressing Enter or clicking its native send button).
 5.  **Automatic Forwarding**: The extension will automatically take the prompt you just sent and also input and send it on the other LLM's page.
     *   *Example*: If you're on Gemini, activate "⇄ ChatGPT", and send "Hello world", "Hello world" will be sent to Gemini (by you) and then automatically sent to ChatGPT by the extension.
+6.  **Auto Follow-up** (ChatGPT to Gemini only):
+    *   When forwarding from ChatGPT to Gemini (but not the other way around), after both LLMs generate their responses, the extension will automatically populate ChatGPT's input field with Gemini's response and a prompt asking ChatGPT to compare and enhance its answer.
+    *   The follow-up text is inserted but NOT automatically sent - you can review and edit it before sending.
 
 ### Interface Overview
 
@@ -129,6 +133,19 @@ The extension combines a side panel interface with content scripts that interact
 10. `injectAndExecute(chatgptTabId, 'chatgpt', 'Hello')` runs the `simpleInteraction` function on the ChatGPT page.
 11. Inside ChatGPT's page, `simpleInteraction` finds `#prompt-textarea`, sets its value to "Hello" (using native setter + events), finds the send button, and clicks it.
 12. ChatGPT processes "Hello" and generates a response.
+
+**Flow for Auto-Follow-up (ChatGPT to Gemini with response comparison):**
+
+1. User is on `chat.openai.com` and has the "⇄ Gemini" toggle enabled.
+2. User sends a prompt in ChatGPT.
+3. `contentScript.js` (ChatGPT) detects the send action and forwards the prompt to `background.js`.
+4. `background.js` sets up follow-up state tracking and forwards the prompt to Gemini.
+5. Both ChatGPT and Gemini generate their responses.
+6. `contentScript.js` (Gemini) uses enhanced detection (mutation observers, multiple selectors) to detect when Gemini's response is complete.
+7. When Gemini's response is complete, it's sent to `background.js` via a `GEMINI_RESPONSE_CAPTURED` message.
+8. `background.js` processes the response and calls `injectFollowUpIntoChatGPT()` with a formatted follow-up prompt containing Gemini's response.
+9. The follow-up text is inserted into ChatGPT's input field (but not automatically sent).
+10. User can review, edit, and send the follow-up to get ChatGPT's analysis of both responses.
 
 ## ⚠️ Important Notes
 
