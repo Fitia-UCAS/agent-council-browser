@@ -39,9 +39,15 @@ This document explains the implementation of the Auto-Follow-Up feature, which e
   - Timestamp-based fallback: Uses time elements to identify the most recent response
 
 #### Response Completion Detection
-- Monitors the absence of the "Stop generating" button to detect when generation is complete
-- Checks the enabled state of the input field
-- Uses content stability detection (checking if the content has stabilized for multiple checks)
+- **Primary Method**: Font Icon State Detection - Monitors the state of Gemini's input field icons:
+  - `mic` icon: Empty input / ready for new input (response complete)
+  - `send` icon: Text typed but not sent yet
+  - `stop` icon: Currently generating response
+  - Detects transitions from `stop` → `mic` with a 500ms stabilization delay
+- **Fallback Methods**: 
+  - Monitors the absence of the "Stop generating" button
+  - Checks the enabled state of the input field
+  - Uses content stability detection (checking if the content has stabilized for multiple checks)
 
 ### 3. Communication Flow
 
@@ -67,11 +73,16 @@ This document explains the implementation of the Auto-Follow-Up feature, which e
 
 **Challenge**: Detecting when Gemini has completed generating a response is difficult due to streaming responses and varying UI indicators.
 
-**Solution**: Multiple detection methods are combined:
-- Monitoring for the absence of a "Stop generating" button
-- Checking the input field's enabled state
-- Using content stability detection (multiple checks to ensure content has stabilized)
-- Implementing both observer-based and interval-based checking for reliability
+**Solution**: Implemented a robust multi-layered detection approach:
+- **Primary Method**: Font Icon State Detection using `mat-icon[fonticon]` selectors:
+  - Monitors the input field icon states (`mic`, `send`, `stop`)
+  - Detects the critical transition from `stop` → `mic` indicating response completion
+  - Includes a 500ms stabilization delay to ensure the transition is complete
+- **Fallback Methods**:
+  - Monitoring for the absence of a "Stop generating" button
+  - Checking the input field's enabled state
+  - Using content stability detection (multiple checks to ensure content has stabilized)
+  - Implementing both observer-based and interval-based checking for reliability
 
 ### 2. Extracting Only the Latest Response
 
@@ -136,6 +147,18 @@ After implementing strict validation to ensure we were only capturing responses 
 - Bypassing message count checks during debugging
 
 The issue appeared to be that the validation criteria were too strict, preventing valid responses from being accepted. By gradually relaxing these restrictions while maintaining logging, we could identify the right balance between accuracy and reliability.
+
+### Issue 3: Improving Response Detection Reliability
+User observation identified that Gemini's font icon states provide a much more reliable indicator of response completion:
+- When the text input is empty: `mat-icon[fonticon="mic"]` is visible
+- When text is typed but not sent: `mat-icon[fonticon="send"]` is visible  
+- When Gemini is generating a response: `mat-icon[fonticon="stop"]` is visible
+
+**Solution**: Implemented icon state transition detection:
+- Added `getCurrentIconState()` function to detect the current icon state
+- Enhanced `isResponseComplete()` to detect `stop` → `mic` transitions
+- Added a 500ms stabilization delay after transition detection before capturing the response
+- This provides a much more reliable signal than waiting for DOM mutations or checking button states
 
 ## Future Improvements
 

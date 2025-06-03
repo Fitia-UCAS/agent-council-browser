@@ -296,6 +296,8 @@
             let pendingPromptTimestamp = 0; // Track when the last prompt was sent
             let responseCaptureDelayMs = 2000; // Minimum delay after prompt before capturing
             let currentPromptId = null; // ID of the current prompt we're waiting for
+            let lastIconState = null; // Track the last icon state to detect transitions
+            let iconTransitionTimeout = null; // Timeout for icon state transitions
 
             // Listen for messages from background script about new prompts
             chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -406,23 +408,120 @@
                 return true;
             }
             
-            // Function to check if response is complete
+            // Function to get current icon state
+            function getCurrentIconState() {
+                const micIcon = document.querySelector('mat-icon[fonticon="mic"]');
+                const sendIcon = document.querySelector('mat-icon[fonticon="send"]:not(.hidden)');
+                const stopIcon = document.querySelector('mat-icon[fonticon="stop"]');
+                
+                if (stopIcon) return 'stop';
+                if (micIcon) return 'mic';
+                if (sendIcon) return 'send';
+                return 'unknown';
+            }
+            
+            // Function to check if response is complete using font icon state with transition detection
             function isResponseComplete() {
-                // Check for stop generation button (absent when complete)
+                // NEW APPROACH: Check the font icon state to determine Gemini's status
+                // mic = empty input / ready for new input (response complete)
+                // send = text typed but not sent
+                // stop = currently generating response
+                
+                const currentIconState = getCurrentIconState();
+                
+                console.log('[MLC GeminiCapture] Icon state transition:', {
+                    previous: lastIconState,
+                    current: currentIconState,
+                    timestamp: Date.now()
+                });
+                
+                // Detect transition from 'stop' to 'mic' - this indicates response completion
+                if (lastIconState === 'stop' && currentIconState === 'mic') {
+                    console.log('[MLC GeminiCapture] Detected stop->mic transition - response completion detected!');
+                    
+                    // Clear any existing timeout
+                    if (iconTransitionTimeout) {
+                        clearTimeout(iconTransitionTimeout);
+                    }
+                    
+                    // Wait 500ms as suggested to ensure stability before capturing
+                    iconTransitionTimeout = setTimeout(() => {
+                        console.log('[MLC GeminiCapture] Icon transition stabilized after 500ms, response should be complete');
+                        // Don't call captureAndSendResponse directly to avoid recursion
+                        // Instead, capture the response directly here
+                        if (!captureComplete) {
+                            const responseText = getResponseText();
+                            if (responseText) {
+                                console.log('[MLC GeminiCapture] Capturing response after stop->mic transition');
+                                chrome.runtime.sendMessage({
+                                    type: 'GEMINI_RESPONSE_CAPTURED',
+                                    content: responseText,
+                                    promptId: currentPromptId,
+                                    timestamp: Date.now(),
+                                    responseDelay: pendingPromptTimestamp ? (Date.now() - pendingPromptTimestamp) : null
+                                }, response => {
+                                    if (chrome.runtime.lastError) {
+                                        console.error('[MLC GeminiCapture] Error sending transition-based capture:', chrome.runtime.lastError);
+                                    } else {
+                                        console.log('[MLC GeminiCapture] Transition-based capture sent successfully:', response);
+                                        captureComplete = true;
+                                        currentPromptId = null;
+                                        lastCaptureTime = Date.now();
+                                    }
+                                });
+                            }
+                        }
+                    }, 500);
+                    
+                    lastIconState = currentIconState;
+                    return false; // Don't capture immediately, wait for timeout
+                }
+                
+                // Update last icon state for next comparison
+                if (currentIconState !== lastIconState) {
+                    console.log(`[MLC GeminiCapture] Icon state changed: ${lastIconState} -> ${currentIconState}`);
+                    lastIconState = currentIconState;
+                }
+                
+                // If stop icon is visible, Gemini is still generating
+                if (currentIconState === 'stop') {
+                    console.log('[MLC GeminiCapture] Still generating - stop icon visible');
+                    return false;
+                }
+                
+                // If mic icon is visible and we have a pending prompt, response is likely complete
+                if (currentIconState === 'mic' && pendingPromptTimestamp > 0) {
+                    console.log('[MLC GeminiCapture] Response complete - mic icon visible (ready state)');
+                    return true;
+                }
+                
+                // If only send icon is visible, user has typed but not sent yet
+                if (currentIconState === 'send') {
+                    console.log('[MLC GeminiCapture] User has typed but not sent - send icon visible');
+                    return false;
+                }
+                
+                // Fallback to original method if icons are not found or unclear
                 const stopButton = document.querySelector(stopGeneratingSelector);
                 if (stopButton) {
-                    console.log('[MLC GeminiCapture] Still generating - stop button found');
+                    console.log('[MLC GeminiCapture] Still generating - fallback stop button found');
                     return false;
                 }
                 
-                // Check if input is active
                 const inputField = document.querySelector('div.ql-editor[role="textbox"]');
                 if (inputField && inputField.getAttribute('aria-disabled') === 'true') {
-                    console.log('[MLC GeminiCapture] Still generating - input field disabled');
+                    console.log('[MLC GeminiCapture] Still generating - fallback input field disabled');
                     return false;
                 }
                 
-                return true;
+                // Only consider complete via fallback if we have a pending prompt
+                if (pendingPromptTimestamp > 0) {
+                    console.log('[MLC GeminiCapture] Response appears complete - fallback method');
+                    return true;
+                }
+                
+                console.log('[MLC GeminiCapture] No clear completion signal detected');
+                return false;
             }
             
             // Function to extract response text using multiple strategies - ONLY the latest response

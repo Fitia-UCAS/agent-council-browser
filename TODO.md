@@ -44,11 +44,13 @@ The auto-follow-up feature has been implemented with significant improvements to
 ### Known Issues
 1. ✅ FIXED: The Gemini response capture was getting all the chat history instead of only capturing the latest response.
 
-2. CURRENT ISSUE: The extension is not waiting for Gemini to complete its answer to the current prompt. Instead, it's immediately sending the previous response back to ChatGPT:
-   - In the first interaction, there's no previous response, so nothing is sent back
-   - In the second interaction, it immediately sends the first response
-   - This is happening because the response detection isn't properly linked to the current prompt
-   - We need to implement a mechanism to ensure we only capture responses that are generated after our prompt is sent
+2. ⚠️ IN PROGRESS: Implementing more reliable response detection using font icon states:
+   - User identified that Gemini's input field icons provide reliable state indicators:
+     - `mat-icon[fonticon="mic"]`: Empty input / ready for new input (response complete)
+     - `mat-icon[fonticon="send"]`: Text typed but not sent yet
+     - `mat-icon[fonticon="stop"]`: Currently generating response
+   - SOLUTION IMPLEMENTED: Added icon state transition detection (stop → mic with 500ms delay)
+   - This should provide much more reliable response completion detection than previous methods
 
 ### Improvements Made
 1. **Background.js**:
@@ -64,7 +66,11 @@ The auto-follow-up feature has been implemented with significant improvements to
      - Strategy 2: Markdown content elements that typically contain responses
      - Strategy 3: Fallback to DOM structure analysis for potential response containers
      - Strategy 4: Main element text filtering as a last resort
-   - Simplified response completion detection (stop button, input field state)
+   - **NEW**: Font Icon State Detection for response completion:
+     - Added `getCurrentIconState()` function to monitor `mat-icon[fonticon]` states
+     - Enhanced `isResponseComplete()` to detect `stop` → `mic` transitions
+     - Implemented 500ms stabilization delay after transition detection
+     - Provides much more reliable completion detection than previous methods
    - Added both observer-based and interval-based checking for higher reliability
    - Better stability detection with clear logging
    - Added capture throttling and completion tracking
@@ -86,15 +92,22 @@ The auto-follow-up feature has been implemented with significant improvements to
    - Current hypothesis: The strict validation criteria and prompt-response pairing was too restrictive
 
 ### Next Steps
-1. **Final Testing**:
-   - Test the complete prompt-response-follow-up flow with the new tracking system
-   - Verify that responses are correctly associated with their prompts
+1. **Testing the New Icon State Detection**:
+   - Test the complete prompt-response-follow-up flow with the new icon state transition detection
+   - Verify that the `stop` → `mic` transition reliably captures responses at the right time
    - Test multiple consecutive interactions to ensure proper prompt-response pairing
+   - Test different response lengths and generation speeds to verify the 500ms delay is appropriate
 
-2. **Testing After Fix**:
+2. **Comprehensive Testing After Icon State Implementation**:
    - Basic prompts from ChatGPT to Gemini and back
-   - Prompts with code blocks or complex formatting
+   - Prompts with code blocks or complex formatting  
    - Multiple consecutive prompts in a conversation (to verify only latest response is captured)
    - Different network conditions and response times
+   - Edge cases like very fast or very slow responses
 
-Once the latest-response-only issue is fixed, the branch can be merged into the main branch.
+3. **Fine-tuning**:
+   - Monitor logs to see if the 500ms delay needs adjustment
+   - Verify that fallback methods still work when icon detection fails
+   - Ensure the icon state detection doesn't interfere with normal user interactions
+
+Once the icon state detection is confirmed to work reliably, the feature will be ready for production use.
