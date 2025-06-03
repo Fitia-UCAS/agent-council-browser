@@ -308,11 +308,20 @@
                     currentPromptId = message.promptId;
                     pendingPromptTimestamp = message.timestamp;
 
-                    // Reset capture state
+                    // Reset capture state completely
                     captureComplete = false;
                     isCapturing = false;
                     stableCounter = 0;
-                    lastResponseText = '';
+                    lastResponseText = ''; // Clear previous response text
+                    lastIconState = null; // Reset icon state to detect fresh transitions
+                    
+                    // Clear any pending timeouts
+                    if (iconTransitionTimeout) {
+                        clearTimeout(iconTransitionTimeout);
+                        iconTransitionTimeout = null;
+                    }
+
+                    console.log(`[MLC GeminiCapture] State completely reset for new prompt: ${message.promptId}`);
 
                     // Reset message count after a short delay to allow the prompt to appear in the UI
                     setTimeout(() => {
@@ -347,11 +356,20 @@
                     sendBtn.addEventListener('click', () => {
                         pendingPromptTimestamp = Date.now();
                         console.log(`[MLC GeminiCapture] Prompt sent at ${pendingPromptTimestamp}, waiting for response...`);
-                        // Reset capture state
+                        // Reset capture state completely
                         isCapturing = false;
                         captureComplete = false;
                         stableCounter = 0;
-                        lastResponseText = '';
+                        lastResponseText = ''; // Clear previous response text
+                        lastIconState = null; // Reset icon state to detect fresh transitions
+                        
+                        // Clear any pending timeouts
+                        if (iconTransitionTimeout) {
+                            clearTimeout(iconTransitionTimeout);
+                            iconTransitionTimeout = null;
+                        }
+                        
+                        console.log(`[MLC GeminiCapture] State reset for new prompt - cleared lastResponseText and icon state`);
                     }, true);
                 }
 
@@ -361,11 +379,20 @@
                         if (evt.key === 'Enter' && !evt.shiftKey) {
                             pendingPromptTimestamp = Date.now();
                             console.log(`[MLC GeminiCapture] Prompt sent via Enter key at ${pendingPromptTimestamp}, waiting for response...`);
-                            // Reset capture state
+                            // Reset capture state completely
                             isCapturing = false;
                             captureComplete = false;
                             stableCounter = 0;
-                            lastResponseText = '';
+                            lastResponseText = ''; // Clear previous response text
+                            lastIconState = null; // Reset icon state to detect fresh transitions
+                            
+                            // Clear any pending timeouts
+                            if (iconTransitionTimeout) {
+                                clearTimeout(iconTransitionTimeout);
+                                iconTransitionTimeout = null;
+                            }
+                            
+                            console.log(`[MLC GeminiCapture] State reset for Enter key - cleared lastResponseText and icon state`);
                         }
                     });
                 }
@@ -429,15 +456,35 @@
                 
                 const currentIconState = getCurrentIconState();
                 
-                console.log('[MLC GeminiCapture] Icon state transition:', {
-                    previous: lastIconState,
-                    current: currentIconState,
-                    timestamp: Date.now()
-                });
+                // Only log state changes, not every check
+                if (currentIconState !== lastIconState) {
+                    console.log('[MLC GeminiCapture] Icon state changed:', {
+                        previous: lastIconState,
+                        current: currentIconState,
+                        timestamp: Date.now(),
+                        pendingPromptTimestamp,
+                        currentPromptId
+                    });
+                }
                 
                 // Detect transition from 'stop' to 'mic' - this indicates response completion
                 if (lastIconState === 'stop' && currentIconState === 'mic') {
                     console.log('[MLC GeminiCapture] Detected stop->mic transition - response completion detected!');
+                    
+                    // SMART FIX: Only ignore very immediate transitions (< 500ms)
+                    // This prevents capturing previous responses that complete immediately
+                    const now = Date.now();
+                    const timeSincePrompt = now - pendingPromptTimestamp;
+                    const minimumProcessingTime = 500; // 500ms minimum - any faster is likely stale
+                    
+                    if (pendingPromptTimestamp > 0 && timeSincePrompt < minimumProcessingTime) {
+                        console.log(`[MLC GeminiCapture] Ignoring immediate transition - likely stale (${timeSincePrompt}ms < ${minimumProcessingTime}ms)`);
+                        lastIconState = currentIconState;
+                        return false;
+                    }
+                    
+                    console.log(`[MLC GeminiCapture] Valid transition detected after ${timeSincePrompt}ms`);
+                    
                     
                     // Clear any existing timeout
                     if (iconTransitionTimeout) {
@@ -449,10 +496,24 @@
                         console.log('[MLC GeminiCapture] Icon transition stabilized after 500ms, response should be complete');
                         // Don't call captureAndSendResponse directly to avoid recursion
                         // Instead, capture the response directly here
-                        if (!captureComplete) {
+                        if (!captureComplete && pendingPromptTimestamp > 0 && currentPromptId) {
                             const responseText = getResponseText();
-                            if (responseText) {
+                            console.log('[MLC GeminiCapture] Response text check after transition:', {
+                                hasText: !!responseText,
+                                responseLength: responseText ? responseText.length : 0,
+                                responsePreview: responseText ? responseText.substring(0, 100) : 'NULL',
+                                lastResponseLength: lastResponseText ? lastResponseText.length : 0,
+                                isDifferentFromLast: responseText !== lastResponseText,
+                                pendingPromptTimestamp,
+                                currentPromptId
+                            });
+                            
+                            if (responseText && responseText !== lastResponseText) {
                                 console.log('[MLC GeminiCapture] Capturing response after stop->mic transition');
+                                
+                                // Set capture as complete IMMEDIATELY to prevent duplicate captures
+                                captureComplete = true;
+                                
                                 chrome.runtime.sendMessage({
                                     type: 'GEMINI_RESPONSE_CAPTURED',
                                     content: responseText,
@@ -462,14 +523,24 @@
                                 }, response => {
                                     if (chrome.runtime.lastError) {
                                         console.error('[MLC GeminiCapture] Error sending transition-based capture:', chrome.runtime.lastError);
+                                        // Reset on error so we can try again
+                                        captureComplete = false;
                                     } else {
                                         console.log('[MLC GeminiCapture] Transition-based capture sent successfully:', response);
-                                        captureComplete = true;
-                                        currentPromptId = null;
+                                        lastResponseText = responseText; // Update the last response text
+                                        currentPromptId = null; // Clear only after successful send
                                         lastCaptureTime = Date.now();
                                     }
                                 });
+                            } else {
+                                console.log('[MLC GeminiCapture] Skipping capture - no new response text or same as last');
                             }
+                        } else {
+                            console.log('[MLC GeminiCapture] Skipping capture - conditions not met:', {
+                                captureComplete,
+                                pendingPromptTimestamp,
+                                hasCurrentPromptId: !!currentPromptId
+                            });
                         }
                     }, 500);
                     
@@ -656,16 +727,18 @@
             
             // Function to capture and send response
             function captureAndSendResponse() {
-                // Debug logging to help understand the state
-                console.log('[MLC GeminiCapture] captureAndSendResponse() called with state:', {
-                    captureComplete,
-                    pendingPromptTimestamp,
-                    currentPromptId,
-                    isCapturing,
-                    stableCounter,
-                    lastMessageCount,
-                    lastResponseLength: lastResponseText ? lastResponseText.length : 0
-                });
+                // Only log when we actually have a pending prompt (reduce spam)
+                if (pendingPromptTimestamp > 0) {
+                    console.log('[MLC GeminiCapture] captureAndSendResponse() called with state:', {
+                        captureComplete,
+                        pendingPromptTimestamp,
+                        currentPromptId,
+                        isCapturing,
+                        stableCounter,
+                        lastMessageCount,
+                        lastResponseLength: lastResponseText ? lastResponseText.length : 0
+                    });
+                }
 
                 // For debugging, send response regardless of canCapture() result
                 // This helps us identify what's causing the issue
@@ -770,11 +843,14 @@
                 if (document.hidden) return; // Don't check if the tab is not visible
                 
                 try {
-                    captureAndSendResponse();
+                    // Only run periodic check if we have a pending prompt
+                    if (pendingPromptTimestamp > 0 && !captureComplete) {
+                        captureAndSendResponse();
+                    }
                 } catch (err) {
                     console.error('[MLC GeminiCapture] Interval check error:', err);
                 }
-            }, 2000);
+            }, 5000); // Increased from 2s to 5s
             
             // Clean up when navigating away
             window.addEventListener('beforeunload', () => {

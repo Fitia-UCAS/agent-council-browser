@@ -44,13 +44,28 @@ The auto-follow-up feature has been implemented with significant improvements to
 ### Known Issues
 1. ✅ FIXED: The Gemini response capture was getting all the chat history instead of only capturing the latest response.
 
-2. ⚠️ IN PROGRESS: Implementing more reliable response detection using font icon states:
-   - User identified that Gemini's input field icons provide reliable state indicators:
-     - `mat-icon[fonticon="mic"]`: Empty input / ready for new input (response complete)
-     - `mat-icon[fonticon="send"]`: Text typed but not sent yet
-     - `mat-icon[fonticon="stop"]`: Currently generating response
-   - SOLUTION IMPLEMENTED: Added icon state transition detection (stop → mic with 500ms delay)
-   - This should provide much more reliable response completion detection than previous methods
+2. 🔄 CRITICAL BUG: currentPromptId being set to null prematurely, breaking all response capture:
+   - **Issue**: `currentPromptId` becomes `null` before response capture completes
+   - **Evidence from logs**: 
+     ```
+     currentPromptId: 'prompt_1748982441003_qobjn4u7l'  // Initially set correctly
+     ...
+     currentPromptId: null  // Later becomes null, breaking capture
+     ```
+   - **Impact**: All response capture fails because `currentPromptId` is null
+   - **Solution Applied**: 
+     - Added `currentPromptId` check to capture conditions
+     - Set `captureComplete = true` IMMEDIATELY to prevent duplicate captures
+     - Only clear `currentPromptId` after successful message send
+     - Added error handling to reset state if message sending fails
+   - **Fix Details**:
+     ```javascript
+     if (!captureComplete && pendingPromptTimestamp > 0 && currentPromptId) {
+       // Set capture as complete IMMEDIATELY to prevent duplicate captures
+       captureComplete = true;
+       // Send message and only clear currentPromptId on success
+     }
+     ```
 
 ### Improvements Made
 1. **Background.js**:

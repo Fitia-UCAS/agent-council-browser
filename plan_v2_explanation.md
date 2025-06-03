@@ -160,6 +160,38 @@ User observation identified that Gemini's font icon states provide a much more r
 - Added a 500ms stabilization delay after transition detection before capturing the response
 - This provides a much more reliable signal than waiting for DOM mutations or checking button states
 
+### Issue 4: Critical Race Condition - Duplicate Icon Transitions
+After implementing icon state detection, a critical race condition was discovered where multiple `stop` → `mic` transitions for the same response would trigger duplicate captures, causing `currentPromptId` to be cleared prematurely.
+
+**Problem**: 
+- Icon transitions could trigger multiple times for the same response
+- `currentPromptId` was being set to `null` after first capture
+- Subsequent transitions would fail because `currentPromptId` was `null`
+- This broke all response capture functionality
+
+**Solution**: Implemented immediate capture lock mechanism:
+```javascript
+if (!captureComplete && pendingPromptTimestamp > 0 && currentPromptId) {
+    // Set capture as complete IMMEDIATELY to prevent duplicate captures
+    captureComplete = true;
+    
+    chrome.runtime.sendMessage({...}, response => {
+        if (chrome.runtime.lastError) {
+            // Reset on error so we can try again
+            captureComplete = false;
+        } else {
+            // Only clear currentPromptId after successful send
+            currentPromptId = null;
+        }
+    });
+}
+```
+
+This ensures:
+- Only one capture per prompt cycle
+- `currentPromptId` persists until successful message delivery
+- Error recovery allows retry if message sending fails
+
 ## Future Improvements
 
 1. **User Configuration**: Add settings to enable/disable the auto-follow-up feature
