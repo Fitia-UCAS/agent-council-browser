@@ -740,16 +740,14 @@
                     });
                 }
 
-                // For debugging, send response regardless of canCapture() result
-                // This helps us identify what's causing the issue
+                // Determine if conditions are right to capture a new response
                 const canCaptureResult = canCapture();
                 if (captureComplete) {
                     console.log('[MLC GeminiCapture] Already completed capture for this prompt');
                     return;
                 }
 
-                // TEMPORARY FIX - Always allow capture for debugging
-                // if (!canCaptureResult) return;
+                if (!canCaptureResult) return;
 
                 // Check if response appears complete
                 const isComplete = isResponseComplete();
@@ -782,8 +780,7 @@
                 }
 
                 // If response is stable for 3 checks or more, consider it complete and send it
-                // TEMPORARY CHANGE: Reduce from 3 to 1 for quicker testing
-                if (stableCounter >= 1) {
+                if (stableCounter >= 3) {
                     console.log('[MLC GeminiCapture] Response appears stable, sending to background');
 
                     // Log the actual content we're sending (beginning)
