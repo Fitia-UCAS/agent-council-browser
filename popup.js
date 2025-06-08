@@ -263,4 +263,4 @@ document.addEventListener('DOMContentLoaded', function() {
             responseContent.className = 'response-content';
         }
     }
-}); 
+});

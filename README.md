@@ -1,149 +1,208 @@
 # Multi-LLM Coder Chrome Extension
 
-A powerful Chrome extension that allows developers to send prompts simultaneously to multiple LLM providers (Gemini and ChatGPT) and compare responses side-by-side in a convenient Chrome side panel.
+A powerful Chrome extension designed to streamline your workflow with Large Language Models (LLMs). It allows you to:
+
+1.  **Send prompts simultaneously** to Gemini and ChatGPT from a dedicated Chrome side panel.
+2.  **Compare responses** side-by-side.
+3.  **Forward conversations between LLMs**: Write a prompt in ChatGPT and have it automatically sent to Gemini (and vice-versa) using injected toggle buttons directly on the LLM websites.
 
 ## ✨ Features
 
-- **Multi-LLM Support**: Send prompts to Gemini and ChatGPT simultaneously
-- **Side Panel Interface**: Persistent, accessible UI that doesn't interfere with your workflow
-- **Response Comparison**: View responses side-by-side to compare different LLM outputs
-- **Dark Theme**: Professional dark theme optimized for developers
-- **Real-time Status**: Live connection status and progress indicators
-- **Syntax Highlighting**: Code blocks are automatically highlighted
-- **Keyboard Shortcuts**: Ctrl/Cmd+Enter to send prompts quickly
+-   **Multi-LLM Support**: Interact with Gemini and ChatGPT.
+-   **Side Panel Interface**: Persistent UI for sending prompts to both LLMs and comparing responses.
+-   **In-Page Forwarding**: Toggle buttons injected into ChatGPT and Gemini pages to send the current prompt to the other LLM.
+-   **Auto Follow-up**: When forwarding from ChatGPT to Gemini, after both LLMs respond, the extension automatically inserts Gemini's response into ChatGPT for a comparative follow-up.
+-   **Response Comparison**: View responses side-by-side in the side panel.
+-   **Dark Theme**: Professional dark theme optimized for developers.
+-   **Real-time Status**: Live connection status in the side panel.
+-   **Syntax Highlighting**: Code blocks are automatically highlighted in the side panel.
+-   **Keyboard Shortcuts**: Ctrl/Cmd+Enter to send prompts from the side panel.
 
 ## 🚀 Installation
 
-### Method 1: Load Unpacked Extension (Recommended for Development)
+### Load Unpacked Extension (Recommended)
 
-1. **Download or Clone** this repository to your local machine
-2. **Open Chrome** and navigate to `chrome://extensions/`
-3. **Enable Developer Mode** by toggling the switch in the top-right corner
-4. **Click "Load unpacked"** and select the folder containing the extension files
-5. **Pin the extension** by clicking the puzzle piece icon and pinning "Multi-LLM Coder"
-
-### Method 2: Manual Installation
-
-1. Download all files from this repository
-2. Ensure you have these files in a folder:
-   - `manifest.json`
-   - `sidepanel.html`
-   - `sidepanel.js`
-   - `background.js`
-   - `selectors.js`
-   - `styles.css`
-3. Follow steps 2-5 from Method 1
+1.  **Download or Clone**: Get this repository onto your local machine.
+2.  **Open Chrome Extensions**: Navigate to `chrome://extensions/`.
+3.  **Enable Developer Mode**: Toggle the switch in the top-right corner.
+4.  **Load Unpacked**: Click "Load unpacked" and select the folder where you downloaded/cloned the extension files (the root folder containing `manifest.json`).
+5.  **Pin the Extension**: Click the puzzle piece icon (Extensions) in your Chrome toolbar and pin "Multi-LLM Coder" for easy access.
+6.  **Open Side Panel**: Click the pinned "Multi-LLM Coder" icon. Chrome will ask if you want to show the side panel; confirm. You can then select "Multi-LLM Coder" from the side panel dropdown.
 
 ## 📖 Usage
 
 ### Initial Setup
 
-1. **Open LLM Websites**: 
-   - Open [Gemini](https://gemini.google.com) in one tab
-   - Open [ChatGPT](https://chat.openai.com) in another tab
-   - Make sure you're logged into both services
+1.  **Open LLM Websites**:
+    *   Open [Gemini](https://gemini.google.com) in one tab.
+    *   Open [ChatGPT](https://chat.openai.com) in another tab.
+    *   Ensure you are logged into both services.
+2.  **Open the Extension Side Panel**:
+    *   Click the "Multi-LLM Coder" icon in your Chrome toolbar and choose to open the side panel, or select it from the side panel dropdown if already open.
 
-2. **Open the Extension**:
-   - Click the Multi-LLM Coder icon in your Chrome toolbar
-   - Or use the keyboard shortcut (if configured)
+### Sending Prompts (Two Main Ways)
 
-### Sending Prompts
+**1. Using the Side Panel (for sending to one or both LLMs simultaneously):**
 
-1. **Enter Your Prompt**: Type your question or request in the text area
-2. **Select LLMs**: Check the boxes for Gemini and/or ChatGPT
-3. **Send**: Click the "Send to LLMs" button or press Ctrl/Cmd+Enter
-4. **View Responses**: Switch between tabs to see individual responses or use the Compare tab
+1.  **Enter Your Prompt**: Type your question in the side panel's text area.
+2.  **Select LLMs**: Check the boxes for Gemini and/or ChatGPT.
+3.  **Send**: Click "Send Prompt" or press Ctrl/Cmd+Enter.
+4.  **View Responses**: The side panel will update with responses, or indicate they are being processed. You can view individual responses in their respective tabs within the side panel or use the "Compare" tab.
+
+**2. Using In-Page Forwarding (for sending a prompt from one LLM to the other):**
+
+1.  **Navigate to an LLM Page**: Go to either `chatgpt.com` or `gemini.google.com`.
+2.  **Locate the Toggle Button**:
+    *   On **ChatGPT**: Look for a "⇄ Gemini" button near the prompt input area.
+    *   On **Gemini**: Look for a "⇄ ChatGPT" button near the prompt input area.
+3.  **Activate Forwarding**: Click the toggle button. It will turn green when active, indicating that sending a prompt on this page will also send it to the other LLM.
+4.  **Type and Send Your Prompt**: Write your message in the current LLM's input field and send it as you normally would (e.g., by pressing Enter or clicking its native send button).
+5.  **Automatic Forwarding**: The extension will automatically take the prompt you just sent and also input and send it on the other LLM's page.
+    *   *Example*: If you're on Gemini, activate "⇄ ChatGPT", and send "Hello world", "Hello world" will be sent to Gemini (by you) and then automatically sent to ChatGPT by the extension.
+6.  **Auto Follow-up** (ChatGPT to Gemini only):
+    *   When forwarding from ChatGPT to Gemini (but not the other way around), after both LLMs generate their responses, the extension will automatically populate ChatGPT's input field with Gemini's response and a prompt asking ChatGPT to compare and enhance its answer.
+    *   The follow-up text is inserted but NOT automatically sent - you can review and edit it before sending.
 
 ### Interface Overview
 
-- **Input Area**: Large text area with character counter
-- **LLM Selection**: Checkboxes to choose which LLMs to query
-- **Tabs**: 
-  - **Gemini**: View Gemini's response
-  - **ChatGPT**: View ChatGPT's response  
-  - **Compare**: Side-by-side comparison view
-- **Status Bar**: Shows connection status and last update time
+-   **Side Panel**:
+    -   **Input Area**: Large text area with character counter.
+    -   **LLM Selection**: Checkboxes to choose LLMs for simultaneous sending.
+    -   **Send Button**: Sends prompt from side panel to selected LLMs.
+    -   **Tabs**: "Gemini", "ChatGPT", "Compare" for viewing responses.
+    -   **Status Bar**: Shows connection status.
+-   **In-Page Toggle Buttons**:
+    -   Appear on `chatgpt.com` (as "⇄ Gemini") and `gemini.google.com` (as "⇄ ChatGPT").
+    -   Control the forwarding feature. Green means active.
 
 ## 🔧 How It Works
 
-The extension uses Chrome's scripting API to interact with LLM websites:
+The extension combines a side panel interface with content scripts that interact directly with the LLM websites.
 
-1. **Tab Detection**: Finds open tabs with Gemini/ChatGPT
-2. **Script Injection**: Injects JavaScript into the LLM websites
-3. **DOM Interaction**: Fills input fields and clicks send buttons
-4. **Response Monitoring**: Uses MutationObserver to detect when responses are complete
-5. **Content Extraction**: Extracts response content and displays it in the side panel
+1.  **Manifest (`manifest.json`)**:
+    *   Defines the extension's permissions (access to LLM sites, scripting, side panel).
+    *   Declares the background service worker, content scripts, and side panel HTML.
+
+2.  **Background Script (`background.js`)**:
+    *   **Core Logic**: Acts as the central coordinator.
+    *   **Tab Management**: `findLLMTab()` locates open and active tabs for ChatGPT and Gemini.
+    *   **Message Handling**: Listens for messages from the side panel (`SEND_PROMPT`) and content scripts (`FORWARD_PROMPT`).
+    *   **Script Injection**: Uses `chrome.scripting.executeScript()` to run the `simpleInteraction` function within the context of the target LLM's webpage.
+    *   **`simpleInteraction(prompt, llmType)` function**:
+        *   This function is dynamically injected into the target LLM's page.
+        *   **DOM Element Finding**: Locates the correct input field (e.g., `#prompt-textarea` for ChatGPT, `div.ql-editor` for Gemini) and the send button on the page using predefined selectors.
+        *   **Setting Input Value**:
+            *   For ChatGPT (`TEXTAREA`): Uses `Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set.call(inputElement, prompt);` to reliably set the textarea's value in a way that React (ChatGPT's framework) recognizes.
+            *   For Gemini (`contentEditable div`): Uses `document.execCommand('insertText', false, prompt);`.
+        *   **Event Dispatching**: After setting the input value, it dispatches `input`, `change`, and sometimes `keydown`/`keyup` events to ensure the LLM's webpage processes the input as if it were typed by a user. This is crucial for frameworks to update their internal state.
+        *   **Clicking Send Button**: Simulates a click on the LLM's native send button.
+    *   **Communication**: Sends status updates (`LLM_PROGRESS`, `LLM_RESPONSE`, `LLM_ERROR`) back to the side panel or popup.
+
+3.  **Content Script (`contentScript.js`)**:
+    *   **Injected into LLM Pages**: Runs automatically on `chatgpt.com` and `gemini.google.com`.
+    *   **Toggle Button Injection**:
+        *   Detects which LLM page it's on.
+        *   Dynamically creates and inserts a "⇄ OtherLLM" toggle button near the native prompt input area. The `addToggleButton()` function handles finding a suitable parent element and styling the button.
+        *   Manages the `forwardEnabled` state based on button clicks.
+    *   **Event Listening**:
+        *   Attaches event listeners to the LLM page's native input field (for 'Enter' key presses) and its native send button (for clicks).
+        *   If `forwardEnabled` is true when a prompt is sent on the current page, it captures the prompt text.
+    *   **Message Sending**: Sends a `FORWARD_PROMPT` message (containing the `from` LLM and the `prompt` text) to the `background.js` script.
+    *   **DOM Monitoring**: Uses a `MutationObserver` to re-apply button injection and listeners if the LLM page's DOM changes significantly (e.g., due to navigation or dynamic content loading).
+
+4.  **Side Panel (`sidepanel.html`, `sidepanel.js`)**:
+    *   **User Interface**: Provides the main UI for sending prompts to multiple LLMs and viewing/comparing responses.
+    *   **Communication**: Sends `SEND_PROMPT` messages to `background.js` when the user submits a prompt.
+    *   **Display Logic**: Receives messages from `background.js` (like responses or errors) and updates the UI accordingly.
+
+5.  **Selectors (`selectors.js`)**:
+    *   *Currently, selectors are embedded within `background.js` (`simpleInteraction`) and `contentScript.js`. This file is present but the primary selector logic has been integrated directly into the relevant scripts for more contextual control in the dev branch.*
+    *   The core idea is that these selectors (CSS query strings) are used to find specific HTML elements (input boxes, send buttons) on the LLM websites. **These are the most fragile part of the extension**, as LLM websites can change their HTML structure at any time, breaking the selectors.
+
+**Flow for In-Page Forwarding (e.g., Gemini to ChatGPT):**
+
+1.  User is on `gemini.google.com`.
+2.  `contentScript.js` (running on Gemini) injects the "⇄ ChatGPT" button.
+3.  User clicks "⇄ ChatGPT", setting `forwardEnabled = true` in that content script.
+4.  User types "Hello" in Gemini's input and presses Enter.
+5.  Gemini's `contentScript.js` detects the Enter key press, sees `forwardEnabled` is true, gets "Hello".
+6.  It sends a message `{ type: 'FORWARD_PROMPT', from: 'gemini', prompt: 'Hello' }` to `background.js`.
+7.  `background.js` receives this message. `handleForwardPrompt` determines the target is 'chatgpt'.
+8.  `processLLM('chatgpt', 'Hello')` is called.
+9.  `findLLMTab('chatgpt')` finds the ChatGPT tab.
+10. `injectAndExecute(chatgptTabId, 'chatgpt', 'Hello')` runs the `simpleInteraction` function on the ChatGPT page.
+11. Inside ChatGPT's page, `simpleInteraction` finds `#prompt-textarea`, sets its value to "Hello" (using native setter + events), finds the send button, and clicks it.
+12. ChatGPT processes "Hello" and generates a response.
+
+**Flow for Auto-Follow-up (ChatGPT to Gemini with response comparison):**
+
+1. User is on `chat.openai.com` and has the "⇄ Gemini" toggle enabled.
+2. User sends a prompt in ChatGPT.
+3. `contentScript.js` (ChatGPT) detects the send action and forwards the prompt to `background.js`.
+4. `background.js` sets up follow-up state tracking and forwards the prompt to Gemini.
+5. Both ChatGPT and Gemini generate their responses.
+6. `contentScript.js` (Gemini) uses enhanced detection (mutation observers, multiple selectors) to detect when Gemini's response is complete.
+7. When Gemini's response is complete, it's sent to `background.js` via a `GEMINI_RESPONSE_CAPTURED` message.
+8. `background.js` processes the response and calls `injectFollowUpIntoChatGPT()` with a formatted follow-up prompt containing Gemini's response.
+9. The follow-up text is inserted into ChatGPT's input field (but not automatically sent).
+10. User can review, edit, and send the follow-up to get ChatGPT's analysis of both responses.
 
 ## ⚠️ Important Notes
 
-### Selector Updates
-The extension relies on DOM selectors to interact with LLM websites. These may need updates when the websites change their interface. If the extension stops working:
-
-1. Check the browser console for errors
-2. Update selectors in `selectors.js` if needed
-3. The selectors are the most volatile part of the extension
+### Selector Stability
+The extension's ability to interact with LLM websites (finding input fields, send buttons) depends heavily on their HTML structure (DOM selectors).
+-   **Websites Change**: LLM providers frequently update their websites. These updates can change the HTML, causing the extension's selectors to fail.
+-   **Troubleshooting**: If the extension stops writing text or sending messages on a specific site, the first suspect is a broken selector.
+-   **Updating Selectors**: You'll need to inspect the LLM website's HTML (using browser developer tools) and update the corresponding selectors in `background.js` (within the `simpleInteraction` function) and `contentScript.js` (within `findInput` and `findSendButton`).
 
 ### Limitations
-- Requires active tabs with Gemini and ChatGPT open
-- Depends on website DOM structure (may break with UI updates)
-- No offline functionality
-- Responses are limited by the LLM websites' rate limits
+-   Requires active tabs with Gemini and ChatGPT open and logged in for interactions.
+-   Functionality can break if LLM websites significantly change their DOM structure.
+-   No offline functionality.
+-   Subject to the LLM websites' rate limits and usage policies.
 
 ## 🛠️ Development
 
 ### File Structure
-```
+Use code with caution.
+Markdown
 chromeEX/
-├── manifest.json          # Extension configuration
-├── sidepanel.html         # Side panel UI
-├── sidepanel.js          # UI logic and Chrome API communication
-├── background.js         # Service worker for tab management
-├── selectors.js          # DOM selectors for LLM websites
-├── styles.css            # Dark theme styling
-└── README.md            # This file
-```
+├── manifest.json # Extension configuration and permissions
+├── background.js # Service worker: core logic, script injection, message routing
+├── contentScript.js # Injected into LLM pages: adds toggle button, captures prompts for forwarding
+├── sidepanel.html # Side panel UI structure
+├── sidepanel.js # Side panel UI logic and communication with background.js
+├── popup.html # Popup UI (currently simpler than sidepanel)
+├── popup.js # Popup UI logic
+├── styles.css # Styling for side panel and popup
+├── selectors.js # (Legacy/Reference) Centralized selectors (dev branch integrates them)
+└── README.md # This file
 
-### Testing
-- Use `python3 -m http.server 8000` to preview the UI at `http://localhost:8000/sidepanel.html`
-- Check Chrome DevTools console for debugging information
-- Test with both LLM websites open and logged in
-
-### Updating Selectors
-When LLM websites update their UI, update the selectors in `selectors.js`:
-
-```javascript
-const LLM_SELECTORS = {
-    gemini: {
-        input: 'textarea[placeholder*="Enter a prompt"]',
-        sendButton: 'button[aria-label*="Send"]',
-        // ... other selectors
-    },
-    chatgpt: {
-        input: '#prompt-textarea',
-        sendButton: 'button[data-testid="send-button"]',
-        // ... other selectors
-    }
-};
-```
+### Debugging
+-   **Side Panel**: Right-click inside the side panel and select "Inspect" to open DevTools for it.
+-   **Content Scripts**: Open DevTools on the ChatGPT or Gemini page. Console logs from `contentScript.js` will appear here. Errors during `simpleInteraction` (which is injected) will also appear here.
+-   **Background Script**: Go to `chrome://extensions/`, find "Multi-LLM Coder", and click the "Service worker" link to open its DevTools.
+-   **Test Selectors**: Use the browser's DevTools console on the LLM page (e.g., `document.querySelector('#prompt-textarea')`) to test if selectors are still valid.
 
 ## 🐛 Troubleshooting
 
-### Extension Not Working
-1. Check that you have Gemini/ChatGPT tabs open and loaded
-2. Ensure you're logged into both services
-3. Check the Chrome DevTools console for errors
-4. Try refreshing the LLM website tabs
+### Extension Not Working / Text Not Being Sent
+1.  **Check LLM Tabs**: Ensure Gemini and ChatGPT tabs are open, fully loaded, and you're logged in.
+2.  **Console Errors**: Open all three DevTools consoles (Side Panel, Content Script on LLM page, Background Script) and look for errors.
+    *   **Background Script**: Check "Injection results" for errors from `simpleInteraction`.
+    *   **LLM Page Console**: Look for errors from `simpleInteraction` or `contentScript.js`.
+3.  **Selector Issues**: This is the most common problem. Website UIs change. You may need to update selectors in `background.js` (inside `simpleInteraction`) and `contentScript.js`.
+4.  **Refresh**: Try refreshing the LLM website tabs and then the extension (via `chrome://extensions/`).
+5.  **Re-enable Extension**: Disable and then re-enable the extension in `chrome://extensions/`.
 
-### No Responses Received
-1. Verify the LLM websites are responsive
-2. Check if selectors need updating
-3. Look for errors in the background script console
-4. Ensure the websites haven't changed their DOM structure
+### In-Page Toggle Button Missing or Misplaced
+1.  Ensure the `contentScript.js` is running on the page (check console for its initial log).
+2.  The logic in `addToggleButton()` in `contentScript.js` might need adjustment if the site's layout around the input area has drastically changed.
 
-### Connection Status Shows "Not Connected"
-1. Make sure the LLM websites are fully loaded
-2. Check that the URLs match the host permissions in manifest.json
-3. Try refreshing the extension
+### Connection Status in Side Panel Shows "Not Connected"
+1.  Make sure the LLM websites are fully loaded.
+2.  Check that the URLs match the host permissions in `manifest.json`.
+3.  Try refreshing the extension and the LLM tabs.
 
 ## 📝 License
 
@@ -151,143 +210,26 @@ This project is open source and available under the MIT License.
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please feel free to submit issues and pull requests.
-
-### Common Contribution Areas
-- Updating selectors when LLM websites change
-- Adding support for new LLM providers
-- Improving error handling and user feedback
-- Enhancing the UI/UX
+Contributions are welcome! Please feel free to submit issues and pull requests. Key areas:
+-   Keeping DOM selectors up-to-date.
+-   Adding support for new LLM providers.
+-   Improving UI/UX and error handling.
 
 ## 📞 Support
 
 If you encounter issues:
-1. Check this README for troubleshooting steps
-2. Look at the browser console for error messages
-3. Create an issue on the project repository
-4. Include browser version, extension version, and error details
+1.  Follow the Troubleshooting steps above.
+2.  Carefully examine console logs from all relevant parts of the extension.
+3.  Create an issue on the project repository, providing:
+    *   Chrome version.
+    *   Extension version (if applicable, or commit hash).
+    *   Detailed steps to reproduce the issue.
+    *   Relevant console logs and screenshots.
 
-## 📦 Dependencies & Installation
+## 📦 Dependencies
+This Chrome extension is built with vanilla JavaScript and relies on:
+-   Chrome Extension APIs (built into Chrome).
+-   Native Web APIs.
+-   **highlight.js** (CDN) and **Material Icons** (CDN) for the side panel UI.
 
-### System Requirements
-- **Google Chrome** (version 88 or higher)
-- **Developer Mode** enabled in Chrome Extensions
-- **Internet Connection** (for LLM website access)
-
-### No Traditional Dependencies Required
-This Chrome extension is built with vanilla JavaScript and doesn't require Node.js, npm, or any build tools. All dependencies are either:
-- Built into Chrome (Extension APIs)
-- Loaded from CDN (highlight.js)
-- Native Web APIs
-
-### Quick Setup Script
-For a streamlined setup process, you can use this script:
-
-```bash
-#!/bin/bash
-# Multi-LLM Coder Extension Setup Script
-
-echo "🚀 Setting up Multi-LLM Coder Chrome Extension..."
-
-# Check if Chrome is installed
-if ! command -v google-chrome &> /dev/null && ! command -v chrome &> /dev/null; then
-    echo "❌ Google Chrome not found. Please install Chrome first."
-    echo "   Download from: https://www.google.com/chrome/"
-    exit 1
-fi
-
-echo "✅ Chrome detected"
-
-# Clone or download the repository
-if [ ! -d "chromeEX" ]; then
-    echo "📥 Downloading extension files..."
-    # If using git:
-    # git clone <repository-url> chromeEX
-    # Or download and extract manually
-    echo "   Please ensure all extension files are in the current directory"
-fi
-
-# Verify required files
-required_files=("manifest.json" "sidepanel.html" "sidepanel.js" "background.js" "selectors.js" "styles.css")
-missing_files=()
-
-for file in "${required_files[@]}"; do
-    if [ ! -f "$file" ]; then
-        missing_files+=("$file")
-    fi
-done
-
-if [ ${#missing_files[@]} -ne 0 ]; then
-    echo "❌ Missing required files:"
-    printf '   - %s\n' "${missing_files[@]}"
-    exit 1
-fi
-
-echo "✅ All required files present"
-
-# Run tests (optional)
-if [ -f "tests/test-runner.html" ]; then
-    echo "🧪 Test files available"
-    echo "   Open tests/test-runner.html in Chrome to run validation tests"
-fi
-
-echo ""
-echo "🎉 Setup complete! Next steps:"
-echo "   1. Open Chrome and go to chrome://extensions/"
-echo "   2. Enable 'Developer mode' (toggle in top-right)"
-echo "   3. Click 'Load unpacked' and select this directory"
-echo "   4. Open Gemini (gemini.google.com) and ChatGPT (chat.openai.com)"
-echo "   5. Click the extension icon to start using Multi-LLM Coder"
-echo ""
-echo "📚 For detailed instructions, see the Installation section in README.md"
-```
-
-### Manual Verification
-To verify your setup, check that you have these files:
-
-```bash
-# Verify all required files are present
-ls -la manifest.json sidepanel.html sidepanel.js background.js selectors.js styles.css
-
-# Optional: Run a simple HTTP server to preview the UI
-python3 -m http.server 8000
-# Then visit: http://localhost:8000/sidepanel.html
-```
-
-### Development Dependencies (Optional)
-If you want to contribute to the project or run tests:
-
-```bash
-# For running a local HTTP server (testing UI)
-python3 -m http.server 8000
-
-# For code formatting (if you have prettier installed globally)
-npx prettier --write "*.js" "*.html" "*.css"
-
-# For linting (if you have eslint installed globally)  
-npx eslint *.js
-```
-
-### External Dependencies
-The extension automatically loads these external resources:
-- **highlight.js** (v11.9.0) - For syntax highlighting in code blocks
-- **Material Icons** - For UI icons
-- **Chrome Extension APIs** - Built into Chrome browser
-
-### Troubleshooting Dependencies
-If the extension doesn't work properly:
-
-1. **Check Chrome Version**: Ensure you're using Chrome 88+
-2. **Verify Files**: Run the verification script above
-3. **Test Network**: Ensure you can access gemini.google.com and chat.openai.com
-4. **Check Console**: Open Chrome DevTools and look for any error messages
-
-### No Build Process Required
-Unlike many modern web projects, this extension:
-- ✅ Requires no compilation or build step
-- ✅ Uses no package managers (npm, yarn, etc.)
-- ✅ Has no node_modules directory
-- ✅ Works directly with Chrome's built-in APIs
-- ✅ Loads external libraries via CDN
-
-This makes it easy to modify, debug, and deploy without complex tooling. 
+No build process or Node.js dependencies are required for the core functionality.

@@ -5,6 +5,7 @@
   "description": "Send prompts to multiple LLM providers (Gemini and ChatGPT) simultaneously and compare responses side-by-side",
   
   "permissions": [
+    "sidePanel",
     "scripting",
     "storage",
     "tabs"
@@ -30,6 +31,10 @@
   "background": {
     "service_worker": "background.js"
   },
+
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
   
   "action": {
     "default_popup": "popup.html",
@@ -38,4 +43,4 @@
   
   "author": "Multi-LLM Coder Team",
   "homepage_url": "https://github.com/multi-llm-coder/extension"
-} 
+}

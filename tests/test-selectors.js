@@ -206,4 +206,4 @@ if (typeof module !== 'undefined' && module.exports) {
 // Auto-run if this file is loaded directly
 if (typeof window !== 'undefined') {
   document.addEventListener('DOMContentLoaded', runSelectorsTests);
-} 
+}
