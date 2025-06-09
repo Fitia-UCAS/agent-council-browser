@@ -861,4 +861,90 @@
         setTimeout(observeGeminiResponses, 3000);
     }
 
+    if (isChatGPT) {
+        function observeChatGPTResponses() {
+            console.log('[MLC ChatGPTCapture] Starting ChatGPT response capture...');
+
+            const stopSelector = 'button[data-testid="stop-button"], button[aria-label*="Stop"]';
+            const micSelector = 'button[data-testid="composer-speech-button"]';
+
+            let currentPromptId = null;
+            let pendingPromptTimestamp = 0;
+            let captureComplete = false;
+            let lastIconState = null;
+
+            chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+                if (message.type === 'NEW_PROMPT_SENT') {
+                    currentPromptId = message.promptId;
+                    pendingPromptTimestamp = message.timestamp;
+                    captureComplete = false;
+                    lastIconState = null;
+                    if (sendResponse) sendResponse({ received: true });
+                }
+                return true;
+            });
+
+            function getIconState() {
+                if (document.querySelector(stopSelector)) return 'stop';
+                if (document.querySelector(micSelector)) return 'mic';
+                return 'unknown';
+            }
+
+            function getLatestResponseText() {
+                const turns = document.querySelectorAll('[data-testid="conversation-turn"]');
+                if (turns.length > 0) {
+                    const lastTurn = turns[turns.length - 1];
+                    const markdown = lastTurn.querySelector('.markdown');
+                    const text = markdown ? (markdown.innerText || markdown.textContent) : (lastTurn.innerText || lastTurn.textContent);
+                    if (text && text.trim()) return text.trim();
+                }
+                return '';
+            }
+
+            function checkCapture() {
+                if (!currentPromptId || captureComplete) return;
+                const state = getIconState();
+                if (lastIconState === 'stop' && state === 'mic') {
+                    setTimeout(() => {
+                        if (captureComplete) return;
+                        const text = getLatestResponseText();
+                        if (text) {
+                            captureComplete = true;
+                            chrome.runtime.sendMessage({
+                                type: 'CHATGPT_RESPONSE_CAPTURED',
+                                content: text,
+                                promptId: currentPromptId,
+                                timestamp: Date.now(),
+                                responseDelay: pendingPromptTimestamp ? (Date.now() - pendingPromptTimestamp) : null
+                            }, response => {
+                                if (chrome.runtime.lastError) {
+                                    console.error('[MLC ChatGPTCapture] Error sending response:', chrome.runtime.lastError);
+                                    captureComplete = false;
+                                } else {
+                                    console.log('[MLC ChatGPTCapture] Response sent:', response);
+                                    currentPromptId = null;
+                                }
+                            });
+                        }
+                    }, 500);
+                }
+                lastIconState = state;
+            }
+
+            const observer = new MutationObserver(() => { checkCapture(); });
+            observer.observe(document.body, { childList: true, subtree: true, attributes: true });
+
+            const interval = setInterval(checkCapture, 2000);
+
+            window.addEventListener('beforeunload', () => {
+                observer.disconnect();
+                clearInterval(interval);
+            });
+
+            console.log('[MLC ChatGPTCapture] Response observer started');
+        }
+
+        setTimeout(observeChatGPTResponses, 3000);
+    }
+
 })();
