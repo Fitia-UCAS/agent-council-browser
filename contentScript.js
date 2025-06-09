@@ -934,4 +934,200 @@
         setTimeout(observeChatGPTResponses, 3000);
     }
 
+    if (isChatGPT) {
+        function observeChatGPTResponses() {
+            console.log('[MLC ChatGPTCapture] Starting ChatGPT response capture...');
+
+            let lastResponseText = '';
+            let stableCounter = 0;
+            let isCapturing = false;
+            let captureComplete = false;
+            let lastCaptureTime = 0;
+            let pendingPromptTimestamp = 0;
+            let currentPromptId = null;
+            const responseCaptureDelayMs = 2000; // Minimum delay after prompt
+
+            chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+                if (message.type === 'NEW_PROMPT_SENT' && message.to === 'chatgpt') { // Ensure message is for ChatGPT
+                    console.log(`[MLC ChatGPTCapture] Received new prompt notification: ${message.promptId}`);
+                    currentPromptId = message.promptId;
+                    pendingPromptTimestamp = message.timestamp;
+                    captureComplete = false;
+                    isCapturing = false;
+                    stableCounter = 0;
+                    lastResponseText = '';
+                    // It's important to acknowledge receipt of the message
+                    if (sendResponse) sendResponse({ received: true, for: 'chatgpt' });
+                }
+                // Keep the message channel open for asynchronous response if sendResponse is used
+                return true;
+            });
+
+            // Helper function: isChatGPTGenerating
+            function isChatGPTGenerating() {
+                // Selector for the "stop generating" button
+                const stopButton = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop generating"], button[aria-label*="Arrêter le streaming"]');
+                return stopButton && stopButton.offsetParent !== null; // Check for visibility
+            }
+
+            // Helper function: getChatGPTResponseText
+            function getChatGPTResponseText() {
+                console.log('[MLC ChatGPTCapture] Attempting to extract LATEST response text only...');
+                const messageContainers = document.querySelectorAll('div[data-testid^="conversation-turn-"]');
+                if (messageContainers.length === 0) {
+                    console.log('[MLC ChatGPTCapture] No message containers found.');
+                    return '';
+                }
+
+                // Iterate from the last message container to find the latest AI response
+                for (let i = messageContainers.length - 1; i >= 0; i--) {
+                    const turn = messageContainers[i];
+                    // Check if it's an assistant's message. User messages might have a different structure or specific data attributes.
+                    // ChatGPT user messages often have `data-message-author-role="user"` on a child,
+                    // while assistant messages have `data-message-author-role="assistant"`.
+                    // We look for the absence of user role or presence of assistant role on the turn itself or its children.
+                    const authorRoleElement = turn.querySelector('[data-message-author-role]');
+                    if (authorRoleElement && authorRoleElement.getAttribute('data-message-author-role') === 'user') {
+                        continue; // Skip user messages
+                    }
+
+                    // If it's not explicitly a user message, assume it's an assistant message or contains one.
+                    // More robust: Check for actual content containers
+                    const responseContentElement = turn.querySelector('.markdown, .prose, div[class*="result-streaming"], div[class*="text-token-text-primary"], div[data-message-id][data-message-author-role="assistant"] > div > div');
+                    if (responseContentElement) {
+                        const text = responseContentElement.innerText || responseContentElement.textContent;
+                        if (text && text.trim()) {
+                            console.log('[MLC ChatGPTCapture] Found latest AI response text.');
+                            return text.trim();
+                        }
+                    }
+                }
+                console.log('[MLC ChatGPTCapture] No AI response text found after checking containers.');
+                return '';
+            }
+
+            // Main logic function: captureAndSendChatGPTResponse
+            function captureAndSendChatGPTResponse() {
+                // console.log('[MLC ChatGPTCapture] captureAndSendChatGPTResponse called.');
+                if (captureComplete || pendingPromptTimestamp === 0 || (Date.now() - pendingPromptTimestamp < responseCaptureDelayMs)) {
+                    // console.log('[MLC ChatGPTCapture] Pre-checks failed or too early.', { captureComplete, pendingPromptTimestamp });
+                    return;
+                }
+
+                const generating = isChatGPTGenerating();
+                // console.log('[MLC ChatGPTCapture] Generating status:', generating);
+
+                if (generating) {
+                    isCapturing = true;
+                    stableCounter = 0; // Reset stability counter while generating
+                    // console.log('[MLC ChatGPTCapture] ChatGPT is generating. isCapturing=true, stableCounter=0');
+                    return;
+                }
+
+                // If it was generating and now it's not, OR if it's not generating and we were capturing (e.g. intermittent generation)
+                if (!generating && isCapturing) {
+                    // console.log('[MLC ChatGPTCapture] ChatGPT finished generating or was capturing.');
+                    const responseText = getChatGPTResponseText();
+                    // console.log('[MLC ChatGPTCapture] Response text length:', responseText.length);
+
+                    if (!responseText) {
+                        // console.log('[MLC ChatGPTCapture] No response text found after generation finished.');
+                        // Potentially increment a counter for empty responses if needed, or just return
+                        return;
+                    }
+
+                    if (responseText === lastResponseText) {
+                        stableCounter++;
+                        // console.log('[MLC ChatGPTCapture] Response stable. Counter:', stableCounter);
+                    } else {
+                        stableCounter = 0;
+                        lastResponseText = responseText;
+                        // console.log('[MLC ChatGPTCapture] Response changed. Resetting counter, new text length:', lastResponseText.length);
+                    }
+
+                    if (stableCounter >= 3) {
+                        console.log('[MLC ChatGPTCapture] Response appears stable, sending to background. Prompt ID:', currentPromptId);
+                        // console.log('[MLC ChatGPTCapture] Content preview:', responseText.substring(0,100));
+
+                        chrome.runtime.sendMessage({
+                            type: 'CHATGPT_RESPONSE_CAPTURED',
+                            content: responseText,
+                            promptId: currentPromptId,
+                            timestamp: Date.now()
+                        }, response => {
+                            if (chrome.runtime.lastError) {
+                                console.error('[MLC ChatGPTCapture] Error sending message:', chrome.runtime.lastError);
+                                // Don't set captureComplete if send failed, allow retry
+                            } else {
+                                console.log('[MLC ChatGPTCapture] Message sent successfully to background.', response);
+                                captureComplete = true; // Mark as complete for this prompt
+                                lastCaptureTime = Date.now();
+                                // Reset prompt-specific variables only after successful send
+                                // currentPromptId = null;
+                                // pendingPromptTimestamp = 0; // Keep this to prevent immediate re-capture until new prompt.
+                                // Or, reset more carefully:
+                                // If we want to allow re-capture for the same prompt if it updates later (unlikely for ChatGPT stable),
+                                // then we might not reset currentPromptId here. But typical flow is one response per prompt.
+                            }
+                        });
+
+                        isCapturing = false; // Reset capturing state
+
+                        // Optional: Timeout to reset captureComplete to allow for new captures
+                        // This might be useful if a user edits a response or something similar,
+                        // but for typical ChatGPT flow, one capture per prompt is enough.
+                        // setTimeout(() => {
+                        //     if (Date.now() - lastCaptureTime >= 9500) { // Ensure it's still relevant
+                        //        console.log('[MLC ChatGPTCapture] Resetting captureComplete after timeout.');
+                        //        captureComplete = false;
+                        //     }
+                        // }, 10000);
+                    }
+                } else if (!generating && !isCapturing) {
+                    // This case handles when the page loads, and a response is already there,
+                    // or if the generation was missed. We can try a one-off capture.
+                    // However, this should primarily be driven by the NEW_PROMPT_SENT logic.
+                    // console.log('[MLC ChatGPTCapture] Not generating, was not capturing. Maybe check once.');
+                    // For now, rely on the interval and mutation observer to trigger when isCapturing becomes true.
+                }
+            }
+
+            // MutationObserver for ChatGPT
+            const observer = new MutationObserver((mutationsList, obs) => {
+                // Debounce or gate this call.
+                // Only call if not generating AND we were capturing (meaning it just stopped)
+                // OR if we have a pending prompt and aren't yet complete.
+                if ((!isChatGPTGenerating() && isCapturing) || (pendingPromptTimestamp > 0 && !captureComplete)) {
+                    // console.log('[MLC ChatGPTCapture] Mutation observed, calling captureAndSend.');
+                    captureAndSendChatGPTResponse();
+                }
+            });
+
+            observer.observe(document.body, {
+                childList: true,
+                subtree: true,
+                characterData: true // Important for streaming text
+            });
+            console.log('[MLC ChatGPTCapture] MutationObserver started.');
+
+            // Periodic Check (Interval)
+            const intervalCheck = setInterval(() => {
+                if (!document.hidden && pendingPromptTimestamp > 0 && !captureComplete) { // Only run if tab active, prompt pending, and not complete
+                    // console.log('[MLC ChatGPTCapture] Interval check, calling captureAndSend.');
+                    captureAndSendChatGPTResponse();
+                }
+            }, 2500); // Check every 2.5 seconds
+
+            // Cleanup
+            window.addEventListener('beforeunload', () => {
+                observer.disconnect();
+                clearInterval(intervalCheck);
+                console.log('[MLC ChatGPTCapture] Cleaned up observer and interval.');
+            });
+        }
+
+        // Initial call with a delay
+        setTimeout(observeChatGPTResponses, 3000);
+    }
+
 })();
