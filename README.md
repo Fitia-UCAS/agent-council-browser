@@ -11,7 +11,7 @@ A powerful Chrome extension designed to streamline your workflow with Large Lang
 -   **Multi-LLM Support**: Interact with Gemini and ChatGPT.
 -   **Side Panel Interface**: Persistent UI for sending prompts to both LLMs and comparing responses.
 -   **In-Page Forwarding**: Toggle buttons injected into ChatGPT and Gemini pages to send the current prompt to the other LLM.
--   **Auto Follow-up**: When forwarding from ChatGPT to Gemini, after both LLMs respond, the extension automatically inserts Gemini's response into ChatGPT for a comparative follow-up.
+-   **Auto Follow-up**: When forwarding from one LLM to the other, the extension captures the second LLM's reply and inserts it back into the originating page for an optional comparative follow-up.
 -   **Response Comparison**: View responses side-by-side in the side panel.
 -   **Dark Theme**: Professional dark theme optimized for developers.
 -   **Real-time Status**: Live connection status in the side panel.
@@ -59,8 +59,8 @@ A powerful Chrome extension designed to streamline your workflow with Large Lang
 4.  **Type and Send Your Prompt**: Write your message in the current LLM's input field and send it as you normally would (e.g., by pressing Enter or clicking its native send button).
 5.  **Automatic Forwarding**: The extension will automatically take the prompt you just sent and also input and send it on the other LLM's page.
     *   *Example*: If you're on Gemini, activate "⇄ ChatGPT", and send "Hello world", "Hello world" will be sent to Gemini (by you) and then automatically sent to ChatGPT by the extension.
-6.  **Auto Follow-up** (ChatGPT to Gemini only):
-    *   When forwarding from ChatGPT to Gemini (but not the other way around), after both LLMs generate their responses, the extension will automatically populate ChatGPT's input field with Gemini's response and a prompt asking ChatGPT to compare and enhance its answer.
+6.  **Auto Follow-up** (both directions):
+    *   After forwarding a prompt, the extension waits for the second LLM's reply and then inserts that response into the original LLM's input field along with a comparison prompt.
     *   The follow-up text is inserted but NOT automatically sent - you can review and edit it before sending.
 
 ### Interface Overview
@@ -146,6 +146,19 @@ The extension combines a side panel interface with content scripts that interact
 8. `background.js` processes the response and calls `injectFollowUpIntoChatGPT()` with a formatted follow-up prompt containing Gemini's response.
 9. The follow-up text is inserted into ChatGPT's input field (but not automatically sent).
 10. User can review, edit, and send the follow-up to get ChatGPT's analysis of both responses.
+
+**Flow for Auto-Follow-up (Gemini to ChatGPT with response comparison):**
+
+1. User is on `gemini.google.com` and has the "⇄ ChatGPT" toggle enabled.
+2. User sends a prompt in Gemini.
+3. `contentScript.js` (Gemini) detects the send action and forwards the prompt to `background.js`.
+4. `background.js` sets up follow-up state tracking and forwards the prompt to ChatGPT.
+5. Both Gemini and ChatGPT generate their responses.
+6. `contentScript.js` (ChatGPT) detects when ChatGPT's response is complete using the stop→mic icon transition.
+7. When ChatGPT's response is captured, it's sent to `background.js` via a `CHATGPT_RESPONSE_CAPTURED` message.
+8. `background.js` processes the response and calls `injectFollowUpIntoGemini()` with a formatted follow-up prompt containing ChatGPT's response.
+9. The follow-up text is inserted into Gemini's input field (but not automatically sent).
+10. User can review, edit, and send the follow-up to get Gemini's analysis of both responses.
 
 ## ⚠️ Important Notes
 
