@@ -861,4 +861,91 @@
         setTimeout(observeGeminiResponses, 3000);
     }
 
+    if (isChatGPT) {
+        /* ------------------------------------------------------------------
+           ChatGPT response capture for Auto Follow-up
+           ------------------------------------------------------------------ */
+        function observeChatGPTResponses() {
+            console.log('[MLC ChatGPTCapture] Starting ChatGPT response capture...');
+
+            let lastIconState = null;
+            let captureComplete = false;
+            let pendingPromptTimestamp = 0;
+            let currentPromptId = null;
+            let lastResponseText = '';
+
+            chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+                if (message.type === 'NEW_PROMPT_SENT') {
+                    currentPromptId = message.promptId;
+                    pendingPromptTimestamp = message.timestamp;
+                    captureComplete = false;
+                    lastResponseText = '';
+                    lastIconState = null;
+                    if (sendResponse) sendResponse({ received: true });
+                }
+                return true;
+            });
+
+            function getIconState() {
+                const stopBtn = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop"], button[aria-label*="Arrêter"]');
+                if (stopBtn) return 'stop';
+                const micBtn = document.querySelector('button[data-testid="composer-speech-button"]');
+                if (micBtn) return 'mic';
+                return 'other';
+            }
+
+            function getResponseText() {
+                const turns = document.querySelectorAll('[data-testid="conversation-turn"]');
+                if (turns.length > 0) {
+                    const lastTurn = turns[turns.length - 1];
+                    const md = lastTurn.querySelector('.markdown');
+                    const text = md ? md.innerText : (lastTurn.innerText || '');
+                    return text.trim();
+                }
+                return '';
+            }
+
+            function checkForCompletion() {
+                const state = getIconState();
+                if (lastIconState === 'stop' && state === 'mic') {
+                    setTimeout(() => {
+                        if (captureComplete) return;
+                        const text = getResponseText();
+                        if (text && text !== lastResponseText) {
+                            captureComplete = true;
+                            lastResponseText = text;
+                            chrome.runtime.sendMessage({
+                                type: 'CHATGPT_RESPONSE_CAPTURED',
+                                content: text,
+                                promptId: currentPromptId,
+                                timestamp: Date.now(),
+                                responseDelay: pendingPromptTimestamp ? (Date.now() - pendingPromptTimestamp) : null
+                            }, resp => {
+                                if (chrome.runtime.lastError) {
+                                    console.error('[MLC ChatGPTCapture] Error sending response:', chrome.runtime.lastError);
+                                    captureComplete = false;
+                                } else {
+                                    currentPromptId = null;
+                                }
+                            });
+                        }
+                    }, 500);
+                }
+                lastIconState = state;
+            }
+
+            const observer = new MutationObserver(checkForCompletion);
+            observer.observe(document.body, { childList: true, subtree: true, attributes: true });
+
+            const interval = setInterval(checkForCompletion, 3000);
+
+            window.addEventListener('beforeunload', () => {
+                clearInterval(interval);
+                observer.disconnect();
+            });
+        }
+
+        setTimeout(observeChatGPTResponses, 3000);
+    }
+
 })();
