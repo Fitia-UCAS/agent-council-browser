@@ -25,11 +25,12 @@ function sendMessageToPopup(message) {
 const defaultFollowUpState = {
     originalPrompt: null,
     originalSourceLLM: null, // 'chatgpt' | 'gemini'
-    originalSourceTabId: null, // Tab ID of the initial LLM
-    targetLLM: null, // 'gemini' | 'chatgpt' - The LLM the prompt is forwarded to
-    // targetLLMTabId: null, // Tab ID of the target LLM - can be discovered or stored if needed
-    capturedResponseContent: null, // Content from the target LLM
-    responseScraped: false, // Boolean, true if capturedResponseContent is filled
+    originalChatGPTTabId: null,
+    originalGeminiTabId: null,
+    geminiResponseContentForFollowUp: null,
+    chatgptResponseContentForFollowUp: null,
+    geminiResponseScraped: false,
+    chatgptResponseScraped: false,
     promptTimestamp: 0, // Track when the prompt was sent
     promptId: null, // Unique ID for this prompt-response cycle
     waitingForResponse: false // Flag to track when we're waiting for a response
@@ -157,22 +158,36 @@ function handleForwardPrompt(message, sender) {
         // processLLM is called after this block
     } else if (from === 'gemini') {
         targetLLM = 'chatgpt';
-        resetFollowUpState(); // Reset for the new G->C flow
+        // Setup follow-up state for Gemini origin
+        resetFollowUpState();
 
-        activeFollowUpState.originalSourceLLM = 'gemini';
-        activeFollowUpState.originalSourceTabId = sender?.tab?.id || null;
-        activeFollowUpState.targetLLM = 'chatgpt';
+        const promptId = generatePromptId();
+        const timestamp = Date.now();
+
         activeFollowUpState.originalPrompt = prompt;
-        activeFollowUpState.promptId = generatePromptId();
-        activeFollowUpState.promptTimestamp = Date.now();
+        activeFollowUpState.originalSourceLLM = 'gemini';
+        activeFollowUpState.originalGeminiTabId = sender?.tab?.id || null;
+        activeFollowUpState.promptTimestamp = timestamp;
+        activeFollowUpState.promptId = promptId;
         activeFollowUpState.waitingForResponse = true;
 
-        console.log('[MLC FollowUp G->C] Initialized follow-up tracking for Gemini to ChatGPT:', activeFollowUpState);
-
-        // The call to processLLM for 'chatgpt' will happen after this block.
-        // After processLLM, we notify the ChatGPT tab.
-        // This structure assumes processLLM is called right after this 'if/else if' block.
-        // We'll add the notification part after the processLLM call.
+        // Notify ChatGPT tab that a new prompt was sent
+        findLLMTab('chatgpt').then(chatTab => {
+            if (chatTab) {
+                activeFollowUpState.originalChatGPTTabId = chatTab.id;
+                try {
+                    chrome.tabs.sendMessage(chatTab.id, {
+                        type: 'NEW_PROMPT_SENT',
+                        promptId,
+                        timestamp,
+                        prompt: prompt.substring(0, 100)
+                    });
+                    console.log(`[MLC FollowUp] Notified ChatGPT tab ${chatTab.id} of new prompt`);
+                } catch (err) {
+                    console.error('[MLC FollowUp] Error notifying ChatGPT tab:', err);
+                }
+            }
+        });
     }
 
     if (targetLLM) {
@@ -240,77 +255,29 @@ function handleGeminiResponse(message) {
 }
 
 function handleChatGPTResponse(message) {
-    console.log('[MLC FollowUp G->C] ChatGPT response received:', {
+    console.log('[MLC FollowUp] ChatGPT response received:', {
         content: message.content ? message.content.substring(0, 50) + '...' : 'None',
         promptId: message.promptId,
-        statePromptId: activeFollowUpState.promptId,
-        stateWaiting: activeFollowUpState.waitingForResponse,
-        stateSourceLLM: activeFollowUpState.originalSourceLLM
+        responseDelay: message.responseDelay,
+        waitingState: activeFollowUpState.waitingForResponse,
+        currentPromptId: activeFollowUpState.promptId
     });
 
-    if (!activeFollowUpState.waitingForResponse ||
-        activeFollowUpState.originalSourceLLM !== 'gemini' || // Expecting Gemini as the original source
-        activeFollowUpState.targetLLM !== 'chatgpt' ||      // Expecting ChatGPT as the target that responded
-        activeFollowUpState.promptId !== message.promptId) {
-        console.warn('[MLC FollowUp G->C] Mismatched state or unexpected response. Ignoring.', {
-            messagePromptId: message.promptId,
-            state: activeFollowUpState
-        });
-        return;
-    }
-
     if (!message.content || message.content.trim().length === 0) {
-        console.log('[MLC FollowUp G->C] Received empty ChatGPT response, ignoring.');
+        console.log('[MLC FollowUp] Received empty ChatGPT response, ignoring.');
         return;
     }
 
-    activeFollowUpState.capturedResponseContent = message.content;
-    activeFollowUpState.responseScraped = true;
-    activeFollowUpState.waitingForResponse = false; // No longer waiting for THIS response
+    console.log('[MLC FollowUp] Valid ChatGPT response received, accepting for follow-up.');
+    activeFollowUpState.chatgptResponseContentForFollowUp = message.content;
+    activeFollowUpState.chatgptResponseScraped = true;
+    activeFollowUpState.waitingForResponse = false;
 
-    console.log('[MLC FollowUp G->C] Stored ChatGPT response, attempting trigger to Gemini.');
-    triggerFollowUpToGeminiIfReady();
+    console.log('[MLC FollowUp] Stored ChatGPT response, attempting trigger.');
+    triggerFollowUpIfReady();
 }
 
-function triggerFollowUpToGeminiIfReady() {
-    console.log('[MLC FollowUp G->C] Checking conditions for follow-up to Gemini.');
-    if (
-        activeFollowUpState.originalSourceLLM === 'gemini' &&
-        activeFollowUpState.targetLLM === 'chatgpt' && // Ensure ChatGPT was the target that responded
-        activeFollowUpState.responseScraped &&
-        activeFollowUpState.capturedResponseContent &&
-        activeFollowUpState.originalSourceTabId // This is the original Gemini tab
-    ) {
-        console.log('[MLC FollowUp G->C] Conditions met, injecting follow-up prompt to Gemini.');
-        const followUpPromptText = `Regarding my previous prompt, I also asked ChatGPT, and here's its perspective:\n\n"${activeFollowUpState.capturedResponseContent}"\n\nWhat are your thoughts on this, or can you integrate this into your previous answer?`;
-        injectFollowUpIntoGemini(activeFollowUpState.originalSourceTabId, followUpPromptText);
-        resetFollowUpState();
-    } else {
-        console.log('[MLC FollowUp G->C] Not ready for follow-up to Gemini yet.', activeFollowUpState);
-    }
-}
-
-async function injectFollowUpIntoGemini(tabId, promptText) {
-    try {
-        console.log(`[MLC FollowUp G->C] Injecting follow-up into Gemini tab ${tabId}.`);
-        // Ensure simpleInteraction_InjectOnly is robust for Gemini's input field
-        const results = await chrome.scripting.executeScript({
-            target: { tabId },
-            func: simpleInteraction_InjectOnly,
-            args: [promptText, 'gemini'] // llmType is 'gemini'
-        });
-        if (results && results[0] && results[0].result && results[0].result.success) {
-            console.log('[MLC FollowUp G->C] Follow-up prompt injected successfully into Gemini.');
-        } else {
-            console.error('[MLC FollowUp G->C] Failed to inject follow-up prompt into Gemini.', results);
-        }
-    } catch (error) {
-        console.error('[MLC FollowUp G->C] Error during follow-up injection into Gemini:', error);
-    }
-}
-
-// Renamed from triggerFollowUpIfReady to be specific for C->G->C
-function triggerFollowUpToChatGPTIfReady() {
+function triggerFollowUpIfReady() {
     if (
         activeFollowUpState.originalSourceLLM === 'chatgpt' &&
         activeFollowUpState.targetLLM === 'gemini' &&
@@ -321,6 +288,16 @@ function triggerFollowUpToChatGPTIfReady() {
         console.log('[MLC FollowUp C->G->C] Conditions met, injecting follow-up prompt to ChatGPT.');
         const followUpPromptText = `I also asked Gemini the same question, and here's its response:\n\n"${activeFollowUpState.capturedResponseContent}"\n\nCould you review this and see if you can enhance your previous answer or confirm if your current one is comprehensive?`;
         injectFollowUpIntoChatGPT(activeFollowUpState.originalSourceTabId, followUpPromptText);
+        resetFollowUpState();
+    } else if (
+        activeFollowUpState.originalSourceLLM === 'gemini' &&
+        activeFollowUpState.chatgptResponseScraped &&
+        activeFollowUpState.chatgptResponseContentForFollowUp &&
+        activeFollowUpState.originalGeminiTabId
+    ) {
+        console.log('[MLC FollowUp] Conditions met for Gemini origin, injecting follow-up.');
+        const followUpPromptText = `I also asked ChatGPT the same question here's his answer:\n${activeFollowUpState.chatgptResponseContentForFollowUp}\n\nCould you read your answer and his answer to see if you can enhance yours or if everything's good.`;
+        injectFollowUpIntoGemini(activeFollowUpState.originalGeminiTabId, followUpPromptText);
         resetFollowUpState();
     } else {
         console.log('[MLC FollowUp C->G->C] Not ready for follow-up to ChatGPT yet.', activeFollowUpState);
@@ -345,6 +322,24 @@ async function injectFollowUpIntoChatGPT(tabId, promptText) {
     }
 }
 
+async function injectFollowUpIntoGemini(tabId, promptText) {
+    try {
+        console.log(`[MLC FollowUp] Injecting follow-up into Gemini tab ${tabId}.`);
+        const results = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: simpleInteraction_InjectOnly,
+            args: [promptText, 'gemini']
+        });
+        if (results && results[0] && results[0].result && results[0].result.success) {
+            console.log('[MLC FollowUp] Follow-up prompt injected successfully into Gemini.');
+        } else {
+            console.error('[MLC FollowUp] Failed to inject follow-up prompt into Gemini.', results);
+        }
+    } catch (error) {
+        console.error('[MLC FollowUp] Error during follow-up injection into Gemini:', error);
+    }
+}
+
 // Inject-only variant: sets text but does NOT send.
 // This function needs to be robust for both ChatGPT and Gemini.
 function simpleInteraction_InjectOnly(prompt, llmType) {
@@ -357,12 +352,11 @@ function simpleInteraction_InjectOnly(prompt, llmType) {
                 'textarea[placeholder*="Message"]',
                 'textarea'
             ],
-            gemini: [ // Added Gemini selectors here
+            gemini: [
                 'div.ql-editor[role="textbox"]',
                 '.ql-editor.textarea',
-                'div[contenteditable="true"][aria-label*="prompt"]',
-                'textarea[placeholder*="Enter a prompt"]',
-                'textarea[placeholder*="Ask"]',
+                'div[contenteditable="true"]',
+                'textarea',
                 '[contenteditable="true"]'
             ]
         };
