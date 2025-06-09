@@ -21,6 +21,31 @@ function sendMessageToPopup(message) {
     }
 }
 
+// Follow-up template loaded from config/promp.json
+let followUpTemplate =
+    'I also asked {otherLLM} the same question. Here is their answer:\n{otherAnswer}\n\nPlease review both responses and enhance yours if necessary or confirm when they agree.';
+
+async function loadFollowUpTemplate() {
+    try {
+        const resp = await fetch(chrome.runtime.getURL('config/promp.json'));
+        const data = await resp.json();
+        if (data && data.followUpTemplate) {
+            followUpTemplate = data.followUpTemplate;
+            console.log('[MLC Config] Loaded follow-up template from config');
+        }
+    } catch (err) {
+        console.warn('[MLC Config] Failed to load template, using default:', err);
+    }
+}
+
+loadFollowUpTemplate();
+
+function buildFollowUpPrompt(otherLLM, answerText) {
+    return followUpTemplate
+        .replace('{otherLLM}', otherLLM)
+        .replace('{otherAnswer}', answerText);
+}
+
 // FOLLOW-UP STATE FOR AUTO PROMPT V2
 const defaultFollowUpState = {
     originalPrompt: null,
@@ -241,7 +266,7 @@ function triggerFollowUpIfReady() {
         activeFollowUpState.originalChatGPTTabId
     ) {
         console.log('[MLC FollowUp] Conditions met, injecting follow-up prompt to ChatGPT.');
-        const followUpPromptText = `I also asked Gemini the same question here's his answer:\n${activeFollowUpState.geminiResponseContentForFollowUp}\n\nCould you read your answer and his answer to see if you can enhance yours or if everything's good.`;
+        const followUpPromptText = buildFollowUpPrompt('Gemini', activeFollowUpState.geminiResponseContentForFollowUp);
         injectFollowUpIntoChatGPT(activeFollowUpState.originalChatGPTTabId, followUpPromptText);
         resetFollowUpState();
     } else if (
@@ -251,7 +276,7 @@ function triggerFollowUpIfReady() {
         activeFollowUpState.originalGeminiTabId
     ) {
         console.log('[MLC FollowUp] Conditions met, injecting follow-up prompt to Gemini.');
-        const followUpPromptText = `I also asked ChatGPT the same question here's his answer:\n${activeFollowUpState.chatGPTResponseContentForFollowUp}\n\nCould you read your answer and his answer to see if you can enhance yours or if everything's good.`;
+        const followUpPromptText = buildFollowUpPrompt('ChatGPT', activeFollowUpState.chatGPTResponseContentForFollowUp);
         injectFollowUpIntoGemini(activeFollowUpState.originalGeminiTabId, followUpPromptText);
         resetFollowUpState();
     } else {

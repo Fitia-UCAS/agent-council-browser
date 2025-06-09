@@ -1,0 +1,3 @@
+{
+  "followUpTemplate": "I also asked {otherLLM} the same question. Here is their answer:\n{otherAnswer}\n\nPlease review both responses and improve your own if needed, or confirm when it already matches."
+}
