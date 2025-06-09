@@ -859,6 +859,88 @@
 
         // Delay to let the page stabilize
         setTimeout(observeGeminiResponses, 3000);
+    } else if (isChatGPT) {
+        function observeChatGPTResponses() {
+            console.log('[MLC ChatGPTCapture] Starting ChatGPT response capture...');
+
+            let pendingPromptTimestamp = 0;
+            let currentPromptId = null;
+            let lastResponseText = '';
+            let captureComplete = false;
+            let lastIconState = null;
+
+            chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+                if (msg.type === 'NEW_PROMPT_SENT') {
+                    currentPromptId = msg.promptId;
+                    pendingPromptTimestamp = msg.timestamp;
+                    lastResponseText = '';
+                    captureComplete = false;
+                    lastIconState = null;
+                    if (sendResponse) sendResponse({ received: true });
+                }
+                return true;
+            });
+
+            function getIconState() {
+                const stopBtn = document.querySelector('button[data-testid="stop-button"]');
+                if (stopBtn) return 'stop';
+                const micBtn = document.querySelector('button[data-testid="composer-speech-button"]');
+                if (micBtn) return 'mic';
+                return 'unknown';
+            }
+
+            function isComplete() {
+                const state = getIconState();
+                if (lastIconState === 'stop' && state === 'mic') {
+                    lastIconState = state;
+                    return true;
+                }
+                lastIconState = state;
+                return state === 'mic';
+            }
+
+            function getLatestResponse() {
+                const turns = document.querySelectorAll('[data-testid="conversation-turn"]');
+                if (turns.length > 0) {
+                    const last = turns[turns.length - 1];
+                    const markdown = last.querySelector('.markdown');
+                    const text = markdown ? markdown.innerText : (last.innerText || '');
+                    return text.trim();
+                }
+                const md = document.querySelectorAll('.markdown');
+                if (md.length > 0) return md[md.length - 1].innerText.trim();
+                return '';
+            }
+
+            function attemptCapture() {
+                if (!currentPromptId || captureComplete) return;
+                if (!isComplete()) return;
+                const text = getLatestResponse();
+                if (!text || text === lastResponseText) return;
+
+                chrome.runtime.sendMessage({
+                    type: 'CHATGPT_RESPONSE_CAPTURED',
+                    content: text,
+                    promptId: currentPromptId,
+                    timestamp: Date.now()
+                }, () => {});
+
+                captureComplete = true;
+                lastResponseText = text;
+                currentPromptId = null;
+            }
+
+            const observer = new MutationObserver(attemptCapture);
+            observer.observe(document.body, { childList: true, subtree: true });
+
+            setInterval(attemptCapture, 3000);
+
+            window.addEventListener('beforeunload', () => {
+                observer.disconnect();
+            });
+        }
+
+        setTimeout(observeChatGPTResponses, 3000);
     }
 
 })();
