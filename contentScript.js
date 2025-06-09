@@ -887,10 +887,12 @@
             });
 
             function getIconState() {
-                const stopBtn = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop"], button[aria-label*="Arrêter"]');
+                const stopBtn = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop" i], button[aria-label*="Arrêter" i]');
                 if (stopBtn) return 'stop';
                 const micBtn = document.querySelector('button[data-testid="composer-speech-button"]');
                 if (micBtn) return 'mic';
+                const sendBtn = document.querySelector('button[data-testid="send-button"], form button[type="submit"]');
+                if (sendBtn) return 'send';
                 return 'other';
             }
 
@@ -929,7 +931,7 @@
                                 }
                             });
                         }
-                    }, 500);
+                    }, 600);
                 }
                 lastIconState = state;
             }

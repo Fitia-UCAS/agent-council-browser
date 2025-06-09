@@ -163,6 +163,7 @@ function handleForwardPrompt(message, sender) {
         chrome.tabs.query({ url: ["*://chat.openai.com/*", "*://chatgpt.com/*"] }, (tabs) => {
             if (tabs && tabs.length > 0) {
                 const chatgptTab = tabs[0];
+                activeFollowUpState.originalChatGPTTabId = chatgptTab.id;
                 try {
                     chrome.tabs.sendMessage(chatgptTab.id, {
                         type: 'NEW_PROMPT_SENT',
