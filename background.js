@@ -219,16 +219,27 @@ function formatMultiAgentPrompt(targetLLM, iteration, originalPrompt, history) {
     
     prompt += `Current Status: Iteration ${iteration}/${activeMultiAgentState.maxIterations}, ${targetLLM}'s turn\n\n`;
     
-    prompt += `Original User Question: ${originalPrompt}\n\n`;
-    
-    if (history.length > 0) {
-        prompt += `Previous Exchanges:\n`;
-        history.forEach((entry, index) => {
-            prompt += `${entry.llm.toUpperCase()}: ${entry.content}\n\n`;
-        });
+    if (iteration === 1) {
+        // First iteration: just send original prompt
+        prompt += `Original User Question: ${originalPrompt}\n\n`;
+        prompt += `Now respond as ${targetLLM.toUpperCase()}. Be constructive, collaborative, and critical.`;
+    } else if (iteration === 2) {
+        // Second iteration: send original prompt + first response
+        prompt += `Original User Question: ${originalPrompt}\n\n`;
+        if (history.length > 0) {
+            const firstResponse = history[0];
+            prompt += `${firstResponse.llm.toUpperCase()}'s Response: ${firstResponse.content}\n\n`;
+        }
+        prompt += `Now respond as ${targetLLM.toUpperCase()}. Be constructive, collaborative, and critical. Don't just agree - add value, challenge assumptions, or provide new perspectives.`;
+    } else {
+        // Third+ iteration: just append the latest response from the other LLM
+        if (history.length > 0) {
+            const latestResponse = history[history.length - 1];
+            prompt += `Here's ${latestResponse.llm.toUpperCase()}'s response (Iteration ${latestResponse.iteration}):\n\n`;
+            prompt += `${latestResponse.content}\n\n`;
+            prompt += `Now respond as ${targetLLM.toUpperCase()}. Be constructive, collaborative, and critical. Build on this response, challenge assumptions, or provide new perspectives.`;
+        }
     }
-    
-    prompt += `Now respond as ${targetLLM.toUpperCase()}. Be constructive, collaborative, and critical. Don't just agree - add value, challenge assumptions, or provide new perspectives.`;
     
     return prompt;
 }
@@ -655,8 +666,7 @@ async function findLLMTab(llmType) {
             allTabs = titleMatches;
         }
         
-        const selectedTab = allTabs.find(tab => tab.active && tab.windowId === chrome.windows.WINDOW_ID_CURRENT) || // Prefer active in current window
-                            allTabs.find(tab => tab.active) || // Prefer any active
+        const selectedTab = allTabs.find(tab => tab.active) || // Prefer any active tab
                             allTabs[0]; // Fallback to first found
         
         console.log(`[MLC Background] findLLMTab for ${llmType} selected:`, selectedTab ? {id: selectedTab.id, url: selectedTab.url, title: selectedTab.title} : 'None');
@@ -866,24 +876,53 @@ async function simpleInteraction(prompt, llmType) { // Added async here for the 
 
 
 async function checkConnectionStatus() {
-    // ... (keep existing checkConnectionStatus logic) ...
-    // Add a log at the end:
-    // console.log('[MLC Background] Final connection status:', status);
-    // return status;
     const status = {
         gemini: false,
         chatgpt: false
     };
     
+    console.log('[MLC Background] Starting connection status check...');
+    
     try {
-        const allTabs = await chrome.tabs.query({});
+        // Check if tabs exist and content scripts are responsive
+        console.log('[MLC Background] Looking for Gemini tab...');
+        const geminiTab = await findLLMTab('gemini');
+        console.log('[MLC Background] Gemini tab result:', geminiTab ? `Found tab ${geminiTab.id}` : 'Not found');
         
-        const geminiTabs = allTabs.filter(tab => tab.url && tab.url.includes('gemini.google.com'));
-        status.gemini = geminiTabs.length > 0;
+        console.log('[MLC Background] Looking for ChatGPT tab...');
+        const chatgptTab = await findLLMTab('chatgpt');
+        console.log('[MLC Background] ChatGPT tab result:', chatgptTab ? `Found tab ${chatgptTab.id}` : 'Not found');
         
-        const chatgptKeywords = ['chat.openai.com', 'chatgpt.com'];
-        const chatgptTabs = allTabs.filter(tab => tab.url && chatgptKeywords.some(keyword => tab.url.includes(keyword)));
-        status.chatgpt = chatgptTabs.length > 0;
+        // Test if content scripts are actually loaded by trying to ping them
+        if (geminiTab) {
+            try {
+                console.log('[MLC Background] Pinging Gemini content script...');
+                const response = await chrome.tabs.sendMessage(geminiTab.id, { type: 'PING' });
+                console.log('[MLC Background] Gemini ping response:', response);
+                status.gemini = true;
+                console.log('[MLC Background] Gemini tab responsive:', geminiTab.id);
+            } catch (error) {
+                console.log('[MLC Background] Gemini tab found but content script not responsive:', error.message);
+                status.gemini = false;
+            }
+        } else {
+            console.log('[MLC Background] No Gemini tab found');
+        }
+        
+        if (chatgptTab) {
+            try {
+                console.log('[MLC Background] Pinging ChatGPT content script...');
+                const response = await chrome.tabs.sendMessage(chatgptTab.id, { type: 'PING' });
+                console.log('[MLC Background] ChatGPT ping response:', response);
+                status.chatgpt = true;
+                console.log('[MLC Background] ChatGPT tab responsive:', chatgptTab.id);
+            } catch (error) {
+                console.log('[MLC Background] ChatGPT tab found but content script not responsive:', error.message);
+                status.chatgpt = false;
+            }
+        } else {
+            console.log('[MLC Background] No ChatGPT tab found');
+        }
 
     } catch (error) {
         console.error('[MLC Background] Error checking connection status:', error);

@@ -10,6 +10,16 @@
 
     console.log(`[MLC ContentScript] Initializing for ${currentLLM}. Forwarding to ${forwardTo}.`);
 
+    // Global message listener for connection testing
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.type === 'PING') {
+            console.log(`[MLC ContentScript - ${currentLLM}] Received PING, responding with PONG`);
+            sendResponse({ type: 'PONG', llm: currentLLM, status: 'ready' });
+            return true; // Keep message channel open for async response
+        }
+        return false; // Don't handle other messages here
+    });
+
     function findInput() {
         const selectors = isChatGPT ? [
             '#prompt-textarea',
@@ -294,7 +304,7 @@
             let lastCaptureTime = 0;
             let lastMessageCount = 0; // Track message count to detect new responses
             let pendingPromptTimestamp = 0; // Track when the last prompt was sent
-            let responseCaptureDelayMs = 2000; // Minimum delay after prompt before capturing
+            let responseCaptureDelayMs = 5000; // Increased for reasoning models (was 2000)
             let currentPromptId = null; // ID of the current prompt we're waiting for
             let lastIconState = null; // Track the last icon state to detect transitions
             let iconTransitionTimeout = null; // Timeout for icon state transitions

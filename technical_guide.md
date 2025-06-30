@@ -240,6 +240,38 @@ if (lastIconState === 'stop' && currentIconState === 'mic') {
 5. Send to background script with session context
 ```
 
+### Critical Issue: Reasoning Models (GPT-o3, o1, etc.)
+
+**Problem Identified**: Reasoning models that take extended thinking time (30-60+ seconds) cause multi-agent sessions to fail.
+
+**Root Cause**: Response capture timeouts and detection logic aren't designed for extended reasoning periods.
+
+**Symptoms**:
+- Multi-agent works perfectly with fast models (GPT-4, Claude, etc.)
+- Fails when starting with reasoning models (GPT-o3)
+- Response never gets captured/forwarded to next LLM
+- Session appears to hang or timeout
+
+**Technical Details**:
+```javascript
+// Current timeout issues in contentScript.js:
+const responseCaptureDelayMs = 2000; // Too short for reasoning models
+setInterval(captureAndSend, 4000);   // Check interval too frequent
+stableCounter >= 3;                  // Stability check too impatient
+
+// Reasoning models need:
+- Extended timeouts (60+ seconds)
+- Different completion detection (reasoning UI changes)
+- Patient stability checking
+- Robust session state management
+```
+
+**UI Patterns for Reasoning Models**:
+- Shows "thinking" or "reasoning" indicators
+- May have progress bars or thinking animations  
+- Takes 30-120 seconds before showing response
+- Different DOM structure during reasoning phase
+
 ---
 
 ## Multi-Agent Session Management
