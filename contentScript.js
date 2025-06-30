@@ -301,12 +301,18 @@
 
             // Listen for messages from background script about new prompts
             chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-                if (message.type === 'NEW_PROMPT_SENT') {
-                    console.log(`[MLC GeminiCapture] Received notification of new prompt sent: ${message.promptId}`);
+                if (message.type === 'NEW_PROMPT_SENT' || message.type === 'NEW_MULTI_AGENT_PROMPT_SENT') {
+                    console.log(`[MLC GeminiCapture] Received notification of new prompt sent: ${message.promptId || message.sessionId}`);
 
                     // Store the prompt ID and timestamp
-                    currentPromptId = message.promptId;
+                    currentPromptId = message.promptId || message.sessionId;
                     pendingPromptTimestamp = message.timestamp;
+                    
+                    // Store multi-agent session info if present
+                    if (message.type === 'NEW_MULTI_AGENT_PROMPT_SENT') {
+                        console.log(`[MLC GeminiCapture] Multi-agent prompt detected - Session: ${message.sessionId}, Iteration: ${message.iteration}`);
+                        currentPromptId = message.sessionId; // Use session ID for multi-agent
+                    }
 
                     // Reset capture state completely
                     captureComplete = false;
@@ -514,10 +520,15 @@
                                 // Set capture as complete IMMEDIATELY to prevent duplicate captures
                                 captureComplete = true;
                                 
+                                // Determine if this is a multi-agent response
+                                const isMultiAgent = currentPromptId && currentPromptId.startsWith('session_');
+                                
                                 chrome.runtime.sendMessage({
-                                    type: 'GEMINI_RESPONSE_CAPTURED',
+                                    type: isMultiAgent ? 'MULTI_AGENT_RESPONSE_CAPTURED' : 'GEMINI_RESPONSE_CAPTURED',
                                     content: responseText,
                                     promptId: currentPromptId,
+                                    sessionId: isMultiAgent ? currentPromptId : null,
+                                    sourceLLM: 'gemini',
                                     timestamp: Date.now(),
                                     responseDelay: pendingPromptTimestamp ? (Date.now() - pendingPromptTimestamp) : null
                                 }, response => {
@@ -786,10 +797,15 @@
                     // Log the actual content we're sending (beginning)
                     console.log('[MLC GeminiCapture] Response content preview:', responseText.substring(0, 200));
 
+                    // Determine if this is a multi-agent response
+                    const isMultiAgent = currentPromptId && currentPromptId.startsWith('session_');
+                    
                     chrome.runtime.sendMessage({
-                        type: 'GEMINI_RESPONSE_CAPTURED',
+                        type: isMultiAgent ? 'MULTI_AGENT_RESPONSE_CAPTURED' : 'GEMINI_RESPONSE_CAPTURED',
                         content: responseText,
                         promptId: currentPromptId, // Include the prompt ID this response is for
+                        sessionId: isMultiAgent ? currentPromptId : null,
+                        sourceLLM: 'gemini',
                         timestamp: Date.now(),
                         responseDelay: pendingPromptTimestamp ? (Date.now() - pendingPromptTimestamp) : null
                     }, response => {
@@ -870,12 +886,19 @@
             let pendingPromptTimestamp = 0;
 
             chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-                if (message.type === 'NEW_PROMPT_SENT') {
-                    currentPromptId = message.promptId;
+                if (message.type === 'NEW_PROMPT_SENT' || message.type === 'NEW_MULTI_AGENT_PROMPT_SENT') {
+                    currentPromptId = message.promptId || message.sessionId;
                     pendingPromptTimestamp = message.timestamp;
                     captureComplete = false;
                     stableCounter = 0;
                     lastResponseText = '';
+                    
+                    // Store multi-agent session info if present
+                    if (message.type === 'NEW_MULTI_AGENT_PROMPT_SENT') {
+                        console.log(`[MLC ChatGPTCapture] Multi-agent prompt detected - Session: ${message.sessionId}, Iteration: ${message.iteration}`);
+                        currentPromptId = message.sessionId; // Use session ID for multi-agent
+                    }
+                    
                     if (sendResponse) sendResponse({ received: true });
                 }
                 return true;
@@ -909,10 +932,15 @@
                     lastResponseText = text;
                 }
                 if (stableCounter >= 2) {
+                    // Determine if this is a multi-agent response
+                    const isMultiAgent = currentPromptId && currentPromptId.startsWith('session_');
+                    
                     chrome.runtime.sendMessage({
-                        type: 'CHATGPT_RESPONSE_CAPTURED',
+                        type: isMultiAgent ? 'MULTI_AGENT_RESPONSE_CAPTURED' : 'CHATGPT_RESPONSE_CAPTURED',
                         content: text,
                         promptId: currentPromptId,
+                        sessionId: isMultiAgent ? currentPromptId : null,
+                        sourceLLM: 'chatgpt',
                         timestamp: Date.now(),
                         responseDelay: pendingPromptTimestamp ? (Date.now() - pendingPromptTimestamp) : null
                     });
@@ -948,14 +976,21 @@
             const responseCaptureDelayMs = 2000; // Minimum delay after prompt
 
             chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-                if (message.type === 'NEW_PROMPT_SENT' && message.to === 'chatgpt') { // Ensure message is for ChatGPT
-                    console.log(`[MLC ChatGPTCapture] Received new prompt notification: ${message.promptId}`);
-                    currentPromptId = message.promptId;
+                if ((message.type === 'NEW_PROMPT_SENT' && message.to === 'chatgpt') || message.type === 'NEW_MULTI_AGENT_PROMPT_SENT') {
+                    console.log(`[MLC ChatGPTCapture] Received new prompt notification: ${message.promptId || message.sessionId}`);
+                    currentPromptId = message.promptId || message.sessionId;
                     pendingPromptTimestamp = message.timestamp;
                     captureComplete = false;
                     isCapturing = false;
                     stableCounter = 0;
                     lastResponseText = '';
+                    
+                    // Store multi-agent session info if present
+                    if (message.type === 'NEW_MULTI_AGENT_PROMPT_SENT') {
+                        console.log(`[MLC ChatGPTCapture] Multi-agent prompt detected - Session: ${message.sessionId}, Iteration: ${message.iteration}`);
+                        currentPromptId = message.sessionId; // Use session ID for multi-agent
+                    }
+                    
                     // It's important to acknowledge receipt of the message
                     if (sendResponse) sendResponse({ received: true, for: 'chatgpt' });
                 }
@@ -1049,10 +1084,15 @@
                         console.log('[MLC ChatGPTCapture] Response appears stable, sending to background. Prompt ID:', currentPromptId);
                         // console.log('[MLC ChatGPTCapture] Content preview:', responseText.substring(0,100));
 
+                        // Determine if this is a multi-agent response
+                        const isMultiAgent = currentPromptId && currentPromptId.startsWith('session_');
+                        
                         chrome.runtime.sendMessage({
-                            type: 'CHATGPT_RESPONSE_CAPTURED',
+                            type: isMultiAgent ? 'MULTI_AGENT_RESPONSE_CAPTURED' : 'CHATGPT_RESPONSE_CAPTURED',
                             content: responseText,
                             promptId: currentPromptId,
+                            sessionId: isMultiAgent ? currentPromptId : null,
+                            sourceLLM: 'chatgpt',
                             timestamp: Date.now()
                         }, response => {
                             if (chrome.runtime.lastError) {

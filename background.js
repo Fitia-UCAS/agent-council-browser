@@ -47,6 +47,32 @@ function generatePromptId() {
     return 'prompt_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 }
 
+// MULTI-AGENT SYSTEM STATE MANAGEMENT
+const defaultMultiAgentState = {
+    isActive: false,
+    maxIterations: 3,
+    currentIteration: 0,
+    currentTurnLLM: 'chatgpt', // who should respond next
+    originalPrompt: '',
+    originalSourceLLM: '', // where it started
+    conversationHistory: [], // array of {llm: 'chatgpt'|'gemini', content: '...', iteration: 1}
+    originalTabId: null,
+    waitingForResponse: false,
+    sessionId: null, // unique ID for this multi-agent session
+    sessionStartTime: 0
+};
+let activeMultiAgentState = { ...defaultMultiAgentState };
+
+function resetMultiAgentState() {
+    activeMultiAgentState = { ...defaultMultiAgentState };
+    console.log('[MLC MultiAgent] Multi-agent state reset.');
+}
+
+// Generate a unique ID for each multi-agent session
+function generateSessionId() {
+    return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
 // Message handling
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[MLC Background] Received message:', message);
@@ -76,6 +102,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 });
             });
             return true; // Keep message channel open for async response
+        case 'START_MULTI_AGENT_SESSION':
+            handleStartMultiAgentSession(message, sender);
+            sendResponse({ status: 'multi_agent_session_started', type: message.type });
+            break;
+        case 'MULTI_AGENT_RESPONSE_CAPTURED':
+            handleMultiAgentResponse(message);
+            sendResponse({ status: 'multi_agent_response_received', type: message.type });
+            break;
+        case 'END_MULTI_AGENT_SESSION':
+            handleEndMultiAgentSession(message);
+            sendResponse({ status: 'multi_agent_session_ended', type: message.type });
+            break;
         default:
             console.warn('[MLC Background] Unknown message type:', message.type);
             sendResponse({ status: 'unknown_message_type' });
@@ -85,11 +123,224 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false; // Don't keep message channel open unless returning true for async
 });
 
+// MULTI-AGENT SYSTEM CORE FUNCTIONS
+
+function handleStartMultiAgentSession(message, sender) {
+    const { prompt, sourceLLM, maxIterations = 3 } = message;
+    console.log('[MLC MultiAgent] Starting multi-agent session:', { prompt: prompt.substring(0, 50), sourceLLM, maxIterations });
+    
+    // Reset and initialize multi-agent state
+    resetMultiAgentState();
+    activeMultiAgentState.isActive = true;
+    activeMultiAgentState.maxIterations = maxIterations;
+    activeMultiAgentState.currentIteration = 1;
+    activeMultiAgentState.originalPrompt = prompt;
+    activeMultiAgentState.originalSourceLLM = sourceLLM;
+    activeMultiAgentState.originalTabId = sender?.tab?.id || null;
+    activeMultiAgentState.sessionId = generateSessionId();
+    activeMultiAgentState.sessionStartTime = Date.now();
+    activeMultiAgentState.currentTurnLLM = sourceLLM; // Start with the source LLM
+    activeMultiAgentState.waitingForResponse = true;
+
+    console.log('[MLC MultiAgent] Session initialized:', activeMultiAgentState.sessionId);
+    
+    // Format and send the initial multi-agent prompt
+    const formattedPrompt = formatMultiAgentPrompt(sourceLLM, 1, prompt, []);
+    sendMultiAgentTurn(sourceLLM, formattedPrompt, activeMultiAgentState.sessionId);
+    
+    // Notify popup of session start
+    sendMessageToPopup({
+        type: 'MULTI_AGENT_SESSION_STARTED',
+        sessionId: activeMultiAgentState.sessionId,
+        maxIterations: maxIterations,
+        currentIteration: 1,
+        currentTurnLLM: sourceLLM
+    });
+}
+
+function handleMultiAgentResponse(message) {
+    const { content, sourceLLM, sessionId } = message;
+    
+    if (!activeMultiAgentState.isActive || activeMultiAgentState.sessionId !== sessionId) {
+        console.log('[MLC MultiAgent] Ignoring response - session not active or wrong session ID');
+        return;
+    }
+    
+    console.log('[MLC MultiAgent] Processing response from:', sourceLLM, 'Session:', sessionId);
+    
+    // Add response to conversation history
+    activeMultiAgentState.conversationHistory.push({
+        llm: sourceLLM,
+        content: content,
+        iteration: activeMultiAgentState.currentIteration,
+        timestamp: Date.now()
+    });
+    
+    activeMultiAgentState.waitingForResponse = false;
+    
+    // Determine next turn
+    const nextLLM = sourceLLM === 'chatgpt' ? 'gemini' : 'chatgpt';
+    
+    // Check if session should continue
+    if (activeMultiAgentState.currentIteration >= activeMultiAgentState.maxIterations) {
+        // Session complete
+        console.log('[MLC MultiAgent] Session complete after', activeMultiAgentState.maxIterations, 'iterations');
+        endMultiAgentSession();
+        return;
+    }
+    
+    // Continue to next iteration
+    activeMultiAgentState.currentIteration++;
+    activeMultiAgentState.currentTurnLLM = nextLLM;
+    activeMultiAgentState.waitingForResponse = true;
+    
+    // Format and send next turn
+    const formattedPrompt = formatMultiAgentPrompt(
+        nextLLM, 
+        activeMultiAgentState.currentIteration, 
+        activeMultiAgentState.originalPrompt, 
+        activeMultiAgentState.conversationHistory
+    );
+    
+    sendMultiAgentTurn(nextLLM, formattedPrompt, activeMultiAgentState.sessionId);
+    
+    // Notify popup of turn progress
+    sendMessageToPopup({
+        type: 'MULTI_AGENT_TURN_COMPLETE',
+        sessionId: activeMultiAgentState.sessionId,
+        currentIteration: activeMultiAgentState.currentIteration,
+        currentTurnLLM: nextLLM,
+        conversationHistory: activeMultiAgentState.conversationHistory
+    });
+}
+
+function formatMultiAgentPrompt(targetLLM, iteration, originalPrompt, history) {
+    let prompt = `You're in a multi-agent system where ChatGPT and Gemini will collaborate for ${activeMultiAgentState.maxIterations} iterations.\n\n`;
+    
+    prompt += `Current Status: Iteration ${iteration}/${activeMultiAgentState.maxIterations}, ${targetLLM}'s turn\n\n`;
+    
+    prompt += `Original User Question: ${originalPrompt}\n\n`;
+    
+    if (history.length > 0) {
+        prompt += `Previous Exchanges:\n`;
+        history.forEach((entry, index) => {
+            prompt += `${entry.llm.toUpperCase()}: ${entry.content}\n\n`;
+        });
+    }
+    
+    prompt += `Now respond as ${targetLLM.toUpperCase()}. Be constructive, collaborative, and critical. Don't just agree - add value, challenge assumptions, or provide new perspectives.`;
+    
+    return prompt;
+}
+
+async function sendMultiAgentTurn(targetLLM, formattedPrompt, sessionId) {
+    try {
+        console.log(`[MLC MultiAgent] Sending turn to ${targetLLM} for session ${sessionId}`);
+        
+        // Find target LLM tab
+        const tab = await findLLMTab(targetLLM);
+        if (!tab) {
+            console.error(`[MLC MultiAgent] ${targetLLM} tab not found`);
+            endMultiAgentSessionWithError(`${targetLLM} tab not found`);
+            return;
+        }
+        
+        // Send formatted prompt with session context
+        await injectAndExecuteMultiAgent(tab.id, targetLLM, formattedPrompt, sessionId);
+        
+    } catch (error) {
+        console.error(`[MLC MultiAgent] Error sending turn to ${targetLLM}:`, error);
+        endMultiAgentSessionWithError(error.message);
+    }
+}
+
+async function injectAndExecuteMultiAgent(tabId, llmType, prompt, sessionId) {
+    try {
+        console.log(`[MLC MultiAgent] Injecting multi-agent prompt into ${llmType} tab ${tabId}`);
+        
+        const results = await chrome.scripting.executeScript({
+            target: { tabId: tabId },
+            func: simpleInteraction,
+            args: [prompt, llmType]
+        });
+        
+        if (results && results[0] && results[0].result && results[0].result.success) {
+            console.log(`[MLC MultiAgent] Multi-agent prompt sent successfully to ${llmType}`);
+            
+            // Notify the content script about the new multi-agent prompt
+            chrome.tabs.sendMessage(tabId, {
+                type: 'NEW_MULTI_AGENT_PROMPT_SENT',
+                sessionId: sessionId,
+                timestamp: Date.now(),
+                llmType: llmType,
+                iteration: activeMultiAgentState.currentIteration
+            });
+        } else {
+            throw new Error(`Failed to inject prompt into ${llmType}`);
+        }
+        
+    } catch (error) {
+        console.error(`[MLC MultiAgent] Error injecting multi-agent script for ${llmType}:`, error);
+        throw error;
+    }
+}
+
+function handleEndMultiAgentSession(message) {
+    console.log('[MLC MultiAgent] Ending multi-agent session:', message.reason || 'User requested');
+    endMultiAgentSession();
+}
+
+function endMultiAgentSession() {
+    if (!activeMultiAgentState.isActive) return;
+    
+    const sessionSummary = {
+        sessionId: activeMultiAgentState.sessionId,
+        totalIterations: activeMultiAgentState.conversationHistory.length,
+        duration: Date.now() - activeMultiAgentState.sessionStartTime,
+        conversationHistory: activeMultiAgentState.conversationHistory
+    };
+    
+    console.log('[MLC MultiAgent] Session ended:', sessionSummary);
+    
+    // Notify popup
+    sendMessageToPopup({
+        type: 'MULTI_AGENT_SESSION_ENDED',
+        summary: sessionSummary
+    });
+    
+    // Reset state
+    resetMultiAgentState();
+}
+
+function endMultiAgentSessionWithError(errorMessage) {
+    console.error('[MLC MultiAgent] Session ended with error:', errorMessage);
+    
+    sendMessageToPopup({
+        type: 'MULTI_AGENT_SESSION_ERROR',
+        error: errorMessage,
+        sessionId: activeMultiAgentState.sessionId
+    });
+    
+    resetMultiAgentState();
+}
+
 async function handleSendPrompt(message) {
-    const { prompt, targets } = message;
+    const { prompt, targets, multiAgent } = message;
     
-    console.log('[MLC Background] Processing SEND_PROMPT:', { prompt: `"${prompt.substring(0,50)}..."`, targets });
+    console.log('[MLC Background] Processing SEND_PROMPT:', { prompt: `"${prompt.substring(0,50)}..."`, targets, multiAgent });
     
+    // Check if multi-agent mode is requested
+    if (multiAgent && multiAgent.enabled) {
+        const sourceLLM = targets.chatgpt ? 'chatgpt' : 'gemini';
+        handleStartMultiAgentSession({
+            prompt: prompt,
+            sourceLLM: sourceLLM,
+            maxIterations: multiAgent.maxIterations || 3
+        }, { tab: { id: null } }); // We'll get the tab ID from the current active tab
+        return;
+    }
+    
+    // Regular mode - send to individual LLMs
     if (targets.gemini) {
         await processLLM('gemini', prompt);
     }

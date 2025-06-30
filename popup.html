@@ -139,6 +139,22 @@
             color: var(--text-muted);
             font-style: italic;
         }
+        .multi-agent-section {
+            background: var(--bg-secondary);
+            border-radius: 6px;
+            padding: var(--spacing-sm);
+            margin-bottom: var(--spacing-md);
+        }
+        .multi-agent-controls {
+            margin-top: var(--spacing-xs);
+            padding-left: var(--spacing-md);
+        }
+        .session-status {
+            background: var(--bg-tertiary);
+            border-radius: 4px;
+            padding: var(--spacing-xs);
+            margin-top: var(--spacing-xs);
+        }
     </style>
 </head>
 <body>
@@ -170,6 +186,30 @@
                     <input type="checkbox" id="use-chatgpt" checked>
                     <span>ChatGPT</span>
                 </label>
+            </div>
+            
+            <div class="multi-agent-section">
+                <label class="llm-option">
+                    <input type="checkbox" id="multi-agent-mode">
+                    <span>🤖 Multi-Agent Mode</span>
+                </label>
+                <div id="multi-agent-controls" class="multi-agent-controls" style="display: none;">
+                    <div class="input-group">
+                        <label for="iterations-input" style="font-size: 0.8rem; color: var(--text-secondary);">Iterations:</label>
+                        <input type="number" id="iterations-input" min="1" max="10" value="3" style="width: 60px; padding: 4px; margin-left: 8px; background: var(--bg-tertiary); border: 1px solid var(--border-primary); border-radius: 4px; color: var(--text-primary);">
+                    </div>
+                    <div id="session-status" class="session-status" style="display: none;">
+                        <div style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 4px;">
+                            Session: <span id="session-iteration">0</span>/<span id="session-max">3</span>
+                        </div>
+                        <div style="font-size: 0.75rem; color: var(--accent-primary);">
+                            <span id="current-turn">Ready</span>
+                        </div>
+                        <button id="stop-session-btn" style="background: var(--accent-error); color: white; border: none; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; margin-top: 4px; cursor: pointer;">
+                            Stop Session
+                        </button>
+                    </div>
+                </div>
             </div>
             
             <button id="send-button" class="send-btn" disabled>
