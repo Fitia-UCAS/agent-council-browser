@@ -6,7 +6,21 @@
 // Extension installation
 chrome.runtime.onInstalled.addListener(() => {
     console.log('[MLC Background] Multi-LLM Coder extension installed/updated.');
+    if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+        chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((error) => {
+            console.warn('[MLC Background] Failed to set side panel behavior:', error);
+        });
+    }
 });
+
+if (chrome.action && chrome.sidePanel && chrome.sidePanel.open) {
+    chrome.action.onClicked.addListener((tab) => {
+        const windowId = tab?.windowId;
+        chrome.sidePanel.open(windowId ? { windowId } : {}).catch((error) => {
+            console.warn('[MLC Background] Failed to open side panel on action click:', error);
+        });
+    });
+}
 
 // Safe message sending function
 function sendMessageToPopup(message) {
@@ -47,36 +61,79 @@ function generatePromptId() {
     return 'prompt_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 }
 
-// MULTI-AGENT SYSTEM STATE MANAGEMENT
-const defaultMultiAgentState = {
-    isActive: false,
-    maxIterations: 3,
-    currentIteration: 0,
-    currentTurnLLM: 'chatgpt', // who should respond next
-    originalPrompt: '',
-    originalSourceLLM: '', // where it started
-    conversationHistory: [], // array of {llm: 'chatgpt'|'gemini', content: '...', iteration: 1}
-    originalTabId: null,
-    waitingForResponse: false,
-    sessionId: null, // unique ID for this multi-agent session
-    sessionStartTime: 0
-};
-let activeMultiAgentState = { ...defaultMultiAgentState };
+// DEBATE SESSION STATE MANAGEMENT
+const ACTIVE_SESSION_KEY = 'mlc_active_session_v2';
+const PREFERRED_TABS_KEY = 'mlc_preferred_tabs';
 
-function resetMultiAgentState() {
-    activeMultiAgentState = { ...defaultMultiAgentState };
-    console.log('[MLC MultiAgent] Multi-agent state reset.');
+const defaultDebateState = {
+    isActive: false,
+    sessionId: null,
+    rounds: 0,
+    totalTurns: 0,
+    turnIndex: 1,
+    firstLLM: 'chatgpt',
+    secondLLM: 'gemini',
+    tabIds: { chatgpt: null, gemini: null },
+    userQuery: '',
+    messages: [],
+    waitingFor: null,
+    lastPromptId: null,
+    lastPromptTimestamp: 0,
+    startedAt: 0,
+    endedAt: 0
+};
+
+let activeDebateState = { ...defaultDebateState };
+
+function resetDebateState() {
+    activeDebateState = { ...defaultDebateState };
+    console.log('[MLC Debate] State reset.');
 }
 
-// Generate a unique ID for each multi-agent session
 function generateSessionId() {
     return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+async function loadActiveDebateState() {
+    if (activeDebateState.sessionId) {
+        return activeDebateState;
+    }
+    const stored = await chrome.storage.local.get(ACTIVE_SESSION_KEY);
+    if (stored && stored[ACTIVE_SESSION_KEY]) {
+        activeDebateState = stored[ACTIVE_SESSION_KEY];
+    }
+    return activeDebateState;
+}
+
+async function persistDebateState() {
+    await chrome.storage.local.set({ [ACTIVE_SESSION_KEY]: activeDebateState });
+}
+
+async function getPreferredTabs() {
+    const stored = await chrome.storage.local.get(PREFERRED_TABS_KEY);
+    return stored && stored[PREFERRED_TABS_KEY] ? stored[PREFERRED_TABS_KEY] : { chatgpt: null, gemini: null };
+}
+
+async function setPreferredTabs(payload = {}) {
+    const { chatgptTabId, geminiTabId } = payload;
+    const current = await getPreferredTabs();
+    const next = { ...current };
+
+    if (Object.prototype.hasOwnProperty.call(payload, 'chatgptTabId')) {
+        next.chatgpt = Number.isFinite(chatgptTabId) ? chatgptTabId : null;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'geminiTabId')) {
+        next.gemini = Number.isFinite(geminiTabId) ? geminiTabId : null;
+    }
+
+    await chrome.storage.local.set({ [PREFERRED_TABS_KEY]: next });
+    return next;
 }
 
 // Message handling
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[MLC Background] Received message:', message);
-    
+
     switch (message.type) {
         case 'SEND_PROMPT':
             handleSendPrompt(message);
@@ -87,31 +144,87 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ status: 'forward_received', type: message.type });
             break;
         case 'GEMINI_RESPONSE_CAPTURED':
+            handleDebateResponse(message).catch(error => {
+                console.error('[MLC Debate] Error handling Gemini response:', error);
+            });
             handleGeminiResponse(message);
             sendResponse({ status: 'gemini_response_received', type: message.type });
             break;
         case 'CHATGPT_RESPONSE_CAPTURED':
+            handleDebateResponse(message).catch(error => {
+                console.error('[MLC Debate] Error handling ChatGPT response:', error);
+            });
             handleChatGPTResponse(message);
             sendResponse({ status: 'chatgpt_response_received', type: message.type });
             break;
+        case 'MLC_RESPONSE_CAPTURED':
+            handleDebateResponse(message).catch(error => {
+                console.error('[MLC Debate] Error handling response:', error);
+            });
+            sendResponse({ status: 'mlc_response_received', type: message.type });
+            break;
+        case 'MULTI_AGENT_RESPONSE_CAPTURED':
+            handleDebateResponse(message).catch(error => {
+                console.error('[MLC Debate] Error handling multi-agent response:', error);
+            });
+            sendResponse({ status: 'multi_agent_response_received', type: message.type });
+            break;
         case 'CHECK_CONNECTION':
             checkConnectionStatus().then(status => {
-                sendResponse({ 
+                sendMessageToPopup({
                     type: 'CONNECTION_STATUS',
-                    status: status 
+                    status: status
+                });
+                sendResponse({
+                    type: 'CONNECTION_STATUS',
+                    status: status
                 });
             });
             return true; // Keep message channel open for async response
+        case 'LIST_LLM_TABS':
+            handleListLLMTabs().catch(error => {
+                console.error('[MLC Debate] Error listing tabs:', error);
+            });
+            sendResponse({ status: 'listing_tabs', type: message.type });
+            break;
+        case 'SET_PREFERRED_TABS':
+            setPreferredTabs(message).then(() => handleListLLMTabs()).catch(error => {
+                console.error('[MLC Debate] Error saving preferred tabs:', error);
+            });
+            sendResponse({ status: 'preferred_tabs_saved', type: message.type });
+            break;
+        case 'GET_ACTIVE_SESSION':
+            handleGetActiveSession().catch(error => {
+                console.error('[MLC Debate] Error getting active session:', error);
+            });
+            sendResponse({ status: 'active_session_sent', type: message.type });
+            break;
+        case 'START_DEBATE_SESSION':
+            handleStartDebateSession(message).catch(error => {
+                console.error('[MLC Debate] Error starting session:', error);
+            });
+            sendResponse({ status: 'debate_session_started', type: message.type });
+            break;
+        case 'STOP_SESSION':
+            handleStopDebateSession(message).catch(error => {
+                console.error('[MLC Debate] Error stopping session:', error);
+            });
+            sendResponse({ status: 'debate_session_stopped', type: message.type });
+            break;
         case 'START_MULTI_AGENT_SESSION':
-            handleStartMultiAgentSession(message, sender);
+            handleStartDebateSession({
+                prompt: message.prompt,
+                firstLLM: message.sourceLLM,
+                rounds: message.maxIterations
+            }).catch(error => {
+                console.error('[MLC Debate] Error starting multi-agent session:', error);
+            });
             sendResponse({ status: 'multi_agent_session_started', type: message.type });
             break;
-        case 'MULTI_AGENT_RESPONSE_CAPTURED':
-            handleMultiAgentResponse(message);
-            sendResponse({ status: 'multi_agent_response_received', type: message.type });
-            break;
         case 'END_MULTI_AGENT_SESSION':
-            handleEndMultiAgentSession(message);
+            handleStopDebateSession({ reason: message.reason || 'User requested' }).catch(error => {
+                console.error('[MLC Debate] Error stopping multi-agent session:', error);
+            });
             sendResponse({ status: 'multi_agent_session_ended', type: message.type });
             break;
         default:
@@ -119,220 +232,292 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ status: 'unknown_message_type' });
             break;
     }
-    
-    return false; // Don't keep message channel open unless returning true for async
+
+    return false;
 });
 
-// MULTI-AGENT SYSTEM CORE FUNCTIONS
-
-function handleStartMultiAgentSession(message, sender) {
-    const { prompt, sourceLLM, maxIterations = 3 } = message;
-    console.log('[MLC MultiAgent] Starting multi-agent session:', { prompt: prompt.substring(0, 50), sourceLLM, maxIterations });
-    
-    // Reset and initialize multi-agent state
-    resetMultiAgentState();
-    activeMultiAgentState.isActive = true;
-    activeMultiAgentState.maxIterations = maxIterations;
-    activeMultiAgentState.currentIteration = 1;
-    activeMultiAgentState.originalPrompt = prompt;
-    activeMultiAgentState.originalSourceLLM = sourceLLM;
-    activeMultiAgentState.originalTabId = sender?.tab?.id || null;
-    activeMultiAgentState.sessionId = generateSessionId();
-    activeMultiAgentState.sessionStartTime = Date.now();
-    activeMultiAgentState.currentTurnLLM = sourceLLM; // Start with the source LLM
-    activeMultiAgentState.waitingForResponse = true;
-
-    console.log('[MLC MultiAgent] Session initialized:', activeMultiAgentState.sessionId);
-    
-    // Format and send the initial multi-agent prompt
-    const formattedPrompt = formatMultiAgentPrompt(sourceLLM, 1, prompt, []);
-    sendMultiAgentTurn(sourceLLM, formattedPrompt, activeMultiAgentState.sessionId);
-    
-    // Notify popup of session start
+async function handleListLLMTabs() {
+    const chatgptTabs = await listLLMTabs('chatgpt');
+    const geminiTabs = await listLLMTabs('gemini');
+    const sanitize = (tab) => ({
+        id: tab.id,
+        title: tab.title,
+        url: tab.url,
+        active: tab.active,
+        lastAccessed: tab.lastAccessed,
+        status: tab.status
+    });
+    const preferred = await getPreferredTabs();
     sendMessageToPopup({
-        type: 'MULTI_AGENT_SESSION_STARTED',
-        sessionId: activeMultiAgentState.sessionId,
-        maxIterations: maxIterations,
-        currentIteration: 1,
-        currentTurnLLM: sourceLLM
+        type: 'LLM_TABS_LIST',
+        tabs: {
+            chatgpt: chatgptTabs.map(sanitize),
+            gemini: geminiTabs.map(sanitize)
+        },
+        preferred: preferred
     });
 }
 
-function handleMultiAgentResponse(message) {
-    const { content, sourceLLM, sessionId } = message;
-    
-    if (!activeMultiAgentState.isActive || activeMultiAgentState.sessionId !== sessionId) {
-        console.log('[MLC MultiAgent] Ignoring response - session not active or wrong session ID');
+async function handleGetActiveSession() {
+    const session = await loadActiveDebateState();
+    if (!session || !session.sessionId) {
+        sendMessageToPopup({ type: 'ACTIVE_SESSION', session: null });
         return;
     }
-    
-    console.log('[MLC MultiAgent] Processing response from:', sourceLLM, 'Session:', sessionId);
-    
-    // Add response to conversation history
-    activeMultiAgentState.conversationHistory.push({
-        llm: sourceLLM,
-        content: content,
-        iteration: activeMultiAgentState.currentIteration,
-        timestamp: Date.now()
-    });
-    
-    activeMultiAgentState.waitingForResponse = false;
-    
-    // Determine next turn
-    const nextLLM = sourceLLM === 'chatgpt' ? 'gemini' : 'chatgpt';
-    
-    // Check if session should continue
-    if (activeMultiAgentState.currentIteration >= activeMultiAgentState.maxIterations) {
-        // Session complete
-        console.log('[MLC MultiAgent] Session complete after', activeMultiAgentState.maxIterations, 'iterations');
-        endMultiAgentSession();
+    sendMessageToPopup({ type: 'ACTIVE_SESSION', session: session });
+}
+
+async function handleStartDebateSession(message) {
+    const prompt = (message.prompt || '').trim();
+    const rounds = Math.max(1, parseInt(message.rounds, 10) || 1);
+    const firstLLM = message.firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
+    const secondLLM = firstLLM === 'chatgpt' ? 'gemini' : 'chatgpt';
+    const requestedTabs = message.tabIds || {};
+
+    if (!prompt) {
+        sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: 'Prompt is empty.' });
         return;
     }
-    
-    // Continue to next iteration
-    activeMultiAgentState.currentIteration++;
-    activeMultiAgentState.currentTurnLLM = nextLLM;
-    activeMultiAgentState.waitingForResponse = true;
-    
-    // Format and send next turn
-    const formattedPrompt = formatMultiAgentPrompt(
-        nextLLM, 
-        activeMultiAgentState.currentIteration, 
-        activeMultiAgentState.originalPrompt, 
-        activeMultiAgentState.conversationHistory
-    );
-    
-    sendMultiAgentTurn(nextLLM, formattedPrompt, activeMultiAgentState.sessionId);
-    
-    // Notify popup of turn progress
-    sendMessageToPopup({
-        type: 'MULTI_AGENT_TURN_COMPLETE',
-        sessionId: activeMultiAgentState.sessionId,
-        currentIteration: activeMultiAgentState.currentIteration,
-        currentTurnLLM: nextLLM,
-        conversationHistory: activeMultiAgentState.conversationHistory
-    });
-}
 
-function formatMultiAgentPrompt(targetLLM, iteration, originalPrompt, history) {
-    let prompt = `You're in a multi-agent system where ChatGPT and Gemini will collaborate for ${activeMultiAgentState.maxIterations} iterations.\n\n`;
-    
-    prompt += `Current Status: Iteration ${iteration}/${activeMultiAgentState.maxIterations}, ${targetLLM}'s turn\n\n`;
-    
-    if (iteration === 1) {
-        // First iteration: just send original prompt
-        prompt += `Original User Question: ${originalPrompt}\n\n`;
-        prompt += `Now respond as ${targetLLM.toUpperCase()}. Be constructive, collaborative, and critical.`;
-    } else if (iteration === 2) {
-        // Second iteration: send original prompt + first response
-        prompt += `Original User Question: ${originalPrompt}\n\n`;
-        if (history.length > 0) {
-            const firstResponse = history[0];
-            prompt += `${firstResponse.llm.toUpperCase()}'s Response: ${firstResponse.content}\n\n`;
-        }
-        prompt += `Now respond as ${targetLLM.toUpperCase()}. Be constructive, collaborative, and critical. Don't just agree - add value, challenge assumptions, or provide new perspectives.`;
-    } else {
-        // Third+ iteration: just append the latest response from the other LLM
-        if (history.length > 0) {
-            const latestResponse = history[history.length - 1];
-            prompt += `Here's ${latestResponse.llm.toUpperCase()}'s response (Iteration ${latestResponse.iteration}):\n\n`;
-            prompt += `${latestResponse.content}\n\n`;
-            prompt += `Now respond as ${targetLLM.toUpperCase()}. Be constructive, collaborative, and critical. Build on this response, challenge assumptions, or provide new perspectives.`;
-        }
+    if (activeDebateState.isActive) {
+        await endDebateSession('Session replaced by a new request.');
     }
-    
-    return prompt;
-}
 
-async function sendMultiAgentTurn(targetLLM, formattedPrompt, sessionId) {
-    try {
-        console.log(`[MLC MultiAgent] Sending turn to ${targetLLM} for session ${sessionId}`);
-        
-        // Find target LLM tab
-        const tab = await findLLMTab(targetLLM);
-        if (!tab) {
-            console.error(`[MLC MultiAgent] ${targetLLM} tab not found`);
-            endMultiAgentSessionWithError(`${targetLLM} tab not found`);
-            return;
-        }
-        
-        // Send formatted prompt with session context
-        await injectAndExecuteMultiAgent(tab.id, targetLLM, formattedPrompt, sessionId);
-        
-    } catch (error) {
-        console.error(`[MLC MultiAgent] Error sending turn to ${targetLLM}:`, error);
-        endMultiAgentSessionWithError(error.message);
-    }
-}
-
-async function injectAndExecuteMultiAgent(tabId, llmType, prompt, sessionId) {
-    try {
-        console.log(`[MLC MultiAgent] Injecting multi-agent prompt into ${llmType} tab ${tabId}`);
-        
-        const results = await chrome.scripting.executeScript({
-            target: { tabId: tabId },
-            func: simpleInteraction,
-            args: [prompt, llmType]
+    if (Number.isFinite(requestedTabs.chatgpt) || Number.isFinite(requestedTabs.gemini)) {
+        await setPreferredTabs({
+            chatgptTabId: requestedTabs.chatgpt,
+            geminiTabId: requestedTabs.gemini
         });
-        
-        if (results && results[0] && results[0].result && results[0].result.success) {
-            console.log(`[MLC MultiAgent] Multi-agent prompt sent successfully to ${llmType}`);
-            
-            // Notify the content script about the new multi-agent prompt
-            chrome.tabs.sendMessage(tabId, {
-                type: 'NEW_MULTI_AGENT_PROMPT_SENT',
-                sessionId: sessionId,
-                timestamp: Date.now(),
-                llmType: llmType,
-                iteration: activeMultiAgentState.currentIteration
-            });
-        } else {
-            throw new Error(`Failed to inject prompt into ${llmType}`);
+    }
+
+    const preferred = await getPreferredTabs();
+    const chatgptTab = await resolveTabForLLM('chatgpt', requestedTabs.chatgpt, preferred.chatgpt);
+    const geminiTab = await resolveTabForLLM('gemini', requestedTabs.gemini, preferred.gemini);
+
+    if (!chatgptTab || !geminiTab) {
+        const missing = [];
+        if (!chatgptTab) missing.push('ChatGPT');
+        if (!geminiTab) missing.push('Gemini');
+        sendMessageToPopup({
+            type: 'UI_SESSION_ERROR',
+            error: `${missing.join(' and ')} tab not found. Please open the required LLM tabs.`
+        });
+        return;
+    }
+
+    const now = Date.now();
+    activeDebateState = {
+        ...defaultDebateState,
+        isActive: true,
+        sessionId: generateSessionId(),
+        rounds: rounds,
+        totalTurns: rounds * 2,
+        turnIndex: 1,
+        firstLLM: firstLLM,
+        secondLLM: secondLLM,
+        tabIds: {
+            chatgpt: chatgptTab.id,
+            gemini: geminiTab.id
+        },
+        userQuery: prompt,
+        messages: [{ role: 'user', content: prompt, timestamp: now, turnIndex: 0 }],
+        startedAt: now
+    };
+
+    await persistDebateState();
+
+    sendMessageToPopup({
+        type: 'UI_SESSION_STARTED',
+        sessionId: activeDebateState.sessionId,
+        rounds: rounds,
+        firstLLM: firstLLM,
+        tabIds: activeDebateState.tabIds
+    });
+
+    sendMessageToPopup({
+        type: 'UI_MESSAGE_ADD',
+        role: 'user',
+        content: prompt,
+        timestamp: now,
+        turnIndex: 0
+    });
+
+    await sendDebateTurn(activeDebateState);
+}
+
+async function handleStopDebateSession(message) {
+    const reason = message.reason || 'Session stopped.';
+    if (message.sessionId && activeDebateState.sessionId && message.sessionId !== activeDebateState.sessionId) {
+        return;
+    }
+    await endDebateSession(reason);
+}
+
+function getRoundIndex(turnIndex) {
+    return Math.ceil(turnIndex / 2);
+}
+
+function getTurnLLM(session, turnIndex) {
+    return turnIndex % 2 === 1 ? session.firstLLM : session.secondLLM;
+}
+
+function formatLLMLabel(llmType) {
+    return llmType === 'gemini' ? 'Gemini' : 'ChatGPT';
+}
+
+function buildDebateHeader(rounds) {
+    return [
+        `Here is a multi-agent session with ChatGPT and Gemini over ${rounds} iterations.`,
+        'Please be constructive during your debate to bring the most accurate answer to the user.',
+        'Be critical, constructive, and fair.'
+    ].join('\n');
+}
+
+function getLastResponse(session, llmType) {
+    for (let i = session.messages.length - 1; i >= 0; i--) {
+        if (session.messages[i].role === llmType) {
+            return session.messages[i].content;
         }
-        
+    }
+    return '';
+}
+
+function buildDebatePrompt(session, turnIndex) {
+    const roundIndex = getRoundIndex(turnIndex);
+    const expectedLLM = getTurnLLM(session, turnIndex);
+    const expectedLabel = formatLLMLabel(expectedLLM);
+    const otherLLM = expectedLLM === session.firstLLM ? session.secondLLM : session.firstLLM;
+    const otherLabel = formatLLMLabel(otherLLM);
+    const safeOtherResponse = getLastResponse(session, otherLLM) || '[No prior response captured yet]';
+    const safeFirstResponse = getLastResponse(session, session.firstLLM) || '[No prior response captured yet]';
+
+    if (turnIndex === 1) {
+        return `${buildDebateHeader(session.rounds)}\n\nIteration: 1\nTurn: ${expectedLabel}\n\nUser query:\n${session.userQuery}`;
+    }
+
+    if (turnIndex === 2) {
+        return `${buildDebateHeader(session.rounds)}\n\nIteration: 1\nTurn: ${expectedLabel}\n\nUser query:\n${session.userQuery}\n\n${formatLLMLabel(session.firstLLM)} answer:\n${safeFirstResponse}\n\nNow respond with critique and improvements. If you disagree, explain why.`;
+    }
+
+    if (expectedLLM === session.firstLLM) {
+        return `Iteration: ${roundIndex}\nHere is ${otherLabel} answer from iteration ${roundIndex - 1}:\n${safeOtherResponse}\n\nNow respond as ${expectedLabel}.`;
+    }
+
+    return `Iteration: ${roundIndex}\nHere is ${otherLabel} answer:\n${safeOtherResponse}\n\nNow respond as ${expectedLabel}.`;
+}
+
+async function sendDebateTurn(session) {
+    const turnIndex = session.turnIndex;
+    const expectedLLM = getTurnLLM(session, turnIndex);
+    const promptText = buildDebatePrompt(session, turnIndex);
+    const promptId = `${session.sessionId}:turn:${turnIndex}`;
+
+    activeDebateState.waitingFor = expectedLLM;
+    activeDebateState.lastPromptId = promptId;
+    activeDebateState.lastPromptTimestamp = Date.now();
+
+    await persistDebateState();
+
+    sendMessageToPopup({
+        type: 'UI_SESSION_PROGRESS',
+        sessionId: session.sessionId,
+        waitingFor: expectedLLM,
+        roundIndex: getRoundIndex(turnIndex),
+        totalRounds: session.rounds
+    });
+
+    try {
+        await injectAndExecute(session.tabIds[expectedLLM], expectedLLM, promptText, {
+            sessionId: session.sessionId,
+            promptId: promptId,
+            turnIndex: turnIndex
+        });
     } catch (error) {
-        console.error(`[MLC MultiAgent] Error injecting multi-agent script for ${llmType}:`, error);
-        throw error;
+        await endDebateSession(error.message || 'Failed to send prompt.');
     }
 }
 
-function handleEndMultiAgentSession(message) {
-    console.log('[MLC MultiAgent] Ending multi-agent session:', message.reason || 'User requested');
-    endMultiAgentSession();
+async function handleDebateResponse(message) {
+    if (!message.sessionId) return;
+
+    const session = await loadActiveDebateState();
+    if (!session.isActive || session.sessionId !== message.sessionId) {
+        console.log('[MLC Debate] Ignoring response: session not active or mismatch.');
+        return;
+    }
+
+    const expectedLLM = session.waitingFor;
+    if (message.sourceLLM && expectedLLM && message.sourceLLM !== expectedLLM) {
+        console.log('[MLC Debate] Ignoring response from unexpected LLM:', message.sourceLLM);
+        return;
+    }
+
+    if (session.lastPromptId && message.promptId && session.lastPromptId !== message.promptId) {
+        console.log('[MLC Debate] Ignoring response with mismatched promptId.');
+        return;
+    }
+
+    if (message.turnIndex && message.turnIndex !== session.turnIndex) {
+        console.log('[MLC Debate] Ignoring response with mismatched turn index.');
+        return;
+    }
+
+    const content = (message.content || '').trim();
+    if (!content) return;
+
+    const turnIndex = session.turnIndex;
+    const roundIndex = getRoundIndex(turnIndex);
+    const timestamp = Date.now();
+
+    session.messages.push({
+        role: expectedLLM || message.sourceLLM || 'assistant',
+        content: content,
+        timestamp: timestamp,
+        turnIndex: turnIndex,
+        roundIndex: roundIndex
+    });
+
+    session.waitingFor = null;
+    session.lastPromptId = null;
+    session.lastPromptTimestamp = 0;
+
+    await persistDebateState();
+
+    sendMessageToPopup({
+        type: 'UI_MESSAGE_ADD',
+        role: expectedLLM || message.sourceLLM,
+        content: content,
+        timestamp: timestamp,
+        turnIndex: turnIndex,
+        roundIndex: roundIndex
+    });
+
+    if (turnIndex >= session.totalTurns) {
+        await endDebateSession('Session completed.');
+        return;
+    }
+
+    session.turnIndex = turnIndex + 1;
+    await persistDebateState();
+    await sendDebateTurn(session);
 }
 
-function endMultiAgentSession() {
-    if (!activeMultiAgentState.isActive) return;
-    
-    const sessionSummary = {
-        sessionId: activeMultiAgentState.sessionId,
-        totalIterations: activeMultiAgentState.conversationHistory.length,
-        duration: Date.now() - activeMultiAgentState.sessionStartTime,
-        conversationHistory: activeMultiAgentState.conversationHistory
-    };
-    
-    console.log('[MLC MultiAgent] Session ended:', sessionSummary);
-    
-    // Notify popup
-    sendMessageToPopup({
-        type: 'MULTI_AGENT_SESSION_ENDED',
-        summary: sessionSummary
-    });
-    
-    // Reset state
-    resetMultiAgentState();
-}
+async function endDebateSession(reason) {
+    const session = await loadActiveDebateState();
+    if (!session.sessionId) return;
 
-function endMultiAgentSessionWithError(errorMessage) {
-    console.error('[MLC MultiAgent] Session ended with error:', errorMessage);
-    
+    session.isActive = false;
+    session.waitingFor = null;
+    session.endedAt = Date.now();
+    await persistDebateState();
+
     sendMessageToPopup({
-        type: 'MULTI_AGENT_SESSION_ERROR',
-        error: errorMessage,
-        sessionId: activeMultiAgentState.sessionId
+        type: 'UI_SESSION_ENDED',
+        sessionId: session.sessionId,
+        reason: reason || 'Session ended.'
     });
-    
-    resetMultiAgentState();
+
+    resetDebateState();
 }
 
 async function handleSendPrompt(message) {
@@ -342,12 +527,12 @@ async function handleSendPrompt(message) {
     
     // Check if multi-agent mode is requested
     if (multiAgent && multiAgent.enabled) {
-        const sourceLLM = targets.chatgpt ? 'chatgpt' : 'gemini';
-        handleStartMultiAgentSession({
+        const firstLLM = targets.chatgpt ? 'chatgpt' : 'gemini';
+        handleStartDebateSession({
             prompt: prompt,
-            sourceLLM: sourceLLM,
-            maxIterations: multiAgent.maxIterations || 3
-        }, { tab: { id: null } }); // We'll get the tab ID from the current active tab
+            firstLLM: firstLLM,
+            rounds: multiAgent.maxIterations || 3
+        });
         return;
     }
     
@@ -389,23 +574,6 @@ function handleForwardPrompt(message, sender) {
 
         console.log('[MLC FollowUp] Initialized follow-up tracking:', activeFollowUpState);
 
-        // Send a message to the Gemini tab to notify it of the new prompt
-        chrome.tabs.query({ url: "*://gemini.google.com/*" }, (tabs) => {
-            if (tabs && tabs.length > 0) {
-                const geminiTab = tabs[0];
-                try {
-                    chrome.tabs.sendMessage(geminiTab.id, { 
-                        type: 'NEW_PROMPT_SENT',
-                        promptId,
-                        timestamp,
-                        prompt: prompt.substring(0, 100) // Send a snippet for debugging
-                    });
-                    console.log(`[MLC FollowUp] Notified Gemini tab ${geminiTab.id} of new prompt`);
-                } catch (err) {
-                    console.error('[MLC FollowUp] Error notifying Gemini tab:', err);
-                }
-            }
-        });
     } else if (from === 'gemini') {
         targetLLM = 'chatgpt';
 
@@ -421,33 +589,19 @@ function handleForwardPrompt(message, sender) {
         activeFollowUpState.promptId = promptId;
         activeFollowUpState.waitingForResponse = true;
 
-        chrome.tabs.query({ url: ["*://chat.openai.com/*", "*://chatgpt.com/*"] }, (tabs) => {
-            if (tabs && tabs.length > 0) {
-                const chatgptTab = tabs[0];
-                try {
-                    chrome.tabs.sendMessage(chatgptTab.id, {
-                        type: 'NEW_PROMPT_SENT',
-                        promptId,
-                        timestamp,
-                        prompt: prompt.substring(0, 100)
-                    });
-                    console.log(`[MLC FollowUp] Notified ChatGPT tab ${chatgptTab.id} of new prompt`);
-                } catch (err) {
-                    console.error('[MLC FollowUp] Error notifying ChatGPT tab:', err);
-                }
-            }
-        });
     }
 
     if (targetLLM) {
         console.log(`[MLC Background] Forwarding from ${from} to ${targetLLM}.`);
-        processLLM(targetLLM, prompt);
+        processLLM(targetLLM, prompt, { promptId: activeFollowUpState.promptId });
     } else {
         console.error('[MLC Background] Unknown "from" field for FORWARD_PROMPT:', from);
     }
 }
 
 function handleGeminiResponse(message) {
+    if (message.sessionId) return;
+
     console.log('[MLC FollowUp] Gemini response received:', {
         content: message.content ? message.content.substring(0, 50) + '...' : 'None',
         promptId: message.promptId,
@@ -472,9 +626,17 @@ function handleGeminiResponse(message) {
     
     console.log('[MLC FollowUp] Stored Gemini response, attempting trigger.');
     triggerFollowUpIfReady();
+
+    sendMessageToPopup({
+        type: 'LLM_RESPONSE',
+        llm: 'gemini',
+        content: message.content
+    });
 }
 
 function handleChatGPTResponse(message) {
+    if (message.sessionId) return;
+
     console.log('[MLC FollowUp] ChatGPT response received:', {
         content: message.content ? message.content.substring(0, 50) + '...' : 'None',
         promptId: message.promptId,
@@ -493,6 +655,12 @@ function handleChatGPTResponse(message) {
 
     console.log('[MLC FollowUp] Stored ChatGPT response, attempting trigger.');
     triggerFollowUpIfReady();
+
+    sendMessageToPopup({
+        type: 'LLM_RESPONSE',
+        llm: 'chatgpt',
+        content: message.content
+    });
 }
 
 function triggerFollowUpIfReady() {
@@ -607,78 +775,117 @@ function simpleInteraction_InjectOnly(prompt, llmType) {
     }
 }
 
-async function processLLM(llmType, prompt) {
+async function processLLM(llmType, prompt, context = {}) {
     try {
         console.log(`[MLC Background] processLLM for ${llmType} with prompt: "${prompt.substring(0, 50)}..."`);
-        
+
+        const preferred = await getPreferredTabs();
+        const preferredId = context.tabId || preferred[llmType];
+
         sendMessageToPopup({ type: 'LLM_PROGRESS', llm: llmType, status: 'Finding tab...' });
-        const tab = await findLLMTab(llmType);
-        
+        const tab = await findLLMTab(llmType, preferredId);
+
         if (!tab) {
             throw new Error(`${llmType} tab not found. Please open ${llmType} in a tab and ensure you're logged in.`);
         }
         console.log(`[MLC Background] Found ${llmType} tab: ID ${tab.id}, URL ${tab.url}`);
-        
+
         sendMessageToPopup({ type: 'LLM_PROGRESS', llm: llmType, status: 'Injecting script...' });
-        await injectAndExecute(tab.id, llmType, prompt);
-        
+        const promptId = context.promptId || generatePromptId();
+        await injectAndExecute(tab.id, llmType, prompt, {
+            promptId: promptId,
+            sessionId: context.sessionId || null,
+            turnIndex: context.turnIndex || null
+        });
+
+        return promptId;
     } catch (error) {
         console.error(`[MLC Background] Error processing ${llmType}:`, error.message, error.stack);
         sendMessageToPopup({ type: 'LLM_ERROR', llm: llmType, error: error.message });
+        return null;
     }
 }
 
-async function findLLMTab(llmType) {
-    // ... (keep existing findLLMTab logic, it seems reasonable) ...
-    // Add a log at the end of findLLMTab before returning:
-    // console.log(`[MLC Background] findLLMTab for ${llmType} selected:`, selectedTab ? {id: selectedTab.id, url: selectedTab.url, title: selectedTab.title} : 'None');
-    // return selectedTab;
+async function listLLMTabs(llmType) {
     const urlPatterns = {
         gemini: ['*://gemini.google.com/*'],
         chatgpt: [
-            '*://chat.openai.com/*', 
+            '*://chat.openai.com/*',
             '*://chatgpt.com/*',
             '*://openai.com/chatgpt*',
             '*://platform.openai.com/*'
         ]
     };
-    
+
     const patterns = urlPatterns[llmType];
     if (!patterns) {
-        throw new Error(`[MLC Background] Unknown LLM type for findLLMTab: ${llmType}`);
+        throw new Error(`[MLC Background] Unknown LLM type for listLLMTabs: ${llmType}`);
     }
-    
+
+    let allTabs = [];
+    for (const pattern of patterns) {
+        const tabs = await chrome.tabs.query({ url: pattern });
+        allTabs = allTabs.concat(tabs);
+    }
+
+    if (allTabs.length === 0) {
+        const allTabsQuery = await chrome.tabs.query({});
+        const titleMatches = allTabsQuery.filter(tab => {
+            const title = tab.title?.toLowerCase() || '';
+            const url = tab.url?.toLowerCase() || '';
+            const llmName = llmType.toLowerCase();
+            return title.includes(llmName) || url.includes(llmName) || (llmName === 'chatgpt' && (title.includes('openai') || url.includes('openai')));
+        });
+        allTabs = titleMatches;
+    }
+
+    const seen = new Set();
+    return allTabs.filter(tab => {
+        if (seen.has(tab.id)) return false;
+        seen.add(tab.id);
+        return true;
+    });
+}
+
+function selectTabFromList(tabs, preferredTabId) {
+    if (!tabs || tabs.length === 0) return null;
+    if (preferredTabId) {
+        const preferred = tabs.find(tab => tab.id === preferredTabId);
+        if (preferred) return preferred;
+    }
+
+    const activeTab = tabs.find(tab => tab.active);
+    if (activeTab) return activeTab;
+
+    const byLastAccessed = [...tabs].sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
+    return byLastAccessed[0] || null;
+}
+
+async function resolveTabForLLM(llmType, requestedTabId, preferredTabId) {
+    const tabs = await listLLMTabs(llmType);
+    const completeTabs = tabs.filter(tab => tab.status === 'complete');
+    const candidates = completeTabs.length > 0 ? completeTabs : tabs;
+
+    if (requestedTabId) {
+        const match = candidates.find(tab => tab.id === requestedTabId);
+        if (match) return match;
+    }
+
+    return selectTabFromList(candidates, preferredTabId);
+}
+
+async function findLLMTab(llmType, preferredTabId) {
     try {
-        let allTabs = [];
-        for (const pattern of patterns) {
-            const tabs = await chrome.tabs.query({ url: pattern, status: 'complete' });
-            allTabs = allTabs.concat(tabs);
-        }
-        
-        if (allTabs.length === 0) {
-            const allTabsQuery = await chrome.tabs.query({ status: 'complete' });
-            const titleMatches = allTabsQuery.filter(tab => {
-                const title = tab.title?.toLowerCase() || '';
-                const url = tab.url?.toLowerCase() || '';
-                const llmName = llmType.toLowerCase();
-                return title.includes(llmName) || url.includes(llmName) || (llmName === 'chatgpt' && (title.includes('openai') || url.includes('openai')));
-            });
-            allTabs = titleMatches;
-        }
-        
-        const selectedTab = allTabs.find(tab => tab.active) || // Prefer any active tab
-                            allTabs[0]; // Fallback to first found
-        
-        console.log(`[MLC Background] findLLMTab for ${llmType} selected:`, selectedTab ? {id: selectedTab.id, url: selectedTab.url, title: selectedTab.title} : 'None');
+        const selectedTab = await resolveTabForLLM(llmType, null, preferredTabId);
+        console.log(`[MLC Background] findLLMTab for ${llmType} selected:`, selectedTab ? { id: selectedTab.id, url: selectedTab.url, title: selectedTab.title } : 'None');
         return selectedTab;
-        
     } catch (error) {
         console.error(`[MLC Background] Error in findLLMTab for ${llmType}:`, error);
         return null;
     }
 }
 
-async function injectAndExecute(tabId, llmType, prompt) {
+async function injectAndExecute(tabId, llmType, prompt, context = {}) {
     try {
         console.log(`[MLC Background] Injecting simpleInteraction into Tab ID ${tabId} for ${llmType}.`);
         
@@ -696,11 +903,21 @@ async function injectAndExecute(tabId, llmType, prompt) {
             const result = results[0].result;
             if (result.success) {
                 console.log(`[MLC Background] simpleInteraction SUCCEEDED for ${llmType}: ${result.method}`);
-                sendMessageToPopup({
-                    type: 'LLM_RESPONSE',
-                    llm: llmType,
-                    content: `Prompt sent successfully to ${llmType} via ${result.method}.` // Response content is simple for now
-                });
+                const promptId = context.promptId || generatePromptId();
+                try {
+                    chrome.tabs.sendMessage(tabId, {
+                        type: 'MLC_PROMPT_SENT',
+                        sessionId: context.sessionId || null,
+                        promptId: promptId,
+                        llmType: llmType,
+                        turnIndex: context.turnIndex || null,
+                        timestamp: Date.now()
+                    });
+                } catch (error) {
+                    console.warn('[MLC Background] Failed to notify content script about prompt:', error);
+                }
+                sendMessageToPopup({ type: 'LLM_PROGRESS', llm: llmType, status: 'Prompt sent.' });
+                return promptId;
             } else {
                 console.error(`[MLC Background] simpleInteraction FAILED for ${llmType}:`, result.error);
                 throw new Error(result.error || `Unknown error in simpleInteraction for ${llmType}`);

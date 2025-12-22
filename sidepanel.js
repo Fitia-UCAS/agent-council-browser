@@ -1,537 +1,394 @@
-/**
- * Multi-LLM Coder Extension - Side Panel JavaScript
- * Handles UI interactions and communication with background script
- */
+/* global chrome */
 
-console.log('🚀 sidepanel.js loading...');
+const state = {
+    sessionId: null,
+    running: false,
+    autoScroll: true,
+    tabs: { chatgpt: [], gemini: [] },
+    preferred: { chatgpt: null, gemini: null }
+};
 
-// Wait for DOM to be ready
-document.addEventListener('DOMContentLoaded', function() {
-    console.log('✅ Multi-LLM Coder Extension DOM loaded');
-    console.log('🔗 Chrome runtime available:', !!chrome?.runtime);
-    
-    // Get DOM references
-    const promptInput = document.getElementById('prompt-input');
-    const sendButton = document.getElementById('send-button');
-    const charCount = document.getElementById('char-count');
-    const useGemini = document.getElementById('use-gemini');
-    const useChatGPT = document.getElementById('use-chatgpt');
-    const sendToChatGPT = document.getElementById('send-to-chatgpt');
-    const sendToGemini = document.getElementById('send-to-gemini');
-    
-    console.log('📋 DOM elements found:', {
-        promptInput: !!promptInput,
-        sendButton: !!sendButton,
-        charCount: !!charCount,
-        useGemini: !!useGemini,
-        useChatGPT: !!useChatGPT,
-        sendToChatGPT: !!sendToChatGPT,
-        sendToGemini: !!sendToGemini
-    });
-    
-    // Tab elements
-    const tabButtons = document.querySelectorAll('.tab-button');
-    const tabContents = document.querySelectorAll('.tab-content');
-    
-    // Status elements
-    const geminiStatus = document.getElementById('gemini-status');
-    const chatgptStatus = document.getElementById('chatgpt-status');
-    
-    // Initialize the extension
-    init();
-    
-    function init() {
-        console.log('Initializing Multi-LLM Coder...');
-        
-        // Set up event listeners
-        setupEventListeners();
-        
-        // Update UI state
-        updateSendButtonState();
-        updateCharCount();
-        
-        // Check connection status
-        checkConnectionStatus();
-        
-        console.log('Multi-LLM Coder initialized successfully');
-    }
-    
-    function setupEventListeners() {
-        // Prompt input events
-        if (promptInput) {
-            promptInput.addEventListener('input', handlePromptInput);
-            promptInput.addEventListener('keydown', handleKeyDown);
-        }
-        
-        // Send button
-        if (sendButton) {
-            sendButton.addEventListener('click', handleSendClick);
-        }
-        
-        // LLM checkboxes
-        if (useGemini) {
-            useGemini.addEventListener('change', updateSendButtonState);
-        }
-        if (useChatGPT) {
-            useChatGPT.addEventListener('change', updateSendButtonState);
-        }
+const elements = {};
 
-        // Forward buttons
-        if (sendToChatGPT) {
-            sendToChatGPT.addEventListener('click', handleSendToChatGPT);
-        }
-        if (sendToGemini) {
-            sendToGemini.addEventListener('click', handleSendToGemini);
-        }
-        
-        // Tab buttons
-        tabButtons.forEach(button => {
-            button.addEventListener('click', handleTabClick);
-        });
-        
-        // Footer buttons
-        const clearAllButton = document.getElementById('clear-all');
-        if (clearAllButton) {
-            clearAllButton.addEventListener('click', handleClearAll);
-        }
-        
-        // Listen for messages from background script
-        if (chrome && chrome.runtime) {
-            console.log('🔗 Setting up message listener...');
-            chrome.runtime.onMessage.addListener(handleBackgroundMessage);
-            console.log('✅ Message listener registered');
-            
-            // Test the connection immediately
-            console.log('🧪 Testing connection to background script...');
-            chrome.runtime.sendMessage({ type: 'SIDE_PANEL_READY' }, (response) => {
-                if (chrome.runtime.lastError) {
-                    console.error('❌ Connection test failed:', chrome.runtime.lastError);
-                } else {
-                    console.log('✅ Connection test successful:', response);
-                }
-            });
-        } else {
-            console.warn('⚠️ Chrome runtime not available');
-        }
-    }
-    
-    function handlePromptInput() {
-        updateCharCount();
-        updateSendButtonState();
-    }
-    
-    function handleKeyDown(event) {
-        // Handle Ctrl+Enter or Cmd+Enter
-        if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-            event.preventDefault();
-            handleSendClick();
-        }
-    }
-    
-    function handleSendClick() {
-        const prompt = promptInput?.value?.trim();
-        const geminiSelected = useGemini?.checked;
-        const chatgptSelected = useChatGPT?.checked;
-        
-        if (!prompt) {
-            showToast('Please enter a prompt', 'warning');
-            return;
-        }
-        
-        if (!geminiSelected && !chatgptSelected) {
-            showToast('Please select at least one LLM', 'warning');
-            return;
-        }
-        
-        console.log('Sending prompt:', prompt);
-        console.log('Targets:', { gemini: geminiSelected, chatgpt: chatgptSelected });
-        
-        // Show loading state
-        showLoading();
-        
-        // Send message to background script
-        if (chrome && chrome.runtime) {
-            chrome.runtime.sendMessage({
-                type: 'SEND_PROMPT',
-                prompt: prompt,
-                targets: {
-                    gemini: geminiSelected,
-                    chatgpt: chatgptSelected
-                }
-            });
-        } else {
-            // Fallback for testing in browser
-            console.log('Chrome runtime not available - showing mock response');
-            setTimeout(() => {
-                showMockResponse(prompt, geminiSelected, chatgptSelected);
-                hideLoading();
-            }, 2000);
-        }
-        
-        // Update status
-        if (geminiSelected) updateLLMStatus('gemini', 'Sending...');
-        if (chatgptSelected) updateLLMStatus('chatgpt', 'Sending...');
-    }
+document.addEventListener('DOMContentLoaded', () => {
+    elements.promptInput = document.getElementById('prompt-input');
+    elements.sendButton = document.getElementById('send-button');
+    elements.stopButton = document.getElementById('stop-button');
+    elements.charCount = document.getElementById('char-count');
+    elements.firstLLM = document.getElementById('first-llm');
+    elements.iterations = document.getElementById('iterations');
+    elements.chatgptTab = document.getElementById('chatgpt-tab');
+    elements.geminiTab = document.getElementById('gemini-tab');
+    elements.refreshTabs = document.getElementById('refresh-tabs');
+    elements.autoScroll = document.getElementById('auto-scroll');
+    elements.timeline = document.getElementById('timeline');
+    elements.emptyState = document.getElementById('empty-state');
+    elements.statusChatGPT = document.getElementById('status-chatgpt');
+    elements.statusGemini = document.getElementById('status-gemini');
+    elements.sessionStatus = document.getElementById('session-status');
 
-    function handleSendToChatGPT() {
-        const content = document.getElementById('gemini-content')?.textContent?.trim();
-        if (!content) {
-            showToast('No Gemini response to send', 'warning');
-            return;
-        }
+    bindEvents();
+    updateCharCount();
+    updateSendState();
 
-        showToast('Forwarding to ChatGPT...', 'info');
-        showLoading();
-        updateLLMStatus('chatgpt', 'Sending...');
-
-        if (chrome && chrome.runtime) {
-            chrome.runtime.sendMessage({
-                type: 'SEND_PROMPT',
-                prompt: content,
-                targets: { chatgpt: true }
-            });
-        }
-    }
-
-    function handleSendToGemini() {
-        const content = document.getElementById('chatgpt-content')?.textContent?.trim();
-        if (!content) {
-            showToast('No ChatGPT response to send', 'warning');
-            return;
-        }
-
-        showToast('Forwarding to Gemini...', 'info');
-        showLoading();
-        updateLLMStatus('gemini', 'Sending...');
-
-        if (chrome && chrome.runtime) {
-            chrome.runtime.sendMessage({
-                type: 'SEND_PROMPT',
-                prompt: content,
-                targets: { gemini: true }
-            });
-        }
-    }
-    
-    function handleBackgroundMessage(message, sender, sendResponse) {
-        console.log('Received message from background:', message);
-        
-        switch (message.type) {
-            case 'LLM_RESPONSE':
-                handleLLMResponse(message);
-                break;
-            case 'LLM_ERROR':
-                handleLLMError(message);
-                break;
-            case 'CONNECTION_STATUS':
-                handleConnectionStatus(message);
-                break;
-            case 'LLM_PROGRESS':
-                handleLLMProgress(message);
-                break;
-        }
-    }
-    
-    function handleLLMResponse(message) {
-        const { llm, content } = message;
-        
-        // Update the appropriate output area
-        const outputContent = document.getElementById(`${llm}-content`);
-        if (outputContent) {
-            outputContent.innerHTML = `
-                <div class="response-content">
-                    ${content}
-                </div>
-            `;
-        }
-        
-        // Update comparison view
-        const comparisonContent = document.getElementById(`comparison-${llm}`);
-        if (comparisonContent) {
-            comparisonContent.innerHTML = `
-                <div class="response-content">
-                    ${content}
-                </div>
-            `;
-        }
-        
-        // Apply syntax highlighting
-        if (typeof hljs !== 'undefined') {
-            hljs.highlightAll();
-        }
-        
-        // Update status
-        updateLLMStatus(llm, 'Complete');
-        
-        // Check if all responses are complete
-        checkAllResponsesComplete();
-        
-        showToast(`${llm} response received!`, 'success');
-    }
-    
-    function handleLLMError(message) {
-        const { llm, error } = message;
-        
-        // Update the appropriate output area
-        const outputContent = document.getElementById(`${llm}-content`);
-        if (outputContent) {
-            outputContent.innerHTML = `
-                <div class="error-state">
-                    <span class="material-symbols-rounded">error</span>
-                    <p>Error: ${error}</p>
-                    <p>Make sure you have ${llm} open in a tab and are logged in.</p>
-                </div>
-            `;
-        }
-        
-        // Update status
-        updateLLMStatus(llm, 'Error');
-        
-        showToast(`${llm} error: ${error}`, 'error');
-        
-        // Check if all responses are complete
-        checkAllResponsesComplete();
-    }
-    
-    function handleConnectionStatus(message) {
-        const { gemini, chatgpt } = message.status;
-        
-        updateLLMStatus('gemini', gemini ? 'Ready' : 'Not Connected');
-        updateLLMStatus('chatgpt', chatgpt ? 'Ready' : 'Not Connected');
-        
-        // Update checkboxes based on availability
-        if (useGemini) useGemini.disabled = !gemini;
-        if (useChatGPT) useChatGPT.disabled = !chatgpt;
-        
-        updateSendButtonState();
-    }
-    
-    function handleLLMProgress(message) {
-        const { llm, status } = message;
-        updateLLMStatus(llm, status);
-    }
-    
-    function checkConnectionStatus() {
-        // Ask background script to check connection status
-        if (chrome && chrome.runtime) {
-            chrome.runtime.sendMessage({ type: 'CHECK_CONNECTION' });
-        }
-    }
-    
-    function updateLLMStatus(llm, status) {
-        const statusElement = document.getElementById(`${llm}-status`);
-        if (statusElement) {
-            statusElement.textContent = status;
-            
-            // Update color based on status
-            statusElement.className = 'llm-status';
-            if (status === 'Ready' || status === 'Complete') {
-                statusElement.classList.add('status-ready');
-            } else if (status === 'Error' || status === 'Not Connected') {
-                statusElement.classList.add('status-error');
-            } else if (status === 'Sending...' || status === 'Processing...') {
-                statusElement.classList.add('status-processing');
-            }
-        }
-    }
-    
-    function checkAllResponsesComplete() {
-        const geminiStatus = document.getElementById('gemini-status')?.textContent;
-        const chatgptStatus = document.getElementById('chatgpt-status')?.textContent;
-        
-        const geminiSelected = useGemini?.checked;
-        const chatgptSelected = useChatGPT?.checked;
-        
-        const geminiDone = !geminiSelected || geminiStatus === 'Complete' || geminiStatus === 'Error';
-        const chatgptDone = !chatgptSelected || chatgptStatus === 'Complete' || chatgptStatus === 'Error';
-        
-        if (geminiDone && chatgptDone) {
-            hideLoading();
-            updateLastUpdated();
-        }
-    }
-    
-    function handleTabClick(event) {
-        const targetId = event.currentTarget.dataset.target;
-        
-        // Remove active class from all tabs and contents
-        tabButtons.forEach(btn => btn.classList.remove('active'));
-        tabContents.forEach(content => content.classList.remove('active'));
-        
-        // Add active class to clicked tab and corresponding content
-        event.currentTarget.classList.add('active');
-        const targetContent = document.getElementById(targetId);
-        if (targetContent) {
-            targetContent.classList.add('active');
-        }
-    }
-    
-    function handleClearAll() {
-        if (confirm('Clear all responses?')) {
-            // Clear all output content
-            const outputContents = document.querySelectorAll('.output-content');
-            outputContents.forEach(content => {
-                content.innerHTML = `
-                    <div class="empty-state">
-                        <span class="material-symbols-rounded">psychology</span>
-                        <p>Response will appear here</p>
-                    </div>
-                `;
-            });
-            
-            // Clear comparison content
-            const comparisonContents = document.querySelectorAll('.comparison-content');
-            comparisonContents.forEach(content => {
-                content.innerHTML = `
-                    <div class="empty-state">
-                        <span class="material-symbols-rounded">psychology</span>
-                        <p>Response will appear here</p>
-                    </div>
-                `;
-            });
-            
-            showToast('All responses cleared', 'success');
-        }
-    }
-    
-    function showMockResponse(prompt, geminiSelected, chatgptSelected) {
-        if (geminiSelected) {
-            const geminiContent = document.getElementById('gemini-content');
-            if (geminiContent) {
-                geminiContent.innerHTML = `
-                    <div class="response-content">
-                        <h3>Mock Gemini Response</h3>
-                        <p>This is a mock response to your prompt: "${prompt}"</p>
-                        <pre><code class="language-javascript">// Example code response
-function mockResponse() {
-    console.log("This is a mock Gemini response");
-    return "Hello from Gemini!";
-}</code></pre>
-                        <p>This demonstrates how responses will be displayed in the extension.</p>
-                    </div>
-                `;
-            }
-            
-            // Update comparison
-            const comparisonGemini = document.getElementById('comparison-gemini');
-            if (comparisonGemini) {
-                comparisonGemini.innerHTML = `
-                    <div class="response-content">
-                        <p>Mock Gemini response for comparison view.</p>
-                    </div>
-                `;
-            }
-            
-            updateLLMStatus('gemini', 'Complete');
-        }
-        
-        if (chatgptSelected) {
-            const chatgptContent = document.getElementById('chatgpt-content');
-            if (chatgptContent) {
-                chatgptContent.innerHTML = `
-                    <div class="response-content">
-                        <h3>Mock ChatGPT Response</h3>
-                        <p>This is a mock response to your prompt: "${prompt}"</p>
-                        <pre><code class="language-python"># Example code response
-def mock_response():
-    print("This is a mock ChatGPT response")
-    return "Hello from ChatGPT!"</code></pre>
-                        <p>This shows how ChatGPT responses will appear.</p>
-                    </div>
-                `;
-            }
-            
-            // Update comparison
-            const comparisonChatGPT = document.getElementById('comparison-chatgpt');
-            if (comparisonChatGPT) {
-                comparisonChatGPT.innerHTML = `
-                    <div class="response-content">
-                        <p>Mock ChatGPT response for comparison view.</p>
-                    </div>
-                `;
-            }
-            
-            updateLLMStatus('chatgpt', 'Complete');
-        }
-        
-        // Apply syntax highlighting if available
-        if (typeof hljs !== 'undefined') {
-            hljs.highlightAll();
-        }
-        
-        updateLastUpdated();
-        showToast('Mock responses generated!', 'success');
-    }
-    
-    function updateCharCount() {
-        if (promptInput && charCount) {
-            const count = promptInput.value.length;
-            charCount.textContent = count;
-            
-            // Update color based on limit
-            if (count > 3800) {
-                charCount.style.color = 'var(--text-error)';
-            } else if (count > 3500) {
-                charCount.style.color = 'var(--text-warning)';
-            } else {
-                charCount.style.color = 'var(--text-muted)';
-            }
-        }
-    }
-    
-    function updateSendButtonState() {
-        if (sendButton && promptInput && useGemini && useChatGPT) {
-            const hasPrompt = promptInput.value.trim().length > 0;
-            const hasTarget = (useGemini.checked && !useGemini.disabled) || 
-                            (useChatGPT.checked && !useChatGPT.disabled);
-            
-            sendButton.disabled = !hasPrompt || !hasTarget;
-        }
-    }
-    
-    function showLoading() {
-        const loadingOverlay = document.getElementById('loading-overlay');
-        if (loadingOverlay) {
-            loadingOverlay.classList.remove('hidden');
-        }
-    }
-    
-    function hideLoading() {
-        const loadingOverlay = document.getElementById('loading-overlay');
-        if (loadingOverlay) {
-            loadingOverlay.classList.add('hidden');
-        }
-    }
-    
-    function showToast(message, type = 'info') {
-        const toastContainer = document.getElementById('toast-container');
-        if (!toastContainer) return;
-        
-        const toast = document.createElement('div');
-        toast.className = `toast ${type}`;
-        toast.textContent = message;
-        
-        toastContainer.appendChild(toast);
-        
-        // Show toast
-        setTimeout(() => toast.classList.add('show'), 100);
-        
-        // Hide and remove toast
-        setTimeout(() => {
-            toast.classList.remove('show');
-            setTimeout(() => {
-                if (toast.parentNode) {
-                    toast.parentNode.removeChild(toast);
-                }
-            }, 300);
-        }, 3000);
-    }
-    
-    function updateLastUpdated() {
-        const lastUpdatedText = document.querySelector('#last-updated .status-text');
-        if (lastUpdatedText) {
-            const now = new Date();
-            lastUpdatedText.textContent = now.toLocaleTimeString();
-        }
-    }
+    requestTabList();
+    requestConnectionStatus();
+    requestActiveSession();
 });
+
+function bindEvents() {
+    if (elements.promptInput) {
+        elements.promptInput.addEventListener('input', () => {
+            updateCharCount();
+            updateSendState();
+        });
+        elements.promptInput.addEventListener('keydown', (event) => {
+            if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                event.preventDefault();
+                startSession();
+            }
+        });
+    }
+
+    if (elements.sendButton) {
+        elements.sendButton.addEventListener('click', startSession);
+    }
+
+    if (elements.stopButton) {
+        elements.stopButton.addEventListener('click', stopSession);
+    }
+
+    if (elements.refreshTabs) {
+        elements.refreshTabs.addEventListener('click', requestTabList);
+    }
+
+    if (elements.iterations) {
+        elements.iterations.addEventListener('change', updateSendState);
+    }
+
+    if (elements.autoScroll) {
+        elements.autoScroll.addEventListener('change', () => {
+            state.autoScroll = elements.autoScroll.checked;
+        });
+    }
+
+    if (elements.chatgptTab) {
+        elements.chatgptTab.addEventListener('change', persistTabPreferences);
+    }
+
+    if (elements.geminiTab) {
+        elements.geminiTab.addEventListener('change', persistTabPreferences);
+    }
+
+    if (chrome?.runtime?.onMessage) {
+        chrome.runtime.onMessage.addListener(handleBackgroundMessage);
+    }
+}
+
+function sendMessage(message, callback) {
+    if (!chrome?.runtime?.sendMessage) return;
+    chrome.runtime.sendMessage(message, (response) => {
+        if (chrome.runtime.lastError) {
+            console.warn('Message failed:', message.type, chrome.runtime.lastError.message);
+        }
+        if (callback) callback(response);
+    });
+}
+
+function updateCharCount() {
+    if (!elements.charCount || !elements.promptInput) return;
+    elements.charCount.textContent = String(elements.promptInput.value.length);
+}
+
+function updateSendState() {
+    if (!elements.sendButton || !elements.promptInput || !elements.iterations) return;
+    const hasPrompt = elements.promptInput.value.trim().length > 0;
+    const iterations = parseInt(elements.iterations.value, 10) || 0;
+    elements.sendButton.disabled = state.running || !hasPrompt || iterations <= 0;
+}
+
+function setRunningState(running) {
+    state.running = running;
+    if (elements.sendButton) {
+        elements.sendButton.disabled = running || elements.promptInput.value.trim().length === 0;
+        elements.sendButton.textContent = running ? 'Running...' : 'Start debate';
+    }
+    if (elements.stopButton) {
+        elements.stopButton.disabled = !running;
+    }
+
+    const disabled = running;
+    if (elements.firstLLM) elements.firstLLM.disabled = disabled;
+    if (elements.iterations) elements.iterations.disabled = disabled;
+    if (elements.chatgptTab) elements.chatgptTab.disabled = disabled;
+    if (elements.geminiTab) elements.geminiTab.disabled = disabled;
+    if (elements.refreshTabs) elements.refreshTabs.disabled = disabled;
+}
+
+function setSessionStatus(text) {
+    if (elements.sessionStatus) {
+        elements.sessionStatus.textContent = text;
+    }
+}
+
+function requestTabList() {
+    sendMessage({ type: 'LIST_LLM_TABS' });
+}
+
+function requestConnectionStatus() {
+    sendMessage({ type: 'CHECK_CONNECTION' });
+}
+
+function requestActiveSession() {
+    sendMessage({ type: 'GET_ACTIVE_SESSION' });
+}
+
+function persistTabPreferences() {
+    const chatgptTabId = parseTabValue(elements.chatgptTab?.value);
+    const geminiTabId = parseTabValue(elements.geminiTab?.value);
+    sendMessage({
+        type: 'SET_PREFERRED_TABS',
+        chatgptTabId,
+        geminiTabId
+    });
+}
+
+function startSession() {
+    if (state.running) return;
+    if (!elements.promptInput) return;
+
+    const prompt = elements.promptInput.value.trim();
+    if (!prompt) return;
+
+    const rounds = parseInt(elements.iterations?.value, 10) || 0;
+    if (rounds <= 0) return;
+
+    const firstLLM = elements.firstLLM?.value || 'chatgpt';
+    const chatgptTabId = parseTabValue(elements.chatgptTab?.value);
+    const geminiTabId = parseTabValue(elements.geminiTab?.value);
+
+    setRunningState(true);
+    setSessionStatus('Starting session...');
+
+    sendMessage({
+        type: 'START_DEBATE_SESSION',
+        prompt,
+        firstLLM,
+        rounds,
+        tabIds: {
+            chatgpt: chatgptTabId,
+            gemini: geminiTabId
+        }
+    });
+}
+
+function stopSession() {
+    if (!state.sessionId) return;
+    setSessionStatus('Stopping session...');
+    sendMessage({
+        type: 'STOP_SESSION',
+        sessionId: state.sessionId
+    });
+}
+
+function handleBackgroundMessage(message) {
+    switch (message.type) {
+        case 'LLM_TABS_LIST':
+            handleTabList(message);
+            break;
+        case 'CONNECTION_STATUS':
+            handleConnectionStatus(message);
+            break;
+        case 'ACTIVE_SESSION':
+            hydrateSession(message.session);
+            break;
+        case 'UI_SESSION_STARTED':
+            state.sessionId = message.sessionId;
+            setRunningState(true);
+            setSessionStatus(`Running round 1 of ${message.rounds}`);
+            clearTranscript();
+            break;
+        case 'UI_SESSION_PROGRESS':
+            handleProgress(message);
+            break;
+        case 'UI_MESSAGE_ADD':
+            addMessage(message);
+            break;
+        case 'UI_SESSION_ENDED':
+            handleSessionEnded(message);
+            break;
+        case 'UI_SESSION_ERROR':
+            handleSessionError(message);
+            break;
+        case 'LLM_ERROR':
+            handleSessionError({ error: message.error || 'Unknown error' });
+            break;
+        default:
+            break;
+    }
+}
+
+function handleTabList(message) {
+    state.tabs = message.tabs || { chatgpt: [], gemini: [] };
+    state.preferred = message.preferred || { chatgpt: null, gemini: null };
+    populateTabSelect(elements.chatgptTab, state.tabs.chatgpt, state.preferred.chatgpt, 'ChatGPT');
+    populateTabSelect(elements.geminiTab, state.tabs.gemini, state.preferred.gemini, 'Gemini');
+}
+
+function populateTabSelect(selectEl, tabs, preferredId, label) {
+    if (!selectEl) return;
+
+    selectEl.innerHTML = '';
+
+    const autoOption = document.createElement('option');
+    autoOption.value = 'auto';
+    autoOption.textContent = `Auto (${label})`;
+    selectEl.appendChild(autoOption);
+
+    if (!tabs || tabs.length === 0) {
+        const emptyOption = document.createElement('option');
+        emptyOption.value = 'none';
+        emptyOption.textContent = `No ${label} tabs found`;
+        selectEl.appendChild(emptyOption);
+        selectEl.value = 'none';
+        return;
+    }
+
+    tabs.forEach((tab) => {
+        const option = document.createElement('option');
+        option.value = `tab:${tab.id}`;
+        option.textContent = formatTabLabel(tab);
+        selectEl.appendChild(option);
+    });
+
+    if (preferredId && tabs.some(tab => tab.id === preferredId)) {
+        selectEl.value = `tab:${preferredId}`;
+    } else {
+        selectEl.value = 'auto';
+    }
+}
+
+function formatTabLabel(tab) {
+    const title = (tab.title || tab.url || '').trim();
+    if (!title) return `Tab ${tab.id}`;
+    return title.length > 42 ? `${title.slice(0, 39)}...` : title;
+}
+
+function parseTabValue(value) {
+    if (!value || value === 'auto' || value === 'none') return null;
+    if (value.startsWith('tab:')) {
+        const id = Number(value.replace('tab:', ''));
+        return Number.isFinite(id) ? id : null;
+    }
+    return null;
+}
+
+function handleConnectionStatus(message) {
+    const { gemini, chatgpt } = message.status || {};
+    if (elements.statusChatGPT) {
+        elements.statusChatGPT.textContent = `ChatGPT: ${chatgpt ? 'ready' : 'offline'}`;
+        elements.statusChatGPT.style.borderColor = chatgpt ? 'rgba(245, 158, 11, 0.5)' : 'rgba(148, 163, 184, 0.3)';
+    }
+    if (elements.statusGemini) {
+        elements.statusGemini.textContent = `Gemini: ${gemini ? 'ready' : 'offline'}`;
+        elements.statusGemini.style.borderColor = gemini ? 'rgba(34, 197, 94, 0.5)' : 'rgba(148, 163, 184, 0.3)';
+    }
+}
+
+function hydrateSession(session) {
+    if (!session) {
+        setRunningState(false);
+        state.sessionId = null;
+        return;
+    }
+
+    state.sessionId = session.sessionId;
+    setRunningState(session.isActive);
+    setSessionStatus(session.isActive ? `Resumed round ${session.roundIndex || 1} of ${session.rounds}` : 'Idle');
+
+    clearTranscript();
+    if (Array.isArray(session.messages)) {
+        const ordered = [...session.messages].sort((a, b) => {
+            if (a.turnIndex && b.turnIndex) return a.turnIndex - b.turnIndex;
+            return (a.timestamp || 0) - (b.timestamp || 0);
+        });
+        ordered.forEach(addMessage);
+    }
+}
+
+function handleProgress(message) {
+    if (!message) return;
+    if (message.roundIndex && message.totalRounds) {
+        setSessionStatus(`Running round ${message.roundIndex} of ${message.totalRounds} - waiting for ${message.waitingFor}`);
+    } else if (message.waitingFor) {
+        setSessionStatus(`Waiting for ${message.waitingFor}`);
+    }
+}
+
+function handleSessionEnded(message) {
+    setRunningState(false);
+    setSessionStatus(message?.reason || 'Session completed');
+    state.sessionId = null;
+}
+
+function handleSessionError(message) {
+    setRunningState(false);
+    setSessionStatus(`Error: ${message?.error || 'Unknown error'}`);
+    state.sessionId = null;
+}
+
+function clearTranscript() {
+    if (!elements.timeline) return;
+    elements.timeline.innerHTML = '';
+    if (elements.emptyState) {
+        elements.timeline.appendChild(elements.emptyState);
+    }
+}
+
+function addMessage(message) {
+    if (!elements.timeline) return;
+
+    if (elements.emptyState && elements.timeline.contains(elements.emptyState)) {
+        elements.emptyState.remove();
+    }
+
+    const container = document.createElement('div');
+    container.className = `message ${message.role || message.llm || 'system'}`;
+
+    const meta = document.createElement('div');
+    meta.className = 'message-meta';
+
+    const role = document.createElement('span');
+    role.className = 'message-role';
+    role.textContent = formatRoleLabel(message.role || message.llm || 'system');
+
+    const label = document.createElement('span');
+    const round = message.roundIndex ? `Round ${message.roundIndex}` : null;
+    const turn = message.turnIndex ? `Turn ${message.turnIndex}` : null;
+    label.textContent = [round, turn].filter(Boolean).join(' | ');
+
+    meta.appendChild(role);
+    meta.appendChild(label);
+
+    const content = document.createElement('div');
+    content.className = 'message-content';
+    content.textContent = message.content || '';
+
+    container.appendChild(meta);
+    container.appendChild(content);
+
+    elements.timeline.appendChild(container);
+
+    if (state.autoScroll) {
+        elements.timeline.scrollTop = elements.timeline.scrollHeight;
+    }
+}
+
+function formatRoleLabel(role) {
+    if (!role) return 'System';
+    const normalized = role.toLowerCase();
+    if (normalized === 'user') return 'User';
+    if (normalized === 'chatgpt') return 'ChatGPT';
+    if (normalized === 'gemini') return 'Gemini';
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}

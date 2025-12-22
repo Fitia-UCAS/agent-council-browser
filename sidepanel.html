@@ -1,232 +1,86 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Multi-LLM Coder</title>
-    
-    <!-- Highlight.js for syntax highlighting -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-    
-    <!-- Material Icons for UI elements -->
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,0,0" />
-    
-    <!-- Main styles -->
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Multi-LLM Debate</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..24,400,0,0">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <div class="container">
-        <!-- Header -->
-        <header class="header">
-            <div class="header-content">
-                <h1 class="title">Multi-LLM Coder</h1>
-                <p class="subtitle">Compare responses from multiple AI models</p>
+    <div class="app">
+        <header class="app-header">
+            <div class="title-group">
+                <div class="title">Multi-LLM Debate</div>
+                <div class="subtitle">Side panel session runner</div>
+            </div>
+            <div class="status-chips">
+                <span class="chip" id="status-chatgpt">ChatGPT: checking</span>
+                <span class="chip" id="status-gemini">Gemini: checking</span>
             </div>
         </header>
 
-        <!-- Main Content Area -->
-        <main class="main-content">
-            <!-- Input Section -->
-            <section class="input-section">
-                <div class="prompt-container">
-                    <div class="prompt-wrapper">
-                        <textarea 
-                            id="prompt-input" 
-                            class="prompt-input" 
-                            placeholder="Enter your prompt here... (Ctrl+Enter to send)"
-                            rows="4"
-                            maxlength="4000"
-                        ></textarea>
-                        <div class="input-footer">
-                            <div class="char-counter">
-                                <span id="char-count">0</span>/4000
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- Controls -->
-                    <div class="controls">
-                        <div class="llm-selection">
-                            <label class="checkbox-label">
-                                <input type="checkbox" id="use-gemini" checked>
-                                <span class="checkmark"></span>
-                                <span class="llm-name">Gemini</span>
-                                <span class="llm-status" id="gemini-status">Ready</span>
-                            </label>
-                            
-                            <label class="checkbox-label">
-                                <input type="checkbox" id="use-chatgpt" checked>
-                                <span class="checkmark"></span>
-                                <span class="llm-name">ChatGPT</span>
-                                <span class="llm-status" id="chatgpt-status">Ready</span>
-                            </label>
-                        </div>
-                        
-                        <button id="send-button" class="send-button" disabled>
-                            <span class="material-symbols-rounded">send</span>
-                            <span class="button-text">Send Prompt</span>
-                        </button>
-                    </div>
+        <details class="settings" id="settings" open>
+            <summary class="settings-summary">
+                <span>Session settings</span>
+                <span class="material-symbols-rounded">tune</span>
+            </summary>
+            <div class="settings-body">
+                <div class="settings-grid">
+                    <label class="field">
+                        <span class="field-label">First LLM</span>
+                        <select id="first-llm">
+                            <option value="chatgpt">ChatGPT</option>
+                            <option value="gemini">Gemini</option>
+                        </select>
+                    </label>
+                    <label class="field">
+                        <span class="field-label">Iterations</span>
+                        <input id="iterations" type="number" min="1" max="12" value="3">
+                    </label>
+                    <label class="field">
+                        <span class="field-label">ChatGPT tab</span>
+                        <select id="chatgpt-tab"></select>
+                    </label>
+                    <label class="field">
+                        <span class="field-label">Gemini tab</span>
+                        <select id="gemini-tab"></select>
+                    </label>
                 </div>
-            </section>
-
-            <!-- Output Section -->
-            <section class="output-section">
-                <!-- Tab Navigation -->
-                <div class="tab-navigation">
-                    <button class="tab-button active" data-target="gemini-output" id="gemini-tab">
-                        <span class="tab-icon">🤖</span>
-                        <span class="tab-label">Gemini</span>
-                        <span class="tab-status" id="gemini-tab-status"></span>
-                    </button>
-                    
-                    <button class="tab-button" data-target="chatgpt-output" id="chatgpt-tab">
-                        <span class="tab-icon">💬</span>
-                        <span class="tab-label">ChatGPT</span>
-                        <span class="tab-status" id="chatgpt-tab-status"></span>
-                    </button>
-                    
-                    <button class="tab-button" data-target="comparison-output" id="comparison-tab">
-                        <span class="tab-icon">⚖️</span>
-                        <span class="tab-label">Compare</span>
-                        <span class="tab-status" id="comparison-tab-status"></span>
-                    </button>
+                <div class="settings-actions">
+                    <button class="ghost-button" id="refresh-tabs" type="button">Refresh tabs</button>
+                    <label class="inline-toggle">
+                        <input type="checkbox" id="auto-scroll" checked>
+                        <span>Auto-scroll transcript</span>
+                    </label>
                 </div>
+                <div class="session-status" id="session-status">Idle</div>
+            </div>
+        </details>
 
-                <!-- Tab Content -->
-                <div class="tab-content-container">
-                    <!-- Gemini Output -->
-                    <div id="gemini-output" class="tab-content active">
-                        <div class="output-header">
-                            <h3 class="output-title">Gemini Response</h3>
-                            <div class="output-actions">
-                                <button class="action-button" id="copy-gemini" title="Copy Response">
-                                    <span class="material-symbols-rounded">content_copy</span>
-                                </button>
-                                <button class="action-button" id="send-to-chatgpt" title="Send to ChatGPT">
-                                    <span class="material-symbols-rounded">arrow_forward</span>
-                                </button>
-                                <button class="action-button" id="retry-gemini" title="Retry">
-                                    <span class="material-symbols-rounded">refresh</span>
-                                </button>
-                            </div>
-                        </div>
-                        <div class="output-content" id="gemini-content">
-                            <div class="empty-state">
-                                <span class="material-symbols-rounded">psychology</span>
-                                <p>Gemini response will appear here</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- ChatGPT Output -->
-                    <div id="chatgpt-output" class="tab-content">
-                        <div class="output-header">
-                            <h3 class="output-title">ChatGPT Response</h3>
-                            <div class="output-actions">
-                                <button class="action-button" id="copy-chatgpt" title="Copy Response">
-                                    <span class="material-symbols-rounded">content_copy</span>
-                                </button>
-                                <button class="action-button" id="send-to-gemini" title="Send to Gemini">
-                                    <span class="material-symbols-rounded">arrow_forward</span>
-                                </button>
-                                <button class="action-button" id="retry-chatgpt" title="Retry">
-                                    <span class="material-symbols-rounded">refresh</span>
-                                </button>
-                            </div>
-                        </div>
-                        <div class="output-content" id="chatgpt-content">
-                            <div class="empty-state">
-                                <span class="material-symbols-rounded">chat</span>
-                                <p>ChatGPT response will appear here</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Comparison Output -->
-                    <div id="comparison-output" class="tab-content">
-                        <div class="output-header">
-                            <h3 class="output-title">Side-by-Side Comparison</h3>
-                            <div class="output-actions">
-                                <button class="action-button" id="copy-comparison" title="Copy Comparison">
-                                    <span class="material-symbols-rounded">content_copy</span>
-                                </button>
-                                <button class="action-button" id="export-comparison" title="Export as Markdown">
-                                    <span class="material-symbols-rounded">download</span>
-                                </button>
-                            </div>
-                        </div>
-                        <div class="comparison-container">
-                            <div class="comparison-column">
-                                <h4 class="comparison-header">Gemini</h4>
-                                <div class="comparison-content" id="comparison-gemini">
-                                    <div class="empty-state">
-                                        <span class="material-symbols-rounded">psychology</span>
-                                        <p>Gemini response</p>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="comparison-divider"></div>
-                            <div class="comparison-column">
-                                <h4 class="comparison-header">ChatGPT</h4>
-                                <div class="comparison-content" id="comparison-chatgpt">
-                                    <div class="empty-state">
-                                        <span class="material-symbols-rounded">chat</span>
-                                        <p>ChatGPT response</p>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </section>
+        <main class="timeline" id="timeline">
+            <div class="empty-state" id="empty-state">
+                <div class="empty-title">No session yet</div>
+                <div class="empty-subtitle">Send a prompt to start the debate.</div>
+            </div>
         </main>
 
-        <!-- Footer -->
-        <footer class="footer">
-            <div class="footer-content">
-                <div class="status-bar">
-                    <span class="status-item" id="connection-status">
-                        <span class="material-symbols-rounded">wifi</span>
-                        <span class="status-text">Ready</span>
-                    </span>
-                    <span class="status-item" id="last-updated">
-                        <span class="material-symbols-rounded">schedule</span>
-                        <span class="status-text">Never</span>
-                    </span>
+        <footer class="composer">
+            <label class="composer-label" for="prompt-input">Prompt</label>
+            <textarea id="prompt-input" rows="3" maxlength="8000" placeholder="Ask a question for ChatGPT and Gemini..."></textarea>
+            <div class="composer-actions">
+                <div class="composer-meta">
+                    <span id="char-count">0</span>/8000
                 </div>
-                <div class="footer-actions">
-                    <button class="footer-button" id="clear-all" title="Clear All Responses">
-                        <span class="material-symbols-rounded">clear_all</span>
-                    </button>
-                    <button class="footer-button" id="settings" title="Settings">
-                        <span class="material-symbols-rounded">settings</span>
-                    </button>
-                    <button class="footer-button" id="help" title="Help">
-                        <span class="material-symbols-rounded">help</span>
-                    </button>
+                <div class="composer-buttons">
+                    <button class="secondary-button" id="stop-button" type="button" disabled>Stop</button>
+                    <button class="primary-button" id="send-button" type="button" disabled>Start debate</button>
                 </div>
             </div>
         </footer>
     </div>
 
-    <!-- Loading Overlay -->
-    <div id="loading-overlay" class="loading-overlay hidden">
-        <div class="loading-content">
-            <div class="loading-spinner"></div>
-            <p class="loading-text">Processing your request...</p>
-            <button class="cancel-button" id="cancel-request">
-                <span class="material-symbols-rounded">close</span>
-                Cancel
-            </button>
-        </div>
-    </div>
-
-    <!-- Toast Notifications -->
-    <div id="toast-container" class="toast-container"></div>
-
-    <!-- Main JavaScript -->
     <script src="sidepanel.js"></script>
 </body>
 </html>
