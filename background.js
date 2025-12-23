@@ -11,6 +11,9 @@ chrome.runtime.onInstalled.addListener(() => {
             console.warn('[MLC Background] Failed to set side panel behavior:', error);
         });
     }
+    migratePreferredTabsToProfiles().catch((error) => {
+        console.warn('[MLC Background] Failed to migrate preferred tabs:', error);
+    });
 });
 
 if (chrome.action && chrome.sidePanel && chrome.sidePanel.open) {
@@ -64,15 +67,21 @@ function generatePromptId() {
 // DEBATE SESSION STATE MANAGEMENT
 const ACTIVE_SESSION_KEY = 'mlc_active_session_v2';
 const PREFERRED_TABS_KEY = 'mlc_preferred_tabs';
+const TAB_PROFILES_KEY = 'mlc_tab_profiles_v1';
 
 const defaultDebateState = {
     isActive: false,
+    isPaused: false,
+    pausedReason: null,
+    pausedProvider: null,
+    pausedAt: 0,
     sessionId: null,
     rounds: 0,
     totalTurns: 0,
     turnIndex: 1,
     firstLLM: 'chatgpt',
     secondLLM: 'gemini',
+    profileIds: { chatgpt: null, gemini: null },
     tabIds: { chatgpt: null, gemini: null },
     userQuery: '',
     messages: [],
@@ -101,6 +110,12 @@ async function loadActiveDebateState() {
     const stored = await chrome.storage.local.get(ACTIVE_SESSION_KEY);
     if (stored && stored[ACTIVE_SESSION_KEY]) {
         activeDebateState = stored[ACTIVE_SESSION_KEY];
+        if (!activeDebateState.profileIds) {
+            activeDebateState.profileIds = { chatgpt: null, gemini: null };
+        }
+        if (typeof activeDebateState.isPaused !== 'boolean') {
+            activeDebateState.isPaused = false;
+        }
     }
     return activeDebateState;
 }
@@ -130,6 +145,467 @@ async function setPreferredTabs(payload = {}) {
     return next;
 }
 
+function normalizeProvider(provider) {
+    return provider === 'gemini' ? 'gemini' : 'chatgpt';
+}
+
+function getEmptyProfilesState() {
+    return { profiles: [], defaults: { chatgpt: null, gemini: null } };
+}
+
+function generateProfileId() {
+    return 'profile_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+function getExpectedHosts(provider) {
+    if (provider === 'gemini') {
+        return ['gemini.google.com'];
+    }
+    return ['chatgpt.com', 'chat.openai.com', 'openai.com', 'platform.openai.com'];
+}
+
+function isExpectedHost(provider, url) {
+    if (!url) return false;
+    try {
+        const { hostname } = new URL(url);
+        const expected = getExpectedHosts(provider);
+        return expected.some(host => hostname === host || hostname.endsWith(`.${host}`));
+    } catch (error) {
+        return false;
+    }
+}
+
+async function loadTabProfiles() {
+    const stored = await chrome.storage.local.get(TAB_PROFILES_KEY);
+    if (stored && stored[TAB_PROFILES_KEY]) {
+        const next = stored[TAB_PROFILES_KEY];
+        if (Array.isArray(next.profiles) && next.defaults) {
+            return {
+                profiles: next.profiles,
+                defaults: {
+                    chatgpt: next.defaults.chatgpt || null,
+                    gemini: next.defaults.gemini || null
+                }
+            };
+        }
+    }
+    return getEmptyProfilesState();
+}
+
+async function saveTabProfiles(state) {
+    await chrome.storage.local.set({ [TAB_PROFILES_KEY]: state });
+    return state;
+}
+
+function findProfileById(state, profileId) {
+    return state.profiles.find(profile => profile.profileId === profileId);
+}
+
+function findProfileByTabId(state, provider, tabId) {
+    return state.profiles.find(profile => profile.provider === provider && profile.tabId === tabId);
+}
+
+function formatDefaultProfileLabel(provider, tab) {
+    const base = provider === 'gemini' ? 'Gemini' : 'ChatGPT';
+    if (tab?.title) {
+        const trimmed = tab.title.trim();
+        if (trimmed) {
+            return `${base} - ${trimmed.length > 32 ? `${trimmed.slice(0, 29)}...` : trimmed}`;
+        }
+    }
+    return `${base} profile`;
+}
+
+function applyProfilePatch(profile, patch = {}) {
+    const next = { ...profile };
+    if (Object.prototype.hasOwnProperty.call(patch, 'label')) {
+        next.label = String(patch.label || '').trim() || next.label;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'tabId')) {
+        next.tabId = Number.isFinite(patch.tabId) ? patch.tabId : null;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'windowId')) {
+        next.windowId = Number.isFinite(patch.windowId) ? patch.windowId : null;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'modelHint')) {
+        next.modelHint = patch.modelHint ? String(patch.modelHint) : '';
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'lastKnownTitle')) {
+        next.lastKnownTitle = patch.lastKnownTitle ? String(patch.lastKnownTitle) : '';
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'lastKnownUrl')) {
+        next.lastKnownUrl = patch.lastKnownUrl ? String(patch.lastKnownUrl) : '';
+    }
+    return next;
+}
+
+async function validateProfile(profile) {
+    const updatedAt = Date.now();
+    if (!profile || !profile.tabId) {
+        return { ...profile, status: 'offline', updatedAt };
+    }
+    try {
+        const tab = await chrome.tabs.get(profile.tabId);
+        const url = tab?.url || '';
+        const status = url
+            ? (isExpectedHost(profile.provider, url) ? 'ok' : 'wrong_host')
+            : 'unknown';
+        return {
+            ...profile,
+            tabId: tab.id,
+            windowId: tab.windowId,
+            lastKnownTitle: tab.title || profile.lastKnownTitle || '',
+            lastKnownUrl: url || profile.lastKnownUrl || '',
+            status,
+            lastSeenAt: Date.now(),
+            updatedAt
+        };
+    } catch (error) {
+        return {
+            ...profile,
+            status: 'offline',
+            windowId: null,
+            updatedAt
+        };
+    }
+}
+
+async function refreshAllProfiles({ persist = true } = {}) {
+    const state = await loadTabProfiles();
+    const updatedProfiles = await Promise.all(state.profiles.map(profile => validateProfile(profile)));
+    const next = { ...state, profiles: updatedProfiles };
+    if (persist) {
+        await saveTabProfiles(next);
+    }
+    return next;
+}
+
+async function notifyTabProfiles(stateOverride = null) {
+    const state = stateOverride || await refreshAllProfiles({ persist: true });
+    sendMessageToPopup({
+        type: 'TAB_PROFILES',
+        profiles: state.profiles,
+        defaults: state.defaults
+    });
+}
+
+async function pingTab(tabId, provider) {
+    if (!tabId) return false;
+    try {
+        const response = await Promise.race([
+            chrome.tabs.sendMessage(tabId, { type: 'PING' }),
+            new Promise((resolve) => setTimeout(() => resolve(null), 1500))
+        ]);
+        return Boolean(response && response.type === 'PONG');
+    } catch (error) {
+        console.warn(`[MLC Background] ${provider} tab ping failed:`, error.message);
+        return false;
+    }
+}
+
+async function migratePreferredTabsToProfiles() {
+    const existing = await chrome.storage.local.get(TAB_PROFILES_KEY);
+    if (existing && existing[TAB_PROFILES_KEY]) return;
+    const preferred = await getPreferredTabs();
+    if (!preferred.chatgpt && !preferred.gemini) return;
+
+    const state = getEmptyProfilesState();
+    for (const provider of ['chatgpt', 'gemini']) {
+        const tabId = preferred[provider];
+        if (!Number.isFinite(tabId)) continue;
+        const profileId = generateProfileId();
+        let profile = {
+            profileId,
+            provider,
+            tabId,
+            windowId: null,
+            label: provider === 'gemini' ? 'Gemini profile' : 'ChatGPT profile',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            lastSeenAt: 0,
+            status: 'unknown',
+            modelHint: '',
+            lastKnownTitle: '',
+            lastKnownUrl: '',
+            inUseBySessionId: null
+        };
+        profile = await validateProfile(profile);
+        state.profiles.push(profile);
+        state.defaults[provider] = profileId;
+    }
+
+    await saveTabProfiles(state);
+    await notifyTabProfiles(state);
+}
+
+async function claimTabAsProfile({ provider, tabId, label, profileId }) {
+    const normalizedProvider = normalizeProvider(provider);
+    if (!Number.isFinite(tabId)) {
+        return { ok: false, error: 'Tab ID is invalid.' };
+    }
+    let tab;
+    try {
+        tab = await chrome.tabs.get(tabId);
+    } catch (error) {
+        return { ok: false, error: 'Tab not found.' };
+    }
+    if (!isExpectedHost(normalizedProvider, tab.url || '')) {
+        return { ok: false, error: `Selected tab is not a valid ${normalizedProvider === 'gemini' ? 'Gemini' : 'ChatGPT'} tab.` };
+    }
+
+    const state = await loadTabProfiles();
+    let profile = profileId ? findProfileById(state, profileId) : null;
+    if (!profile) {
+        profile = findProfileByTabId(state, normalizedProvider, tabId);
+    }
+
+    if (!profile) {
+        profile = {
+            profileId: generateProfileId(),
+            provider: normalizedProvider,
+            tabId: tabId,
+            windowId: tab.windowId || null,
+            label: label ? String(label).trim() : formatDefaultProfileLabel(normalizedProvider, tab),
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            lastSeenAt: Date.now(),
+            status: 'ok',
+            modelHint: '',
+            lastKnownTitle: tab.title || '',
+            lastKnownUrl: tab.url || '',
+            inUseBySessionId: null
+        };
+        state.profiles.push(profile);
+    } else {
+        profile = applyProfilePatch(profile, {
+            tabId: tabId,
+            windowId: tab.windowId,
+            label: label ? String(label).trim() : profile.label,
+            lastKnownTitle: tab.title || profile.lastKnownTitle,
+            lastKnownUrl: tab.url || profile.lastKnownUrl
+        });
+        profile.updatedAt = Date.now();
+        profile.lastSeenAt = Date.now();
+        profile.status = 'ok';
+        const index = state.profiles.findIndex(item => item.profileId === profile.profileId);
+        if (index >= 0) state.profiles[index] = profile;
+    }
+
+    if (!state.defaults[normalizedProvider]) {
+        state.defaults[normalizedProvider] = profile.profileId;
+    }
+
+    profile = await validateProfile(profile);
+    const index = state.profiles.findIndex(item => item.profileId === profile.profileId);
+    if (index >= 0) state.profiles[index] = profile;
+    await saveTabProfiles(state);
+    await syncSessionProfileBinding(profile);
+    await notifyTabProfiles(state);
+    return { ok: true, profile };
+}
+
+async function createProfileFromActiveTab(provider, label, profileId) {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!activeTab) {
+        return { ok: false, error: 'No active tab found.' };
+    }
+    return claimTabAsProfile({
+        provider,
+        tabId: activeTab.id,
+        label,
+        profileId
+    });
+}
+
+async function updateTabProfile(profileId, patch) {
+    const state = await loadTabProfiles();
+    const profile = findProfileById(state, profileId);
+    if (!profile) return { ok: false, error: 'Profile not found.' };
+
+    let next = applyProfilePatch(profile, patch);
+    if (Number.isFinite(patch?.tabId)) {
+        try {
+            const tab = await chrome.tabs.get(patch.tabId);
+            if (!isExpectedHost(profile.provider, tab.url || '')) {
+                return { ok: false, error: 'Selected tab is not valid for this provider.' };
+            }
+            next = applyProfilePatch(next, {
+                windowId: tab.windowId,
+                lastKnownTitle: tab.title || next.lastKnownTitle,
+                lastKnownUrl: tab.url || next.lastKnownUrl
+            });
+            next.status = 'ok';
+            next.lastSeenAt = Date.now();
+        } catch (error) {
+            return { ok: false, error: 'Tab not found.' };
+        }
+    }
+
+    next.updatedAt = Date.now();
+    const updated = await validateProfile(next);
+    const index = state.profiles.findIndex(item => item.profileId === profileId);
+    if (index >= 0) state.profiles[index] = updated;
+    await saveTabProfiles(state);
+    await syncSessionProfileBinding(updated);
+    await notifyTabProfiles(state);
+    return { ok: true, profile: updated };
+}
+
+async function deleteTabProfile(profileId) {
+    const state = await loadTabProfiles();
+    const profile = findProfileById(state, profileId);
+    if (!profile) return { ok: false, error: 'Profile not found.' };
+    state.profiles = state.profiles.filter(item => item.profileId !== profileId);
+    for (const provider of ['chatgpt', 'gemini']) {
+        if (state.defaults[provider] === profileId) {
+            state.defaults[provider] = null;
+        }
+    }
+    await saveTabProfiles(state);
+    if (profile.inUseBySessionId) {
+        await pauseDebateSession(`Profile "${profile.label}" was removed.`, profile.provider);
+    }
+    await notifyTabProfiles(state);
+    return { ok: true };
+}
+
+async function setDefaultProfile(provider, profileId) {
+    const normalizedProvider = normalizeProvider(provider);
+    const state = await loadTabProfiles();
+    if (profileId) {
+        const profile = findProfileById(state, profileId);
+        if (!profile || profile.provider !== normalizedProvider) {
+            return { ok: false, error: 'Profile not found for provider.' };
+        }
+        state.defaults[normalizedProvider] = profileId;
+    } else {
+        state.defaults[normalizedProvider] = null;
+    }
+    await saveTabProfiles(state);
+    await notifyTabProfiles(state);
+    return { ok: true };
+}
+
+async function focusTab(tabId) {
+    if (!Number.isFinite(tabId)) return { ok: false, error: 'Invalid tab ID.' };
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        await chrome.tabs.update(tabId, { active: true });
+        if (tab.windowId) {
+            await chrome.windows.update(tab.windowId, { focused: true });
+        }
+        return { ok: true };
+    } catch (error) {
+        return { ok: false, error: 'Tab not found.' };
+    }
+}
+
+async function openProviderTab(provider, options = {}) {
+    const normalizedProvider = normalizeProvider(provider);
+    const url = normalizedProvider === 'gemini' ? 'https://gemini.google.com/' : 'https://chatgpt.com/';
+    const focus = options.focus !== false;
+    const tab = await chrome.tabs.create({
+        url,
+        active: focus,
+        windowId: Number.isFinite(options.windowId) ? options.windowId : undefined
+    });
+    return { ok: true, provider: normalizedProvider, tabId: tab.id, windowId: tab.windowId };
+}
+
+async function syncSessionProfileBinding(profile) {
+    const session = await loadActiveDebateState();
+    if (!session.sessionId || !profile) return;
+    if (session.profileIds?.[profile.provider] === profile.profileId) {
+        session.tabIds[profile.provider] = profile.tabId || null;
+        await persistDebateState();
+    }
+}
+
+async function updateProfileModelHint(tabId, provider, modelHint) {
+    if (!Number.isFinite(tabId)) return;
+    const normalizedProvider = normalizeProvider(provider);
+    const state = await loadTabProfiles();
+    const profile = state.profiles.find(item => item.provider === normalizedProvider && item.tabId === tabId);
+    if (!profile) return;
+    const next = applyProfilePatch(profile, { modelHint });
+    next.updatedAt = Date.now();
+    const index = state.profiles.findIndex(item => item.profileId === profile.profileId);
+    if (index >= 0) state.profiles[index] = next;
+    await saveTabProfiles(state);
+    await notifyTabProfiles(state);
+}
+
+function resolveProfileSelection(provider, selection, defaults) {
+    if (!selection || selection === 'default') {
+        return defaults?.[provider] || null;
+    }
+    return selection;
+}
+
+async function validateProfileForSession(provider, profileId, { requirePing = false } = {}) {
+    const state = await loadTabProfiles();
+    const profile = findProfileById(state, profileId);
+    if (!profile) {
+        return { ok: false, error: 'Profile not found.' };
+    }
+    const validated = await validateProfile(profile);
+    const index = state.profiles.findIndex(item => item.profileId === profileId);
+    if (index >= 0) state.profiles[index] = validated;
+    await saveTabProfiles(state);
+    await notifyTabProfiles(state);
+    if (validated.status !== 'ok') {
+        const statusLabel = validated.status === 'offline'
+            ? 'offline'
+            : (validated.status === 'wrong_host' ? 'not on the right host' : 'unavailable');
+        return { ok: false, error: `${validated.label} is ${statusLabel}.` };
+    }
+    if (requirePing) {
+        const pingOk = await pingTab(validated.tabId, provider);
+        if (!pingOk) {
+            return { ok: false, error: `${validated.label} is not responding. Refresh the tab and try again.` };
+        }
+    }
+    return { ok: true, profile: validated };
+}
+
+async function lockProfilesForSession(sessionId, profileIds) {
+    if (!sessionId || !profileIds) return;
+    const state = await loadTabProfiles();
+    let changed = false;
+    for (const provider of ['chatgpt', 'gemini']) {
+        const profileId = profileIds[provider];
+        if (!profileId) continue;
+        const profile = findProfileById(state, profileId);
+        if (!profile) continue;
+        if (profile.inUseBySessionId !== sessionId) {
+            profile.inUseBySessionId = sessionId;
+            profile.updatedAt = Date.now();
+            changed = true;
+        }
+    }
+    if (changed) {
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+    }
+}
+
+async function releaseProfilesForSession(sessionId) {
+    if (!sessionId) return;
+    const state = await loadTabProfiles();
+    let changed = false;
+    state.profiles.forEach(profile => {
+        if (profile.inUseBySessionId === sessionId) {
+            profile.inUseBySessionId = null;
+            profile.updatedAt = Date.now();
+            changed = true;
+        }
+    });
+    if (changed) {
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+    }
+}
+
 // Message handling
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[MLC Background] Received message:', message);
@@ -138,6 +614,66 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'SEND_PROMPT':
             handleSendPrompt(message);
             sendResponse({ status: 'received', type: message.type });
+            break;
+        case 'GET_TAB_PROFILES':
+            notifyTabProfiles().catch(error => {
+                console.error('[MLC Profiles] Error listing profiles:', error);
+            });
+            sendResponse({ status: 'profiles_sent', type: message.type });
+            break;
+        case 'CREATE_PROFILE_FROM_ACTIVE_TAB':
+            createProfileFromActiveTab(message.provider, message.label, message.profileId).then(sendResponse).catch(error => {
+                console.error('[MLC Profiles] Error creating profile from active tab:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'CLAIM_TAB_AS_PROFILE':
+            claimTabAsProfile(message).then(sendResponse).catch(error => {
+                console.error('[MLC Profiles] Error claiming tab as profile:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'UPDATE_TAB_PROFILE':
+            updateTabProfile(message.profileId, message.patch || {}).then(sendResponse).catch(error => {
+                console.error('[MLC Profiles] Error updating profile:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'DELETE_TAB_PROFILE':
+            deleteTabProfile(message.profileId).then(sendResponse).catch(error => {
+                console.error('[MLC Profiles] Error deleting profile:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'SET_DEFAULT_PROFILE':
+            setDefaultProfile(message.provider, message.profileId || null).then(sendResponse).catch(error => {
+                console.error('[MLC Profiles] Error setting default profile:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'FOCUS_TAB':
+            focusTab(message.tabId).then(sendResponse).catch(error => {
+                console.error('[MLC Profiles] Error focusing tab:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'OPEN_PROVIDER_TAB':
+            openProviderTab(message.provider, message).then(sendResponse).catch(error => {
+                console.error('[MLC Profiles] Error opening provider tab:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'PROVIDER_MODEL_INFO':
+            if (sender?.tab?.id) {
+                updateProfileModelHint(sender.tab.id, message.provider, message.modelLabel || '');
+                sendMessageToPopup({
+                    type: 'PROVIDER_MODEL_INFO',
+                    provider: normalizeProvider(message.provider),
+                    tabId: sender.tab.id,
+                    modelLabel: message.modelLabel || ''
+                });
+            }
+            sendResponse({ ok: true });
             break;
         case 'FORWARD_PROMPT':
             handleForwardPrompt(message, sender);
@@ -205,6 +741,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
             sendResponse({ status: 'debate_session_started', type: message.type });
             break;
+        case 'RESUME_SESSION':
+            resumeDebateSession().then(sendResponse).catch(error => {
+                console.error('[MLC Debate] Error resuming session:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
         case 'STOP_SESSION':
             handleStopDebateSession(message).catch(error => {
                 console.error('[MLC Debate] Error stopping session:', error);
@@ -273,6 +815,7 @@ async function handleStartDebateSession(message) {
     const firstLLM = message.firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
     const secondLLM = firstLLM === 'chatgpt' ? 'gemini' : 'chatgpt';
     const requestedTabs = message.tabIds || {};
+    const requestedProfiles = message.profileIds || null;
 
     if (!prompt) {
         sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: 'Prompt is empty.' });
@@ -283,26 +826,63 @@ async function handleStartDebateSession(message) {
         await endDebateSession('Session replaced by a new request.');
     }
 
-    if (Number.isFinite(requestedTabs.chatgpt) || Number.isFinite(requestedTabs.gemini)) {
-        await setPreferredTabs({
-            chatgptTabId: requestedTabs.chatgpt,
-            geminiTabId: requestedTabs.gemini
-        });
-    }
+    let chatgptTab = null;
+    let geminiTab = null;
+    let profileIds = { chatgpt: null, gemini: null };
 
-    const preferred = await getPreferredTabs();
-    const chatgptTab = await resolveTabForLLM('chatgpt', requestedTabs.chatgpt, preferred.chatgpt);
-    const geminiTab = await resolveTabForLLM('gemini', requestedTabs.gemini, preferred.gemini);
+    const profilesState = await loadTabProfiles();
+    const hasDefaultProfiles = Boolean(profilesState.defaults?.chatgpt && profilesState.defaults?.gemini);
+    const hasExplicitTabIds = Number.isFinite(requestedTabs.chatgpt) || Number.isFinite(requestedTabs.gemini);
+    const useProfiles = Boolean(requestedProfiles || (!hasExplicitTabIds && hasDefaultProfiles));
 
-    if (!chatgptTab || !geminiTab) {
-        const missing = [];
-        if (!chatgptTab) missing.push('ChatGPT');
-        if (!geminiTab) missing.push('Gemini');
-        sendMessageToPopup({
-            type: 'UI_SESSION_ERROR',
-            error: `${missing.join(' and ')} tab not found. Please open the required LLM tabs.`
-        });
-        return;
+    if (useProfiles) {
+        profileIds = {
+            chatgpt: resolveProfileSelection('chatgpt', requestedProfiles?.chatgpt, profilesState.defaults),
+            gemini: resolveProfileSelection('gemini', requestedProfiles?.gemini, profilesState.defaults)
+        };
+
+        if (!profileIds.chatgpt || !profileIds.gemini) {
+            sendMessageToPopup({
+                type: 'UI_SESSION_ERROR',
+                error: 'Both ChatGPT and Gemini profiles are required to start a debate.'
+            });
+            return;
+        }
+
+        const chatgptValidation = await validateProfileForSession('chatgpt', profileIds.chatgpt, { requirePing: true });
+        if (!chatgptValidation.ok) {
+            sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: chatgptValidation.error });
+            return;
+        }
+        const geminiValidation = await validateProfileForSession('gemini', profileIds.gemini, { requirePing: true });
+        if (!geminiValidation.ok) {
+            sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: geminiValidation.error });
+            return;
+        }
+        chatgptTab = { id: chatgptValidation.profile.tabId };
+        geminiTab = { id: geminiValidation.profile.tabId };
+    } else {
+        if (Number.isFinite(requestedTabs.chatgpt) || Number.isFinite(requestedTabs.gemini)) {
+            await setPreferredTabs({
+                chatgptTabId: requestedTabs.chatgpt,
+                geminiTabId: requestedTabs.gemini
+            });
+        }
+
+        const preferred = await getPreferredTabs();
+        chatgptTab = await resolveTabForLLM('chatgpt', requestedTabs.chatgpt, preferred.chatgpt);
+        geminiTab = await resolveTabForLLM('gemini', requestedTabs.gemini, preferred.gemini);
+
+        if (!chatgptTab || !geminiTab) {
+            const missing = [];
+            if (!chatgptTab) missing.push('ChatGPT');
+            if (!geminiTab) missing.push('Gemini');
+            sendMessageToPopup({
+                type: 'UI_SESSION_ERROR',
+                error: `${missing.join(' and ')} tab not found. Please open the required LLM tabs.`
+            });
+            return;
+        }
     }
 
     const now = Date.now();
@@ -315,6 +895,7 @@ async function handleStartDebateSession(message) {
         turnIndex: 1,
         firstLLM: firstLLM,
         secondLLM: secondLLM,
+        profileIds: profileIds,
         tabIds: {
             chatgpt: chatgptTab.id,
             gemini: geminiTab.id
@@ -331,7 +912,8 @@ async function handleStartDebateSession(message) {
         sessionId: activeDebateState.sessionId,
         rounds: rounds,
         firstLLM: firstLLM,
-        tabIds: activeDebateState.tabIds
+        tabIds: activeDebateState.tabIds,
+        profileIds: activeDebateState.profileIds
     });
 
     sendMessageToPopup({
@@ -342,6 +924,7 @@ async function handleStartDebateSession(message) {
         turnIndex: 0
     });
 
+    await lockProfilesForSession(activeDebateState.sessionId, activeDebateState.profileIds);
     await sendDebateTurn(activeDebateState);
 }
 
@@ -406,9 +989,197 @@ function buildDebatePrompt(session, turnIndex) {
     return `Iteration: ${roundIndex}\nHere is ${otherLabel} answer:\n${safeOtherResponse}\n\nNow respond as ${expectedLabel}.`;
 }
 
+async function validateTabForProvider(tabId, provider) {
+    if (!Number.isFinite(tabId)) {
+        return { ok: false, error: 'Tab not set.' };
+    }
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        if (!isExpectedHost(provider, tab.url || '')) {
+            return { ok: false, error: 'Tab is not on the expected host.' };
+        }
+        return { ok: true, tabId: tab.id };
+    } catch (error) {
+        return { ok: false, error: 'Tab not found.' };
+    }
+}
+
+async function resolveSessionTab(session, provider, { requirePing = false } = {}) {
+    if (session.profileIds?.[provider]) {
+        const validation = await validateProfileForSession(provider, session.profileIds[provider], { requirePing });
+        if (!validation.ok) {
+            return { ok: false, error: validation.error };
+        }
+        session.tabIds[provider] = validation.profile.tabId;
+        await persistDebateState();
+        return { ok: true, tabId: validation.profile.tabId };
+    }
+
+    const fallbackValidation = await validateTabForProvider(session.tabIds?.[provider], provider);
+    return fallbackValidation;
+}
+
+async function pauseDebateSession(reason, provider) {
+    const session = await loadActiveDebateState();
+    if (!session.sessionId) return;
+    session.isPaused = true;
+    session.pausedReason = reason || 'Session paused.';
+    session.pausedProvider = provider || null;
+    session.pausedAt = Date.now();
+    await persistDebateState();
+    sendMessageToPopup({
+        type: 'UI_SESSION_PAUSED',
+        sessionId: session.sessionId,
+        provider: provider || null,
+        reason: session.pausedReason
+    });
+}
+
+async function resumeDebateSession() {
+    const session = await loadActiveDebateState();
+    if (!session.sessionId || !session.isPaused) {
+        return { ok: false, error: 'No paused session to resume.' };
+    }
+    const expectedLLM = getTurnLLM(session, session.turnIndex);
+    const validation = await resolveSessionTab(session, expectedLLM, { requirePing: true });
+    if (!validation.ok) {
+        await pauseDebateSession(validation.error, expectedLLM);
+        return { ok: false, error: validation.error };
+    }
+    session.isPaused = false;
+    session.pausedReason = null;
+    session.pausedProvider = null;
+    session.pausedAt = 0;
+    await persistDebateState();
+    sendMessageToPopup({
+        type: 'UI_SESSION_RESUMED',
+        sessionId: session.sessionId
+    });
+    await sendDebateTurn(session);
+    return { ok: true };
+}
+
+async function updateProfilesForTab(tab) {
+    if (!tab || !Number.isFinite(tab.id)) return null;
+    const state = await loadTabProfiles();
+    let changed = false;
+    const affected = [];
+    state.profiles = state.profiles.map(profile => {
+        if (profile.tabId !== tab.id) return profile;
+        const status = tab.url
+            ? (isExpectedHost(profile.provider, tab.url) ? 'ok' : 'wrong_host')
+            : 'unknown';
+        const next = {
+            ...profile,
+            windowId: tab.windowId,
+            lastKnownTitle: tab.title || profile.lastKnownTitle || '',
+            lastKnownUrl: tab.url || profile.lastKnownUrl || '',
+            status,
+            lastSeenAt: Date.now(),
+            updatedAt: Date.now()
+        };
+        changed = true;
+        affected.push(next);
+        return next;
+    });
+    if (changed) {
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+        for (const profile of affected) {
+            if (profile.inUseBySessionId && profile.status !== 'ok') {
+                await pauseDebateSession(`Profile "${profile.label}" is ${profile.status}.`, profile.provider);
+            }
+        }
+    }
+    return affected;
+}
+
+async function handleTabRemoved(tabId) {
+    const state = await loadTabProfiles();
+    let changed = false;
+    const affected = [];
+    state.profiles = state.profiles.map(profile => {
+        if (profile.tabId !== tabId) return profile;
+        const next = {
+            ...profile,
+            status: 'offline',
+            windowId: null,
+            updatedAt: Date.now()
+        };
+        changed = true;
+        affected.push(next);
+        return next;
+    });
+    if (changed) {
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+        for (const profile of affected) {
+            if (profile.inUseBySessionId) {
+                await pauseDebateSession(`Profile "${profile.label}" went offline.`, profile.provider);
+            }
+        }
+    }
+}
+
+async function handleTabActivated(activeInfo) {
+    if (!activeInfo || !Number.isFinite(activeInfo.tabId)) return;
+    try {
+        const tab = await chrome.tabs.get(activeInfo.tabId);
+        await updateProfilesForTab(tab);
+    } catch (error) {
+        // ignore
+    }
+}
+
+async function handleWindowFocusChanged(windowId) {
+    if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+    try {
+        const [tab] = await chrome.tabs.query({ active: true, windowId });
+        if (tab) {
+            await updateProfilesForTab(tab);
+        }
+    } catch (error) {
+        // ignore
+    }
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+    handleTabRemoved(tabId).catch(error => {
+        console.warn('[MLC Profiles] Failed to handle tab removal:', error);
+    });
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (!tab || !Number.isFinite(tabId)) return;
+    if (changeInfo.url || changeInfo.status === 'complete' || changeInfo.title) {
+        updateProfilesForTab(tab).catch(error => {
+            console.warn('[MLC Profiles] Failed to handle tab update:', error);
+        });
+    }
+});
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+    handleTabActivated(activeInfo).catch(error => {
+        console.warn('[MLC Profiles] Failed to handle tab activation:', error);
+    });
+});
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+    handleWindowFocusChanged(windowId).catch(error => {
+        console.warn('[MLC Profiles] Failed to handle window focus change:', error);
+    });
+});
+
 async function sendDebateTurn(session) {
+    if (session.isPaused) return;
     const turnIndex = session.turnIndex;
     const expectedLLM = getTurnLLM(session, turnIndex);
+    const resolution = await resolveSessionTab(session, expectedLLM);
+    if (!resolution.ok) {
+        await pauseDebateSession(resolution.error || 'Tab validation failed.', expectedLLM);
+        return;
+    }
+
     const promptText = buildDebatePrompt(session, turnIndex);
     const promptId = `${session.sessionId}:turn:${turnIndex}`;
 
@@ -427,13 +1198,13 @@ async function sendDebateTurn(session) {
     });
 
     try {
-        await injectAndExecute(session.tabIds[expectedLLM], expectedLLM, promptText, {
+        await injectAndExecute(resolution.tabId, expectedLLM, promptText, {
             sessionId: session.sessionId,
             promptId: promptId,
             turnIndex: turnIndex
         });
     } catch (error) {
-        await endDebateSession(error.message || 'Failed to send prompt.');
+        await pauseDebateSession(error.message || 'Failed to send prompt.', expectedLLM);
     }
 }
 
@@ -443,6 +1214,10 @@ async function handleDebateResponse(message) {
     const session = await loadActiveDebateState();
     if (!session.isActive || session.sessionId !== message.sessionId) {
         console.log('[MLC Debate] Ignoring response: session not active or mismatch.');
+        return;
+    }
+    if (session.isPaused && !session.lastPromptId) {
+        console.log('[MLC Debate] Ignoring response while paused with no active prompt.');
         return;
     }
 
@@ -506,7 +1281,9 @@ async function handleDebateResponse(message) {
 
     session.turnIndex = turnIndex + 1;
     await persistDebateState();
-    await sendDebateTurn(session);
+    if (!session.isPaused) {
+        await sendDebateTurn(session);
+    }
 }
 
 async function endDebateSession(reason) {
@@ -514,9 +1291,12 @@ async function endDebateSession(reason) {
     if (!session.sessionId) return;
 
     session.isActive = false;
+    session.isPaused = false;
     session.waitingFor = null;
     session.endedAt = Date.now();
     await persistDebateState();
+
+    await releaseProfilesForSession(session.sessionId);
 
     sendMessageToPopup({
         type: 'UI_SESSION_ENDED',
@@ -786,8 +1566,11 @@ async function processLLM(llmType, prompt, context = {}) {
     try {
         console.log(`[MLC Background] processLLM for ${llmType} with prompt: "${prompt.substring(0, 50)}..."`);
 
+        const profilesState = await loadTabProfiles();
+        const defaultProfileId = profilesState.defaults?.[llmType];
+        const defaultProfile = defaultProfileId ? findProfileById(profilesState, defaultProfileId) : null;
         const preferred = await getPreferredTabs();
-        const preferredId = context.tabId || preferred[llmType];
+        const preferredId = context.tabId || defaultProfile?.tabId || preferred[llmType];
 
         sendMessageToPopup({ type: 'LLM_PROGRESS', llm: llmType, status: 'Finding tab...' });
         const tab = await findLLMTab(llmType, preferredId);
@@ -1108,13 +1891,18 @@ async function checkConnectionStatus() {
     console.log('[MLC Background] Starting connection status check...');
     
     try {
-        // Check if tabs exist and content scripts are responsive
-        console.log('[MLC Background] Looking for Gemini tab...');
-        const geminiTab = await findLLMTab('gemini');
+        const profilesState = await loadTabProfiles();
+        const geminiProfile = profilesState.defaults.gemini ? findProfileById(profilesState, profilesState.defaults.gemini) : null;
+        const chatgptProfile = profilesState.defaults.chatgpt ? findProfileById(profilesState, profilesState.defaults.chatgpt) : null;
+
+        const geminiTab = geminiProfile?.tabId
+            ? { id: geminiProfile.tabId }
+            : await findLLMTab('gemini');
+        const chatgptTab = chatgptProfile?.tabId
+            ? { id: chatgptProfile.tabId }
+            : await findLLMTab('chatgpt');
+
         console.log('[MLC Background] Gemini tab result:', geminiTab ? `Found tab ${geminiTab.id}` : 'Not found');
-        
-        console.log('[MLC Background] Looking for ChatGPT tab...');
-        const chatgptTab = await findLLMTab('chatgpt');
         console.log('[MLC Background] ChatGPT tab result:', chatgptTab ? `Found tab ${chatgptTab.id}` : 'Not found');
         
         // Test if content scripts are actually loaded by trying to ping them

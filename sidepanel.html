@@ -21,6 +21,42 @@
             </div>
         </header>
 
+        <details class="settings provider-manager" id="provider-manager" open>
+            <summary class="settings-summary">
+                <span>Provider manager</span>
+                <span class="material-symbols-rounded">hub</span>
+            </summary>
+            <div class="settings-body">
+                <div class="profile-actions">
+                    <button class="ghost-button" id="use-current-chatgpt" type="button">Use current ChatGPT tab</button>
+                    <button class="ghost-button" id="use-current-gemini" type="button">Use current Gemini tab</button>
+                    <button class="ghost-button" id="open-chatgpt-tab" type="button">Open new ChatGPT tab</button>
+                    <button class="ghost-button" id="open-gemini-tab" type="button">Open new Gemini tab</button>
+                </div>
+                <div class="claim-wizard" id="claim-wizard" hidden>
+                    <div class="claim-content">
+                        <div class="claim-title" id="claim-title">Claim new tab</div>
+                        <div class="claim-subtitle" id="claim-subtitle">Select a model in the new tab, then claim it.</div>
+                        <div class="claim-meta" id="claim-model"></div>
+                    </div>
+                    <div class="claim-actions">
+                        <button class="ghost-button" id="claim-tab-button" type="button">Claim this tab</button>
+                        <button class="ghost-button" id="cancel-claim-button" type="button">Cancel</button>
+                    </div>
+                </div>
+                <div class="profile-columns">
+                    <section class="profile-column">
+                        <div class="profile-column-title">ChatGPT profiles</div>
+                        <div class="profile-list" id="profile-list-chatgpt"></div>
+                    </section>
+                    <section class="profile-column">
+                        <div class="profile-column-title">Gemini profiles</div>
+                        <div class="profile-list" id="profile-list-gemini"></div>
+                    </section>
+                </div>
+            </div>
+        </details>
+
         <details class="settings" id="settings" open>
             <summary class="settings-summary">
                 <span>Session settings</span>
@@ -40,22 +76,27 @@
                         <input id="iterations" type="number" min="1" max="12" value="3">
                     </label>
                     <label class="field">
-                        <span class="field-label">ChatGPT tab</span>
-                        <select id="chatgpt-tab"></select>
+                        <span class="field-label">ChatGPT profile</span>
+                        <select id="chatgpt-profile"></select>
                     </label>
                     <label class="field">
-                        <span class="field-label">Gemini tab</span>
-                        <select id="gemini-tab"></select>
+                        <span class="field-label">Gemini profile</span>
+                        <select id="gemini-profile"></select>
                     </label>
                 </div>
                 <div class="settings-actions">
-                    <button class="ghost-button" id="refresh-tabs" type="button">Refresh tabs</button>
+                    <button class="ghost-button" id="refresh-profiles" type="button">Refresh profiles</button>
                     <label class="inline-toggle">
                         <input type="checkbox" id="auto-scroll" checked>
                         <span>Auto-scroll transcript</span>
                     </label>
                 </div>
                 <div class="session-status" id="session-status">Idle</div>
+                <div class="paused-actions" id="paused-actions" hidden>
+                    <button class="ghost-button" id="paused-focus" type="button">Focus tab</button>
+                    <button class="ghost-button" id="paused-rebind" type="button">Rebind to current tab</button>
+                    <button class="ghost-button" id="resume-session" type="button">Resume session</button>
+                </div>
             </div>
         </details>
 

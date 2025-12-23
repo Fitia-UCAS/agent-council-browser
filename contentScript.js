@@ -477,6 +477,66 @@
         return isChatGPT ? extractChatGPTResponseText() : extractGeminiResponseText();
     }
 
+    function detectChatGPTModelLabel() {
+        const selectors = [
+            'button[data-testid="model-switcher-button"]',
+            '[data-testid="model-switcher"] button',
+            'button[aria-haspopup="menu"][aria-label*="Model" i]',
+            'button[aria-label*="model" i]'
+        ];
+        for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            const aria = el.getAttribute('aria-label') || '';
+            const text = (el.textContent || '').trim();
+            const label = (text || aria).replace(/^Model:\s*/i, '').trim();
+            if (label) return label;
+        }
+        const badges = Array.from(document.querySelectorAll('span, div'))
+            .map(node => (node.textContent || '').trim())
+            .filter(text => /\b(gpt|o1|o3|o4)\b/i.test(text));
+        return badges[0] || '';
+    }
+
+    function detectGeminiModelLabel() {
+        const selectors = [
+            'button[aria-label*="Model" i]',
+            'button[aria-label*="Gemini" i]',
+            'mat-select[aria-label*="Model" i] .mat-select-value-text',
+            'mat-select .mat-select-value-text',
+            '[data-testid*="model"]'
+        ];
+        for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            const aria = el.getAttribute('aria-label') || '';
+            const text = (el.textContent || '').trim();
+            const label = (text || aria).replace(/^Model:\s*/i, '').trim();
+            if (label) return label;
+        }
+        return '';
+    }
+
+    function detectModelLabel() {
+        return isChatGPT ? detectChatGPTModelLabel() : detectGeminiModelLabel();
+    }
+
+    let lastModelLabel = '';
+    function sendModelInfoIfChanged() {
+        const label = detectModelLabel();
+        if (!label || label === lastModelLabel) return;
+        lastModelLabel = label;
+        chrome.runtime.sendMessage({
+            type: 'PROVIDER_MODEL_INFO',
+            provider: currentLLM,
+            modelLabel: label
+        }, () => {
+            if (chrome.runtime.lastError) {
+                // ignore
+            }
+        });
+    }
+
     function sendCapturedResponse(text) {
         const responsePayload = {
             content: text,
@@ -566,5 +626,8 @@
     }
 
     startCaptureObservers();
+
+    setInterval(sendModelInfoIfChanged, 8000);
+    setTimeout(sendModelInfoIfChanged, 2500);
 
 })();

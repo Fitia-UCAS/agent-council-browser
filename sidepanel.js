@@ -3,9 +3,15 @@
 const state = {
     sessionId: null,
     running: false,
+    paused: false,
+    pausedProvider: null,
+    pausedReason: null,
     autoScroll: true,
-    tabs: { chatgpt: [], gemini: [] },
-    preferred: { chatgpt: null, gemini: null }
+    profiles: [],
+    defaults: { chatgpt: null, gemini: null },
+    selectedProfiles: { chatgpt: 'default', gemini: 'default' },
+    sessionProfiles: { chatgpt: null, gemini: null },
+    pendingClaim: null
 };
 
 const elements = {};
@@ -17,9 +23,9 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.charCount = document.getElementById('char-count');
     elements.firstLLM = document.getElementById('first-llm');
     elements.iterations = document.getElementById('iterations');
-    elements.chatgptTab = document.getElementById('chatgpt-tab');
-    elements.geminiTab = document.getElementById('gemini-tab');
-    elements.refreshTabs = document.getElementById('refresh-tabs');
+    elements.chatgptProfile = document.getElementById('chatgpt-profile');
+    elements.geminiProfile = document.getElementById('gemini-profile');
+    elements.refreshProfiles = document.getElementById('refresh-profiles');
     elements.autoScroll = document.getElementById('auto-scroll');
     elements.timeline = document.getElementById('timeline');
     elements.emptyState = document.getElementById('empty-state');
@@ -27,11 +33,30 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.statusGemini = document.getElementById('status-gemini');
     elements.sessionStatus = document.getElementById('session-status');
 
+    elements.profileListChatgpt = document.getElementById('profile-list-chatgpt');
+    elements.profileListGemini = document.getElementById('profile-list-gemini');
+    elements.useCurrentChatgpt = document.getElementById('use-current-chatgpt');
+    elements.useCurrentGemini = document.getElementById('use-current-gemini');
+    elements.openChatgptTab = document.getElementById('open-chatgpt-tab');
+    elements.openGeminiTab = document.getElementById('open-gemini-tab');
+
+    elements.claimWizard = document.getElementById('claim-wizard');
+    elements.claimTitle = document.getElementById('claim-title');
+    elements.claimSubtitle = document.getElementById('claim-subtitle');
+    elements.claimModel = document.getElementById('claim-model');
+    elements.claimTabButton = document.getElementById('claim-tab-button');
+    elements.cancelClaimButton = document.getElementById('cancel-claim-button');
+
+    elements.pausedActions = document.getElementById('paused-actions');
+    elements.resumeButton = document.getElementById('resume-session');
+    elements.pausedFocusButton = document.getElementById('paused-focus');
+    elements.pausedRebindButton = document.getElementById('paused-rebind');
+
     bindEvents();
     updateCharCount();
     updateSendState();
 
-    requestTabList();
+    requestProfiles();
     requestConnectionStatus();
     requestActiveSession();
 });
@@ -58,8 +83,8 @@ function bindEvents() {
         elements.stopButton.addEventListener('click', stopSession);
     }
 
-    if (elements.refreshTabs) {
-        elements.refreshTabs.addEventListener('click', requestTabList);
+    if (elements.refreshProfiles) {
+        elements.refreshProfiles.addEventListener('click', requestProfiles);
     }
 
     if (elements.iterations) {
@@ -72,12 +97,74 @@ function bindEvents() {
         });
     }
 
-    if (elements.chatgptTab) {
-        elements.chatgptTab.addEventListener('change', persistTabPreferences);
+    if (elements.chatgptProfile) {
+        elements.chatgptProfile.addEventListener('change', () => {
+            state.selectedProfiles.chatgpt = elements.chatgptProfile.value;
+            updateSendState();
+        });
     }
 
-    if (elements.geminiTab) {
-        elements.geminiTab.addEventListener('change', persistTabPreferences);
+    if (elements.geminiProfile) {
+        elements.geminiProfile.addEventListener('change', () => {
+            state.selectedProfiles.gemini = elements.geminiProfile.value;
+            updateSendState();
+        });
+    }
+
+    if (elements.useCurrentChatgpt) {
+        elements.useCurrentChatgpt.addEventListener('click', () => {
+            sendMessage({ type: 'CREATE_PROFILE_FROM_ACTIVE_TAB', provider: 'chatgpt' }, handleActionResponse);
+        });
+    }
+
+    if (elements.useCurrentGemini) {
+        elements.useCurrentGemini.addEventListener('click', () => {
+            sendMessage({ type: 'CREATE_PROFILE_FROM_ACTIVE_TAB', provider: 'gemini' }, handleActionResponse);
+        });
+    }
+
+    if (elements.openChatgptTab) {
+        elements.openChatgptTab.addEventListener('click', () => {
+            openProviderTab('chatgpt');
+        });
+    }
+
+    if (elements.openGeminiTab) {
+        elements.openGeminiTab.addEventListener('click', () => {
+            openProviderTab('gemini');
+        });
+    }
+
+    if (elements.claimTabButton) {
+        elements.claimTabButton.addEventListener('click', () => {
+            claimPendingTab();
+        });
+    }
+
+    if (elements.cancelClaimButton) {
+        elements.cancelClaimButton.addEventListener('click', () => {
+            clearPendingClaim();
+        });
+    }
+
+    if (elements.profileListChatgpt) {
+        elements.profileListChatgpt.addEventListener('click', handleProfileListClick);
+    }
+
+    if (elements.profileListGemini) {
+        elements.profileListGemini.addEventListener('click', handleProfileListClick);
+    }
+
+    if (elements.resumeButton) {
+        elements.resumeButton.addEventListener('click', resumeSession);
+    }
+
+    if (elements.pausedFocusButton) {
+        elements.pausedFocusButton.addEventListener('click', focusPausedProvider);
+    }
+
+    if (elements.pausedRebindButton) {
+        elements.pausedRebindButton.addEventListener('click', rebindPausedProvider);
     }
 
     if (chrome?.runtime?.onMessage) {
@@ -95,6 +182,12 @@ function sendMessage(message, callback) {
     });
 }
 
+function handleActionResponse(response) {
+    if (response && response.ok === false && response.error) {
+        setSessionStatus(`Error: ${response.error}`);
+    }
+}
+
 function updateCharCount() {
     if (!elements.charCount || !elements.promptInput) return;
     elements.charCount.textContent = String(elements.promptInput.value.length);
@@ -104,25 +197,31 @@ function updateSendState() {
     if (!elements.sendButton || !elements.promptInput || !elements.iterations) return;
     const hasPrompt = elements.promptInput.value.trim().length > 0;
     const iterations = parseInt(elements.iterations.value, 10) || 0;
-    elements.sendButton.disabled = state.running || !hasPrompt || iterations <= 0;
+    const profilesReady = isProfileSelectionValid('chatgpt') && isProfileSelectionValid('gemini');
+    elements.sendButton.disabled = state.running || state.paused || !hasPrompt || iterations <= 0 || !profilesReady;
 }
 
-function setRunningState(running) {
+function setSessionState({ running, paused }) {
     state.running = running;
+    state.paused = paused;
+    const locked = running || paused;
+
     if (elements.sendButton) {
-        elements.sendButton.disabled = running || elements.promptInput.value.trim().length === 0;
-        elements.sendButton.textContent = running ? 'Running...' : 'Start debate';
+        const hasPrompt = elements.promptInput?.value.trim().length > 0;
+        const label = running ? 'Running...' : (paused ? 'Paused' : 'Start debate');
+        elements.sendButton.textContent = label;
+        elements.sendButton.disabled = locked || !hasPrompt || !isProfileSelectionValid('chatgpt') || !isProfileSelectionValid('gemini');
     }
     if (elements.stopButton) {
-        elements.stopButton.disabled = !running;
+        elements.stopButton.disabled = !locked;
     }
 
-    const disabled = running;
-    if (elements.firstLLM) elements.firstLLM.disabled = disabled;
-    if (elements.iterations) elements.iterations.disabled = disabled;
-    if (elements.chatgptTab) elements.chatgptTab.disabled = disabled;
-    if (elements.geminiTab) elements.geminiTab.disabled = disabled;
-    if (elements.refreshTabs) elements.refreshTabs.disabled = disabled;
+    if (elements.firstLLM) elements.firstLLM.disabled = locked;
+    if (elements.iterations) elements.iterations.disabled = locked;
+    if (elements.chatgptProfile) elements.chatgptProfile.disabled = locked;
+    if (elements.geminiProfile) elements.geminiProfile.disabled = locked;
+    if (elements.refreshProfiles) elements.refreshProfiles.disabled = locked;
+    updatePausedActions();
 }
 
 function setSessionStatus(text) {
@@ -131,8 +230,8 @@ function setSessionStatus(text) {
     }
 }
 
-function requestTabList() {
-    sendMessage({ type: 'LIST_LLM_TABS' });
+function requestProfiles() {
+    sendMessage({ type: 'GET_TAB_PROFILES' });
 }
 
 function requestConnectionStatus() {
@@ -143,18 +242,8 @@ function requestActiveSession() {
     sendMessage({ type: 'GET_ACTIVE_SESSION' });
 }
 
-function persistTabPreferences() {
-    const chatgptTabId = parseTabValue(elements.chatgptTab?.value);
-    const geminiTabId = parseTabValue(elements.geminiTab?.value);
-    sendMessage({
-        type: 'SET_PREFERRED_TABS',
-        chatgptTabId,
-        geminiTabId
-    });
-}
-
 function startSession() {
-    if (state.running) return;
+    if (state.running || state.paused) return;
     if (!elements.promptInput) return;
 
     const prompt = elements.promptInput.value.trim();
@@ -163,11 +252,16 @@ function startSession() {
     const rounds = parseInt(elements.iterations?.value, 10) || 0;
     if (rounds <= 0) return;
 
-    const firstLLM = elements.firstLLM?.value || 'chatgpt';
-    const chatgptTabId = parseTabValue(elements.chatgptTab?.value);
-    const geminiTabId = parseTabValue(elements.geminiTab?.value);
+    if (!isProfileSelectionValid('chatgpt') || !isProfileSelectionValid('gemini')) {
+        setSessionStatus('Select valid profiles for ChatGPT and Gemini.');
+        return;
+    }
 
-    setRunningState(true);
+    const firstLLM = elements.firstLLM?.value || 'chatgpt';
+    const chatgptSelection = elements.chatgptProfile?.value || 'default';
+    const geminiSelection = elements.geminiProfile?.value || 'default';
+
+    setSessionState({ running: true, paused: false });
     setSessionStatus('Starting session...');
 
     sendMessage({
@@ -175,9 +269,9 @@ function startSession() {
         prompt,
         firstLLM,
         rounds,
-        tabIds: {
-            chatgpt: chatgptTabId,
-            gemini: geminiTabId
+        profileIds: {
+            chatgpt: chatgptSelection,
+            gemini: geminiSelection
         }
     });
 }
@@ -191,10 +285,59 @@ function stopSession() {
     });
 }
 
+function resumeSession() {
+    if (!state.sessionId || !state.paused) return;
+    setSessionStatus('Resuming session...');
+    sendMessage({ type: 'RESUME_SESSION' }, handleActionResponse);
+}
+
+function openProviderTab(provider) {
+    sendMessage({ type: 'OPEN_PROVIDER_TAB', provider, focus: true }, (response) => {
+        if (!response || response.ok === false) {
+            handleActionResponse(response || { ok: false, error: 'Failed to open tab.' });
+            return;
+        }
+        state.pendingClaim = {
+            provider: response.provider,
+            tabId: response.tabId,
+            windowId: response.windowId,
+            modelLabel: ''
+        };
+        renderClaimWizard();
+    });
+}
+
+function claimPendingTab() {
+    if (!state.pendingClaim) return;
+    const providerLabel = formatProviderLabel(state.pendingClaim.provider);
+    const label = state.pendingClaim.modelLabel
+        ? `${providerLabel} - ${state.pendingClaim.modelLabel}`
+        : `${providerLabel} profile`;
+    sendMessage({
+        type: 'CLAIM_TAB_AS_PROFILE',
+        provider: state.pendingClaim.provider,
+        tabId: state.pendingClaim.tabId,
+        label
+    }, (response) => {
+        handleActionResponse(response);
+        if (response?.ok) {
+            clearPendingClaim();
+        }
+    });
+}
+
+function clearPendingClaim() {
+    state.pendingClaim = null;
+    renderClaimWizard();
+}
+
 function handleBackgroundMessage(message) {
     switch (message.type) {
-        case 'LLM_TABS_LIST':
-            handleTabList(message);
+        case 'TAB_PROFILES':
+            handleProfileList(message);
+            break;
+        case 'PROVIDER_MODEL_INFO':
+            handleModelInfo(message);
             break;
         case 'CONNECTION_STATUS':
             handleConnectionStatus(message);
@@ -204,7 +347,8 @@ function handleBackgroundMessage(message) {
             break;
         case 'UI_SESSION_STARTED':
             state.sessionId = message.sessionId;
-            setRunningState(true);
+            state.sessionProfiles = message.profileIds || state.sessionProfiles;
+            setSessionState({ running: true, paused: false });
             setSessionStatus(`Running round 1 of ${message.rounds}`);
             clearTranscript();
             break;
@@ -213,6 +357,12 @@ function handleBackgroundMessage(message) {
             break;
         case 'UI_MESSAGE_ADD':
             addMessage(message);
+            break;
+        case 'UI_SESSION_PAUSED':
+            handleSessionPaused(message);
+            break;
+        case 'UI_SESSION_RESUMED':
+            handleSessionResumed(message);
             break;
         case 'UI_SESSION_ENDED':
             handleSessionEnded(message);
@@ -228,59 +378,250 @@ function handleBackgroundMessage(message) {
     }
 }
 
-function handleTabList(message) {
-    state.tabs = message.tabs || { chatgpt: [], gemini: [] };
-    state.preferred = message.preferred || { chatgpt: null, gemini: null };
-    populateTabSelect(elements.chatgptTab, state.tabs.chatgpt, state.preferred.chatgpt, 'ChatGPT');
-    populateTabSelect(elements.geminiTab, state.tabs.gemini, state.preferred.gemini, 'Gemini');
+function handleProfileList(message) {
+    state.profiles = Array.isArray(message.profiles) ? message.profiles : [];
+    state.defaults = message.defaults || { chatgpt: null, gemini: null };
+    renderProfileSelect(elements.chatgptProfile, 'chatgpt');
+    renderProfileSelect(elements.geminiProfile, 'gemini');
+    renderProfileLists();
+    updateSendState();
 }
 
-function populateTabSelect(selectEl, tabs, preferredId, label) {
-    if (!selectEl) return;
+function handleModelInfo(message) {
+    if (!message || !state.pendingClaim) return;
+    if (state.pendingClaim.tabId !== message.tabId) return;
+    state.pendingClaim.modelLabel = message.modelLabel || '';
+    renderClaimWizard();
+}
 
+function renderProfileSelect(selectEl, provider) {
+    if (!selectEl) return;
     selectEl.innerHTML = '';
 
-    const autoOption = document.createElement('option');
-    autoOption.value = 'auto';
-    autoOption.textContent = `Auto (${label})`;
-    selectEl.appendChild(autoOption);
+    const defaultProfile = getProfileById(state.defaults[provider]);
+    const defaultOption = document.createElement('option');
+    defaultOption.value = 'default';
+    defaultOption.textContent = defaultProfile
+        ? `Default (${defaultProfile.label})`
+        : 'Default (not set)';
+    selectEl.appendChild(defaultOption);
 
-    if (!tabs || tabs.length === 0) {
+    const profiles = getProfilesForProvider(provider);
+    if (profiles.length === 0) {
         const emptyOption = document.createElement('option');
         emptyOption.value = 'none';
-        emptyOption.textContent = `No ${label} tabs found`;
+        emptyOption.textContent = `No ${formatProviderLabel(provider)} profiles`;
         selectEl.appendChild(emptyOption);
-        selectEl.value = 'none';
+    } else {
+        profiles.forEach((profile) => {
+            const option = document.createElement('option');
+            option.value = profile.profileId;
+            option.textContent = formatProfileOptionLabel(profile);
+            selectEl.appendChild(option);
+        });
+    }
+
+    const selected = state.selectedProfiles[provider] || 'default';
+    const hasSelected = Array.from(selectEl.options).some(option => option.value === selected);
+    selectEl.value = hasSelected ? selected : 'default';
+    state.selectedProfiles[provider] = selectEl.value;
+}
+
+function renderProfileLists() {
+    renderProfileList(elements.profileListChatgpt, 'chatgpt');
+    renderProfileList(elements.profileListGemini, 'gemini');
+}
+
+function renderProfileList(container, provider) {
+    if (!container) return;
+    container.innerHTML = '';
+    const profiles = getProfilesForProvider(provider);
+    if (profiles.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'profile-empty';
+        empty.textContent = `No ${formatProviderLabel(provider)} profiles yet.`;
+        container.appendChild(empty);
         return;
     }
 
-    tabs.forEach((tab) => {
-        const option = document.createElement('option');
-        option.value = `tab:${tab.id}`;
-        option.textContent = formatTabLabel(tab);
-        selectEl.appendChild(option);
+    profiles.forEach((profile) => {
+        container.appendChild(buildProfileCard(profile));
     });
+}
 
-    if (preferredId && tabs.some(tab => tab.id === preferredId)) {
-        selectEl.value = `tab:${preferredId}`;
-    } else {
-        selectEl.value = 'auto';
+function buildProfileCard(profile) {
+    const card = document.createElement('div');
+    card.className = `profile-card status-${profile.status || 'unknown'}`;
+    card.dataset.profileId = profile.profileId;
+
+    const header = document.createElement('div');
+    header.className = 'profile-header';
+
+    const title = document.createElement('div');
+    title.className = 'profile-title';
+    title.textContent = profile.label || `${formatProviderLabel(profile.provider)} profile`;
+
+    const status = document.createElement('div');
+    status.className = `status-pill status-${profile.status || 'unknown'}`;
+    status.textContent = formatStatusLabel(profile.status);
+
+    header.appendChild(title);
+    header.appendChild(status);
+
+    const badges = document.createElement('div');
+    badges.className = 'profile-badges';
+
+    if (state.defaults[profile.provider] === profile.profileId) {
+        const badge = document.createElement('span');
+        badge.className = 'badge badge-default';
+        badge.textContent = 'Default';
+        badges.appendChild(badge);
+    }
+    if (profile.inUseBySessionId) {
+        const badge = document.createElement('span');
+        badge.className = 'badge badge-active';
+        badge.textContent = 'In use';
+        badges.appendChild(badge);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'profile-meta';
+    meta.appendChild(buildMetaLine('Tab', formatProfileTabLabel(profile)));
+    if (profile.modelHint) {
+        meta.appendChild(buildMetaLine('Model', `${profile.modelHint} (best effort)`));
+    }
+    if (profile.windowId !== null && profile.windowId !== undefined) {
+        meta.appendChild(buildMetaLine('Window', String(profile.windowId)));
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'profile-actions-row';
+    actions.appendChild(buildActionButton('Focus', 'focus', !profile.tabId));
+    actions.appendChild(buildActionButton('Set default', 'default'));
+    actions.appendChild(buildActionButton('Rename', 'rename'));
+    actions.appendChild(buildActionButton('Rebind', 'rebind'));
+    actions.appendChild(buildActionButton('Remove', 'remove', false, true));
+
+    card.appendChild(header);
+    if (badges.childNodes.length) {
+        card.appendChild(badges);
+    }
+    card.appendChild(meta);
+    card.appendChild(actions);
+    return card;
+}
+
+function buildMetaLine(label, value) {
+    const line = document.createElement('div');
+    line.className = 'profile-meta-line';
+    const strong = document.createElement('span');
+    strong.className = 'profile-meta-label';
+    strong.textContent = `${label}:`;
+    const text = document.createElement('span');
+    text.textContent = value;
+    line.appendChild(strong);
+    line.appendChild(text);
+    return line;
+}
+
+function buildActionButton(label, action, disabled = false, danger = false) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `ghost-button${danger ? ' danger' : ''}`;
+    button.textContent = label;
+    button.dataset.action = action;
+    button.disabled = disabled;
+    return button;
+}
+
+function handleProfileListClick(event) {
+    const button = event.target.closest('button');
+    if (!button || !button.dataset.action) return;
+    const card = button.closest('[data-profile-id]');
+    if (!card) return;
+    const profile = getProfileById(card.dataset.profileId);
+    if (!profile) return;
+
+    switch (button.dataset.action) {
+        case 'focus':
+            if (profile.tabId) {
+                sendMessage({ type: 'FOCUS_TAB', tabId: profile.tabId }, handleActionResponse);
+            }
+            break;
+        case 'default':
+            sendMessage({ type: 'SET_DEFAULT_PROFILE', provider: profile.provider, profileId: profile.profileId }, handleActionResponse);
+            break;
+        case 'rename': {
+            const nextLabel = window.prompt('Rename profile', profile.label || '');
+            if (!nextLabel || nextLabel.trim() === profile.label) return;
+            sendMessage({
+                type: 'UPDATE_TAB_PROFILE',
+                profileId: profile.profileId,
+                patch: { label: nextLabel.trim() }
+            }, handleActionResponse);
+            break;
+        }
+        case 'rebind':
+            sendMessage({
+                type: 'CREATE_PROFILE_FROM_ACTIVE_TAB',
+                provider: profile.provider,
+                profileId: profile.profileId
+            }, handleActionResponse);
+            break;
+        case 'remove': {
+            const confirmed = window.confirm(`Remove profile "${profile.label}"?`);
+            if (!confirmed) return;
+            sendMessage({ type: 'DELETE_TAB_PROFILE', profileId: profile.profileId }, handleActionResponse);
+            break;
+        }
+        default:
+            break;
     }
 }
 
-function formatTabLabel(tab) {
-    const title = (tab.title || tab.url || '').trim();
-    if (!title) return `Tab ${tab.id}`;
-    return title.length > 42 ? `${title.slice(0, 39)}...` : title;
+function renderClaimWizard() {
+    if (!elements.claimWizard) return;
+    if (!state.pendingClaim) {
+        elements.claimWizard.hidden = true;
+        return;
+    }
+    const providerLabel = formatProviderLabel(state.pendingClaim.provider);
+    if (elements.claimTitle) {
+        elements.claimTitle.textContent = `Claim ${providerLabel} tab`;
+    }
+    if (elements.claimSubtitle) {
+        elements.claimSubtitle.textContent = `We opened ${providerLabel}. Select the model there, then claim it.`;
+    }
+    if (elements.claimModel) {
+        elements.claimModel.textContent = state.pendingClaim.modelLabel
+            ? `Detected model: ${state.pendingClaim.modelLabel} (best effort)`
+            : 'Detected model: not available yet.';
+    }
+    elements.claimWizard.hidden = false;
 }
 
-function parseTabValue(value) {
-    if (!value || value === 'auto' || value === 'none') return null;
-    if (value.startsWith('tab:')) {
-        const id = Number(value.replace('tab:', ''));
-        return Number.isFinite(id) ? id : null;
-    }
-    return null;
+function updatePausedActions() {
+    if (!elements.pausedActions) return;
+    elements.pausedActions.hidden = !state.paused;
+}
+
+function focusPausedProvider() {
+    if (!state.pausedProvider) return;
+    const profileId = state.sessionProfiles[state.pausedProvider];
+    const profile = getProfileById(profileId);
+    if (!profile?.tabId) return;
+    sendMessage({ type: 'FOCUS_TAB', tabId: profile.tabId }, handleActionResponse);
+}
+
+function rebindPausedProvider() {
+    if (!state.pausedProvider) return;
+    const profileId = state.sessionProfiles[state.pausedProvider];
+    if (!profileId) return;
+    sendMessage({
+        type: 'CREATE_PROFILE_FROM_ACTIVE_TAB',
+        provider: state.pausedProvider,
+        profileId
+    }, handleActionResponse);
 }
 
 function handleConnectionStatus(message) {
@@ -297,14 +638,27 @@ function handleConnectionStatus(message) {
 
 function hydrateSession(session) {
     if (!session) {
-        setRunningState(false);
+        setSessionState({ running: false, paused: false });
         state.sessionId = null;
+        state.sessionProfiles = { chatgpt: null, gemini: null };
+        state.pausedProvider = null;
+        state.pausedReason = null;
         return;
     }
 
     state.sessionId = session.sessionId;
-    setRunningState(session.isActive);
-    setSessionStatus(session.isActive ? `Resumed round ${session.roundIndex || 1} of ${session.rounds}` : 'Idle');
+    state.sessionProfiles = session.profileIds || state.sessionProfiles;
+    state.paused = Boolean(session.isPaused);
+    state.pausedProvider = session.pausedProvider || null;
+    state.pausedReason = session.pausedReason || null;
+
+    if (session.isPaused) {
+        setSessionState({ running: false, paused: true });
+        setSessionStatus(`Paused: ${state.pausedReason || 'Needs attention'}`);
+    } else {
+        setSessionState({ running: session.isActive, paused: false });
+        setSessionStatus(session.isActive ? `Resumed round ${session.roundIndex || 1} of ${session.rounds}` : 'Idle');
+    }
 
     clearTranscript();
     if (Array.isArray(session.messages)) {
@@ -325,14 +679,31 @@ function handleProgress(message) {
     }
 }
 
+function handleSessionPaused(message) {
+    state.paused = true;
+    state.pausedProvider = message.provider || null;
+    state.pausedReason = message.reason || 'Session paused.';
+    setSessionState({ running: false, paused: true });
+    setSessionStatus(`Paused: ${state.pausedReason}`);
+}
+
+function handleSessionResumed() {
+    state.paused = false;
+    state.pausedProvider = null;
+    state.pausedReason = null;
+    setSessionState({ running: true, paused: false });
+    setSessionStatus('Resumed session.');
+}
+
 function handleSessionEnded(message) {
-    setRunningState(false);
+    setSessionState({ running: false, paused: false });
     setSessionStatus(message?.reason || 'Session completed');
     state.sessionId = null;
+    state.sessionProfiles = { chatgpt: null, gemini: null };
 }
 
 function handleSessionError(message) {
-    setRunningState(false);
+    setSessionState({ running: false, paused: false });
     setSessionStatus(`Error: ${message?.error || 'Unknown error'}`);
     state.sessionId = null;
 }
@@ -391,4 +762,59 @@ function formatRoleLabel(role) {
     if (normalized === 'chatgpt') return 'ChatGPT';
     if (normalized === 'gemini') return 'Gemini';
     return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function formatProviderLabel(provider) {
+    return provider === 'gemini' ? 'Gemini' : 'ChatGPT';
+}
+
+function getProfilesForProvider(provider) {
+    return state.profiles.filter(profile => profile.provider === provider);
+}
+
+function getProfileById(profileId) {
+    if (!profileId) return null;
+    return state.profiles.find(profile => profile.profileId === profileId) || null;
+}
+
+function resolveSelectedProfileId(provider) {
+    const selection = state.selectedProfiles[provider] || 'default';
+    if (selection === 'default') {
+        return state.defaults?.[provider] || null;
+    }
+    return selection;
+}
+
+function isProfileSelectionValid(provider) {
+    const profileId = resolveSelectedProfileId(provider);
+    if (!profileId) return false;
+    const profile = getProfileById(profileId);
+    return Boolean(profile && profile.status === 'ok' && profile.tabId);
+}
+
+function formatProfileOptionLabel(profile) {
+    const statusSuffix = profile.status && profile.status !== 'ok' ? ` (${formatStatusLabel(profile.status)})` : '';
+    const inUse = profile.inUseBySessionId ? ' [in use]' : '';
+    return `${profile.label || 'Untitled'}${statusSuffix}${inUse}`;
+}
+
+function formatProfileTabLabel(profile) {
+    if (!profile.tabId) return 'Unbound';
+    const title = (profile.lastKnownTitle || profile.lastKnownUrl || '').trim();
+    if (!title) return `Tab ${profile.tabId}`;
+    return title.length > 52 ? `${title.slice(0, 49)}...` : title;
+}
+
+function formatStatusLabel(status) {
+    switch (status) {
+        case 'ok':
+            return 'OK';
+        case 'offline':
+            return 'Offline';
+        case 'wrong_host':
+            return 'Wrong host';
+        case 'unknown':
+        default:
+            return 'Unknown';
+    }
 }
