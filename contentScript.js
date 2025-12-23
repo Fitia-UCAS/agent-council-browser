@@ -10,7 +10,48 @@
 
     console.log(`[MLC ContentScript] Initializing for ${currentLLM}. Forwarding to ${forwardTo}.`);
 
-    function findInput() {
+    const captureState = {
+        active: false,
+        promptId: null,
+        sessionId: null,
+        turnIndex: null,
+        startedAt: 0,
+        lastText: '',
+        baselineText: '',
+        hasNewText: false,
+        lastTextChangeAt: 0,
+        stableTicks: 0,
+        lastEmitAt: 0
+    };
+
+    // Global message listener for connection testing and capture arming
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.type === 'PING') {
+            console.log(`[MLC ContentScript - ${currentLLM}] Received PING, responding with PONG`);
+            sendResponse({ type: 'PONG', llm: currentLLM, status: 'ready' });
+            return true; // Keep message channel open for async response
+        }
+        if (message.type === 'MLC_PROMPT_SENT') {
+            if (!message.llmType || message.llmType === currentLLM) {
+                armCapture(message);
+            }
+            sendResponse({ received: true });
+            return true;
+        }
+        if (message.type === 'NEW_PROMPT_SENT' || message.type === 'NEW_MULTI_AGENT_PROMPT_SENT') {
+            armCapture({
+                promptId: message.promptId || message.sessionId,
+                sessionId: message.sessionId || null,
+                turnIndex: message.turnIndex || null,
+                timestamp: message.timestamp || Date.now()
+            });
+            sendResponse({ received: true });
+            return true;
+        }
+        return false; // Don't handle other messages here
+    });
+
+    function findInput(options = {}) {
         const selectors = isChatGPT ? [
             '#prompt-textarea',
             'textarea[data-testid="prompt-textarea"]',
@@ -33,7 +74,9 @@
                 return el;
             }
         }
-        console.error(`[MLC ContentScript - ${currentLLM}] Input element NOT found.`);
+        if (!options.silent) {
+            console.error(`[MLC ContentScript - ${currentLLM}] Input element NOT found.`);
+        }
         return null;
     }
 
@@ -275,859 +318,316 @@
         attachListeners();
     }, 2500); // Slightly increased delay
 
-    if (isGemini) {
-        /* ------------------------------------------------------------------
-           Gemini response capture for Auto Follow-up
-           ------------------------------------------------------------------ */
-        function observeGeminiResponses() {
-            console.log('[MLC GeminiCapture] Starting Gemini response capture...');
-            
-            // Simple approach: Target the most stable selector combinations
-            // Based on recent Gemini UI structure
-            const stopGeneratingSelector = 'button[aria-label*="Stop generating"], button[aria-label*="Stop respond"]';
-            
-            // Track response state
-            let lastResponseText = '';
-            let stableCounter = 0;
-            let isCapturing = false;
-            let captureComplete = false;
-            let lastCaptureTime = 0;
-            let lastMessageCount = 0; // Track message count to detect new responses
-            let pendingPromptTimestamp = 0; // Track when the last prompt was sent
-            let responseCaptureDelayMs = 2000; // Minimum delay after prompt before capturing
-            let currentPromptId = null; // ID of the current prompt we're waiting for
-            let lastIconState = null; // Track the last icon state to detect transitions
-            let iconTransitionTimeout = null; // Timeout for icon state transitions
-
-            // Listen for messages from background script about new prompts
-            chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-                if (message.type === 'NEW_PROMPT_SENT') {
-                    console.log(`[MLC GeminiCapture] Received notification of new prompt sent: ${message.promptId}`);
-
-                    // Store the prompt ID and timestamp
-                    currentPromptId = message.promptId;
-                    pendingPromptTimestamp = message.timestamp;
-
-                    // Reset capture state completely
-                    captureComplete = false;
-                    isCapturing = false;
-                    stableCounter = 0;
-                    lastResponseText = ''; // Clear previous response text
-                    lastIconState = null; // Reset icon state to detect fresh transitions
-                    
-                    // Clear any pending timeouts
-                    if (iconTransitionTimeout) {
-                        clearTimeout(iconTransitionTimeout);
-                        iconTransitionTimeout = null;
-                    }
-
-                    console.log(`[MLC GeminiCapture] State completely reset for new prompt: ${message.promptId}`);
-
-                    // Reset message count after a short delay to allow the prompt to appear in the UI
-                    setTimeout(() => {
-                        lastMessageCount = countMessages();
-                        console.log(`[MLC GeminiCapture] Updated message count to ${lastMessageCount} after prompt notification`);
-                    }, 500);
-
-                    if (sendResponse) sendResponse({ received: true });
-                }
-                return true; // Keep the message channel open for async response
-            });
-
-            // Check message count to detect if a new response has been added
-            function countMessages() {
-                const allMessages = document.querySelectorAll('[data-message-id], .conversation-turn, .message-container');
-                return allMessages.length;
-            }
-
-            // Initialize by counting current messages
-            setTimeout(() => {
-                lastMessageCount = countMessages();
-                console.log(`[MLC GeminiCapture] Initial message count: ${lastMessageCount}`);
-            }, 1000);
-
-            // Listen for our own prompt being sent to Gemini
-            if (findInput() && findSendButton()) {
-                const input = findInput();
-                const sendBtn = findSendButton();
-
-                // Monitor send button clicks to detect when our prompt is sent
-                if (sendBtn) {
-                    sendBtn.addEventListener('click', () => {
-                        pendingPromptTimestamp = Date.now();
-                        console.log(`[MLC GeminiCapture] Prompt sent at ${pendingPromptTimestamp}, waiting for response...`);
-                        // Reset capture state completely
-                        isCapturing = false;
-                        captureComplete = false;
-                        stableCounter = 0;
-                        lastResponseText = ''; // Clear previous response text
-                        lastIconState = null; // Reset icon state to detect fresh transitions
-                        
-                        // Clear any pending timeouts
-                        if (iconTransitionTimeout) {
-                            clearTimeout(iconTransitionTimeout);
-                            iconTransitionTimeout = null;
-                        }
-                        
-                        console.log(`[MLC GeminiCapture] State reset for new prompt - cleared lastResponseText and icon state`);
-                    }, true);
-                }
-
-                // Also monitor Enter key in the input field
-                if (input) {
-                    input.addEventListener('keydown', evt => {
-                        if (evt.key === 'Enter' && !evt.shiftKey) {
-                            pendingPromptTimestamp = Date.now();
-                            console.log(`[MLC GeminiCapture] Prompt sent via Enter key at ${pendingPromptTimestamp}, waiting for response...`);
-                            // Reset capture state completely
-                            isCapturing = false;
-                            captureComplete = false;
-                            stableCounter = 0;
-                            lastResponseText = ''; // Clear previous response text
-                            lastIconState = null; // Reset icon state to detect fresh transitions
-                            
-                            // Clear any pending timeouts
-                            if (iconTransitionTimeout) {
-                                clearTimeout(iconTransitionTimeout);
-                                iconTransitionTimeout = null;
-                            }
-                            
-                            console.log(`[MLC GeminiCapture] State reset for Enter key - cleared lastResponseText and icon state`);
-                        }
-                    });
-                }
-            }
-
-            // Function to check if we can capture now
-            function canCapture() {
-                // Don't capture too frequently
-                const now = Date.now();
-
-                // If we haven't seen a prompt sent recently, don't capture
-                if (pendingPromptTimestamp === 0) {
-                    console.log('[MLC GeminiCapture] No pending prompt detected yet');
-                    return false;
-                }
-
-                // Don't capture until a minimum delay after the prompt was sent
-                if (now - pendingPromptTimestamp < responseCaptureDelayMs) {
-                    console.log(`[MLC GeminiCapture] Too soon after prompt (${now - pendingPromptTimestamp}ms), waiting...`);
-                    return false;
-                }
-
-                // Check if the message count has increased since our prompt was sent
-                const currentMessageCount = countMessages();
-                if (currentMessageCount <= lastMessageCount) {
-                    console.log(`[MLC GeminiCapture] No new messages detected (${currentMessageCount} ≤ ${lastMessageCount})`);
-                    return false;
-                }
-
-                // Update our tracking of message count
-                lastMessageCount = currentMessageCount;
-
-                // Don't capture if we've captured too recently
-                if (now - lastCaptureTime < 5000) {
-                    console.log('[MLC GeminiCapture] Too soon after last capture');
-                    return false;
-                }
-
-                console.log('[MLC GeminiCapture] Can capture now: prompt sent and new message detected');
-                return true;
-            }
-            
-            // Function to get current icon state
-            function getCurrentIconState() {
-                const micIcon = document.querySelector('mat-icon[fonticon="mic"]');
-                const sendIcon = document.querySelector('mat-icon[fonticon="send"]:not(.hidden)');
-                const stopIcon = document.querySelector('mat-icon[fonticon="stop"]');
-                
-                if (stopIcon) return 'stop';
-                if (micIcon) return 'mic';
-                if (sendIcon) return 'send';
-                return 'unknown';
-            }
-            
-            // Function to check if response is complete using font icon state with transition detection
-            function isResponseComplete() {
-                // NEW APPROACH: Check the font icon state to determine Gemini's status
-                // mic = empty input / ready for new input (response complete)
-                // send = text typed but not sent
-                // stop = currently generating response
-                
-                const currentIconState = getCurrentIconState();
-                
-                // Only log state changes, not every check
-                if (currentIconState !== lastIconState) {
-                    console.log('[MLC GeminiCapture] Icon state changed:', {
-                        previous: lastIconState,
-                        current: currentIconState,
-                        timestamp: Date.now(),
-                        pendingPromptTimestamp,
-                        currentPromptId
-                    });
-                }
-                
-                // Detect transition from 'stop' to 'mic' - this indicates response completion
-                if (lastIconState === 'stop' && currentIconState === 'mic') {
-                    console.log('[MLC GeminiCapture] Detected stop->mic transition - response completion detected!');
-                    
-                    // SMART FIX: Only ignore very immediate transitions (< 500ms)
-                    // This prevents capturing previous responses that complete immediately
-                    const now = Date.now();
-                    const timeSincePrompt = now - pendingPromptTimestamp;
-                    const minimumProcessingTime = 500; // 500ms minimum - any faster is likely stale
-                    
-                    if (pendingPromptTimestamp > 0 && timeSincePrompt < minimumProcessingTime) {
-                        console.log(`[MLC GeminiCapture] Ignoring immediate transition - likely stale (${timeSincePrompt}ms < ${minimumProcessingTime}ms)`);
-                        lastIconState = currentIconState;
-                        return false;
-                    }
-                    
-                    console.log(`[MLC GeminiCapture] Valid transition detected after ${timeSincePrompt}ms`);
-                    
-                    
-                    // Clear any existing timeout
-                    if (iconTransitionTimeout) {
-                        clearTimeout(iconTransitionTimeout);
-                    }
-                    
-                    // Wait 500ms as suggested to ensure stability before capturing
-                    iconTransitionTimeout = setTimeout(() => {
-                        console.log('[MLC GeminiCapture] Icon transition stabilized after 500ms, response should be complete');
-                        // Don't call captureAndSendResponse directly to avoid recursion
-                        // Instead, capture the response directly here
-                        if (!captureComplete && pendingPromptTimestamp > 0 && currentPromptId) {
-                            const responseText = getResponseText();
-                            console.log('[MLC GeminiCapture] Response text check after transition:', {
-                                hasText: !!responseText,
-                                responseLength: responseText ? responseText.length : 0,
-                                responsePreview: responseText ? responseText.substring(0, 100) : 'NULL',
-                                lastResponseLength: lastResponseText ? lastResponseText.length : 0,
-                                isDifferentFromLast: responseText !== lastResponseText,
-                                pendingPromptTimestamp,
-                                currentPromptId
-                            });
-                            
-                            if (responseText && responseText !== lastResponseText) {
-                                console.log('[MLC GeminiCapture] Capturing response after stop->mic transition');
-                                
-                                // Set capture as complete IMMEDIATELY to prevent duplicate captures
-                                captureComplete = true;
-                                
-                                chrome.runtime.sendMessage({
-                                    type: 'GEMINI_RESPONSE_CAPTURED',
-                                    content: responseText,
-                                    promptId: currentPromptId,
-                                    timestamp: Date.now(),
-                                    responseDelay: pendingPromptTimestamp ? (Date.now() - pendingPromptTimestamp) : null
-                                }, response => {
-                                    if (chrome.runtime.lastError) {
-                                        console.error('[MLC GeminiCapture] Error sending transition-based capture:', chrome.runtime.lastError);
-                                        // Reset on error so we can try again
-                                        captureComplete = false;
-                                    } else {
-                                        console.log('[MLC GeminiCapture] Transition-based capture sent successfully:', response);
-                                        lastResponseText = responseText; // Update the last response text
-                                        currentPromptId = null; // Clear only after successful send
-                                        lastCaptureTime = Date.now();
-                                    }
-                                });
-                            } else {
-                                console.log('[MLC GeminiCapture] Skipping capture - no new response text or same as last');
-                            }
-                        } else {
-                            console.log('[MLC GeminiCapture] Skipping capture - conditions not met:', {
-                                captureComplete,
-                                pendingPromptTimestamp,
-                                hasCurrentPromptId: !!currentPromptId
-                            });
-                        }
-                    }, 500);
-                    
-                    lastIconState = currentIconState;
-                    return false; // Don't capture immediately, wait for timeout
-                }
-                
-                // Update last icon state for next comparison
-                if (currentIconState !== lastIconState) {
-                    console.log(`[MLC GeminiCapture] Icon state changed: ${lastIconState} -> ${currentIconState}`);
-                    lastIconState = currentIconState;
-                }
-                
-                // If stop icon is visible, Gemini is still generating
-                if (currentIconState === 'stop') {
-                    console.log('[MLC GeminiCapture] Still generating - stop icon visible');
-                    return false;
-                }
-                
-                // If mic icon is visible and we have a pending prompt, response is likely complete
-                if (currentIconState === 'mic' && pendingPromptTimestamp > 0) {
-                    console.log('[MLC GeminiCapture] Response complete - mic icon visible (ready state)');
-                    return true;
-                }
-                
-                // If only send icon is visible, user has typed but not sent yet
-                if (currentIconState === 'send') {
-                    console.log('[MLC GeminiCapture] User has typed but not sent - send icon visible');
-                    return false;
-                }
-                
-                // Fallback to original method if icons are not found or unclear
-                const stopButton = document.querySelector(stopGeneratingSelector);
-                if (stopButton) {
-                    console.log('[MLC GeminiCapture] Still generating - fallback stop button found');
-                    return false;
-                }
-                
-                const inputField = document.querySelector('div.ql-editor[role="textbox"]');
-                if (inputField && inputField.getAttribute('aria-disabled') === 'true') {
-                    console.log('[MLC GeminiCapture] Still generating - fallback input field disabled');
-                    return false;
-                }
-                
-                // Only consider complete via fallback if we have a pending prompt
-                if (pendingPromptTimestamp > 0) {
-                    console.log('[MLC GeminiCapture] Response appears complete - fallback method');
-                    return true;
-                }
-                
-                console.log('[MLC GeminiCapture] No clear completion signal detected');
-                return false;
-            }
-            
-            // Function to extract response text using multiple strategies - ONLY the latest response
-            function getResponseText() {
-                console.log('[MLC GeminiCapture] Attempting to extract LATEST response text only...');
-
-                // Strategy 1: Look for message elements with specific focus on the last/latest response
-                const messages = document.querySelectorAll('[data-message-id], [data-message-author="gemini"], [data-testid="gemini-response"], div[role="region"][aria-label*="response"], .conversation-turn:not(.user)');
-                if (messages.length > 0) {
-                    console.log(`[MLC GeminiCapture] Found ${messages.length} message elements`);
-                    // Get the last message which is the latest Gemini response
-                    const lastMessage = messages[messages.length - 1];
-
-                    // Check if this appears to be a Gemini response (not user message)
-                    if (!lastMessage.classList.contains('user-message') &&
-                        !lastMessage.hasAttribute('data-author-is-user')) {
-
-                        // First, try to find markdown content within this message specifically
-                        const markdownInMessage = lastMessage.querySelector('.markdown, .markdown-content, div[data-testid="markdown-content"]');
-                        if (markdownInMessage) {
-                            const markdownText = markdownInMessage.innerText || markdownInMessage.textContent;
-                            if (markdownText && markdownText.trim()) {
-                                console.log('[MLC GeminiCapture] Found latest message with markdown content');
-                                return markdownText.trim();
-                            }
-                        }
-
-                        // If no specific markdown container, use the whole message text
-                        const text = lastMessage.innerText || lastMessage.textContent;
-                        if (text && text.trim()) {
-                            console.log('[MLC GeminiCapture] Found latest message text with strategy 1');
-                            return text.trim();
-                        }
-                    }
-                }
-
-                // Strategy 2: Look for the last markdown content element (likely the latest response)
-                const markdownElements = document.querySelectorAll('.markdown, .markdown-content, div[data-testid="markdown-content"]');
-                if (markdownElements.length > 0) {
-                    console.log(`[MLC GeminiCapture] Found ${markdownElements.length} markdown elements, focusing on last one`);
-
-                    // Get only the last markdown element
-                    const lastMarkdown = markdownElements[markdownElements.length - 1];
-
-                    // Filter out user messages
-                    const isUserMessage = lastMarkdown.closest('[data-author-is-user="true"], .user-message, .user-query');
-                    if (!isUserMessage) {
-                        const text = lastMarkdown.innerText || lastMarkdown.textContent;
-                        if (text && text.trim()) {
-                            console.log('[MLC GeminiCapture] Found latest message text with strategy 2');
-                            return text.trim();
-                        }
-                    }
-                }
-
-                // Strategy 3: Look for conversation turns (message blocks) and get the last Gemini one
-                const conversationTurns = document.querySelectorAll('.conversation-turn, .message-container, [data-message-container]');
-                if (conversationTurns.length > 0) {
-                    // Start from the end to find the last Gemini response
-                    for (let i = conversationTurns.length - 1; i >= 0; i--) {
-                        const turn = conversationTurns[i];
-
-                        // Skip if it's a user message
-                        if (turn.classList.contains('user-message') ||
-                            turn.classList.contains('user-query') ||
-                            turn.hasAttribute('data-author-is-user') ||
-                            turn.querySelector('.user-message, .user-query')) {
-                            continue;
-                        }
-
-                        // This is likely a Gemini response - get its text
-                        const text = turn.innerText || turn.textContent;
-                        if (text && text.trim()) {
-                            console.log('[MLC GeminiCapture] Found latest message text with strategy 3');
-                            return text.trim();
-                        }
-                    }
-                }
-
-                // Strategy 4: Find visual indicators of the latest response
-                // Gemini often has a clear visual break between messages
-                const responseIndicators = document.querySelectorAll('.response-block:last-child, .gemini-response:last-child, .model-response:last-child');
-                if (responseIndicators.length > 0) {
-                    const lastIndicator = responseIndicators[responseIndicators.length - 1];
-                    const text = lastIndicator.innerText || lastIndicator.textContent;
-                    if (text && text.trim()) {
-                        console.log('[MLC GeminiCapture] Found latest message text with strategy 4');
-                        return text.trim();
-                    }
-                }
-
-                // Last resort - Look at the timestamp/date elements to identify the latest response
-                const timeElements = document.querySelectorAll('time, [data-timestamp], .message-timestamp');
-                if (timeElements.length > 0) {
-                    let latestTime = 0;
-                    let latestResponseElement = null;
-
-                    for (let i = 0; i < timeElements.length; i++) {
-                        const timeEl = timeElements[i];
-                        // Try to get a timestamp from the element
-                        const timestamp = timeEl.getAttribute('datetime') ||
-                                          timeEl.getAttribute('data-timestamp') ||
-                                          timeEl.textContent;
-
-                        if (timestamp) {
-                            const time = new Date(timestamp).getTime();
-                            if (time > latestTime) {
-                                latestTime = time;
-                                // Get the parent message container
-                                latestResponseElement = timeEl.closest('.message, .response, [data-message-id]');
-                            }
-                        }
-                    }
-
-                    if (latestResponseElement) {
-                        // Verify it's not a user message
-                        if (!latestResponseElement.classList.contains('user-message') &&
-                            !latestResponseElement.hasAttribute('data-author-is-user')) {
-
-                            const text = latestResponseElement.innerText || latestResponseElement.textContent;
-                            if (text && text.trim()) {
-                                console.log('[MLC GeminiCapture] Found latest message text with last resort timestamp strategy');
-                                return text.trim();
-                            }
-                        }
-                    }
-                }
-
-                console.log('[MLC GeminiCapture] No latest response text found');
-                return '';
-            }
-            
-            // Function to capture and send response
-            function captureAndSendResponse() {
-                // Only log when we actually have a pending prompt (reduce spam)
-                if (pendingPromptTimestamp > 0) {
-                    console.log('[MLC GeminiCapture] captureAndSendResponse() called with state:', {
-                        captureComplete,
-                        pendingPromptTimestamp,
-                        currentPromptId,
-                        isCapturing,
-                        stableCounter,
-                        lastMessageCount,
-                        lastResponseLength: lastResponseText ? lastResponseText.length : 0
-                    });
-                }
-
-                // Determine if conditions are right to capture a new response
-                const canCaptureResult = canCapture();
-                if (captureComplete) {
-                    console.log('[MLC GeminiCapture] Already completed capture for this prompt');
-                    return;
-                }
-
-                if (!canCaptureResult) return;
-
-                // Check if response appears complete
-                const isComplete = isResponseComplete();
-                console.log('[MLC GeminiCapture] isResponseComplete() =', isComplete);
-
-                if (!isComplete) {
-                    console.log('[MLC GeminiCapture] Response not complete yet');
-                    isCapturing = true;
-                    return;
-                }
-
-                // Get the response text
-                const responseText = getResponseText();
-                console.log(`[MLC GeminiCapture] Got response text, length: ${responseText.length}`);
-
-                // Empty response, nothing to send
-                if (!responseText) {
-                    console.log('[MLC GeminiCapture] Empty response text, not sending');
-                    return;
-                }
-
-                // Check if response text is stable (hasn't changed in a few checks)
-                if (responseText === lastResponseText) {
-                    stableCounter++;
-                    console.log(`[MLC GeminiCapture] Response text stable: ${stableCounter}/3`);
-                } else {
-                    stableCounter = 0;
-                    lastResponseText = responseText;
-                    console.log('[MLC GeminiCapture] Response text changed, resetting stability counter');
-                }
-
-                // If response is stable for 3 checks or more, consider it complete and send it
-                if (stableCounter >= 3) {
-                    console.log('[MLC GeminiCapture] Response appears stable, sending to background');
-
-                    // Log the actual content we're sending (beginning)
-                    console.log('[MLC GeminiCapture] Response content preview:', responseText.substring(0, 200));
-
-                    chrome.runtime.sendMessage({
-                        type: 'GEMINI_RESPONSE_CAPTURED',
-                        content: responseText,
-                        promptId: currentPromptId, // Include the prompt ID this response is for
-                        timestamp: Date.now(),
-                        responseDelay: pendingPromptTimestamp ? (Date.now() - pendingPromptTimestamp) : null
-                    }, response => {
-                        if (chrome.runtime.lastError) {
-                            console.error('[MLC GeminiCapture] Error sending message:', chrome.runtime.lastError);
-                        } else {
-                            console.log('[MLC GeminiCapture] Message sent successfully:', response);
-                            captureComplete = true;
-                            // Reset the promptId as we've handled this prompt-response cycle
-                            currentPromptId = null;
-                        }
-                    });
-                    
-                    // Reset for next capture
-                    isCapturing = false;
-                    lastCaptureTime = Date.now();
-                    
-                    // Stop checking for a while to avoid duplicate captures
-                    setTimeout(() => {
-                        captureComplete = false;
-                    }, 10000);
-                }
-            }
-            
-            // Set up mutation observer to detect response changes
-            const observer = new MutationObserver(() => {
-                try {
-                    // Only proceed if we're capturing or if response might be complete
-                    if (isCapturing || isResponseComplete()) {
-                        captureAndSendResponse();
-                    }
-                } catch (err) {
-                    console.error('[MLC GeminiCapture] Observer error:', err);
-                }
-            });
-            
-            // Start observing the document
-            observer.observe(document.body, {
-                childList: true,
-                subtree: true,
-                characterData: true
-            });
-            
-            console.log('[MLC GeminiCapture] Response observer started');
-            
-            // Also check periodically in case mutation observer misses something
-            const checkInterval = setInterval(() => {
-                if (document.hidden) return; // Don't check if the tab is not visible
-                
-                try {
-                    // Only run periodic check if we have a pending prompt
-                    if (pendingPromptTimestamp > 0 && !captureComplete) {
-                        captureAndSendResponse();
-                    }
-                } catch (err) {
-                    console.error('[MLC GeminiCapture] Interval check error:', err);
-                }
-            }, 5000); // Increased from 2s to 5s
-            
-            // Clean up when navigating away
-            window.addEventListener('beforeunload', () => {
-                clearInterval(checkInterval);
-                observer.disconnect();
-                console.log('[MLC GeminiCapture] Cleaned up observers');
-            });
-        }
-
-        // Delay to let the page stabilize
-        setTimeout(observeGeminiResponses, 3000);
-    } else if (isChatGPT) {
-        function observeChatGPTResponses() {
-            console.log('[MLC ChatGPTCapture] Starting ChatGPT response capture...');
-
-            let lastResponseText = '';
-            let stableCounter = 0;
-            let captureComplete = false;
-            let currentPromptId = null;
-            let pendingPromptTimestamp = 0;
-
-            chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-                if (message.type === 'NEW_PROMPT_SENT') {
-                    currentPromptId = message.promptId;
-                    pendingPromptTimestamp = message.timestamp;
-                    captureComplete = false;
-                    stableCounter = 0;
-                    lastResponseText = '';
-                    if (sendResponse) sendResponse({ received: true });
-                }
-                return true;
-            });
-
-            function isResponseComplete() {
-                const stopBtn = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop" i]');
-                if (stopBtn) return false;
-                const micBtn = document.querySelector('button[data-testid="composer-speech-button"]');
-                return micBtn && pendingPromptTimestamp > 0;
-            }
-
-            function getResponseText() {
-                const msgs = document.querySelectorAll('[data-message-author="assistant"], .markdown');
-                if (msgs.length > 0) {
-                    const last = msgs[msgs.length - 1];
-                    const text = last.innerText || last.textContent;
-                    if (text && text.trim()) return text.trim();
-                }
-                return '';
-            }
-
-            function captureAndSend() {
-                if (captureComplete || !isResponseComplete()) return;
-                const text = getResponseText();
-                if (!text) return;
-                if (text === lastResponseText) {
-                    stableCounter++;
-                } else {
-                    stableCounter = 0;
-                    lastResponseText = text;
-                }
-                if (stableCounter >= 2) {
-                    chrome.runtime.sendMessage({
-                        type: 'CHATGPT_RESPONSE_CAPTURED',
-                        content: text,
-                        promptId: currentPromptId,
-                        timestamp: Date.now(),
-                        responseDelay: pendingPromptTimestamp ? (Date.now() - pendingPromptTimestamp) : null
-                    });
-                    captureComplete = true;
-                }
-            }
-
-            const observer = new MutationObserver(captureAndSend);
-            observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-
-            const interval = setInterval(captureAndSend, 4000);
-
-            window.addEventListener('beforeunload', () => {
-                clearInterval(interval);
-                observer.disconnect();
-            });
-        }
-
-        setTimeout(observeChatGPTResponses, 3000);
+    function armCapture(message) {
+        if (!message || !message.promptId) return;
+        captureState.active = true;
+        captureState.promptId = message.promptId;
+        captureState.sessionId = message.sessionId || null;
+        captureState.turnIndex = message.turnIndex || null;
+        captureState.startedAt = message.timestamp || Date.now();
+        captureState.lastText = '';
+        captureState.baselineText = extractLatestResponseText() || '';
+        captureState.hasNewText = false;
+        captureState.lastTextChangeAt = captureState.startedAt;
+        captureState.stableTicks = 0;
+        captureState.lastEmitAt = 0;
+        console.log(`[MLC Capture - ${currentLLM}] Armed for prompt ${message.promptId}`);
+        setTimeout(evaluateCapture, 1200);
     }
 
-    if (isChatGPT) {
-        function observeChatGPTResponses() {
-            console.log('[MLC ChatGPTCapture] Starting ChatGPT response capture...');
+    function isChatGPTGenerating() {
+        const stopButton = document.querySelector('button[data-testid=\"stop-button\"], button[aria-label*=\"Stop\" i]');
+        return !!(stopButton && stopButton.offsetParent !== null);
+    }
 
-            let lastResponseText = '';
-            let stableCounter = 0;
-            let isCapturing = false;
-            let captureComplete = false;
-            let lastCaptureTime = 0;
-            let pendingPromptTimestamp = 0;
-            let currentPromptId = null;
-            const responseCaptureDelayMs = 2000; // Minimum delay after prompt
+    function isGeminiGenerating() {
+        const stopIcon = document.querySelector('mat-icon[fonticon=\"stop\"]');
+        if (stopIcon && stopIcon.offsetParent !== null) return true;
+        const stopButton = document.querySelector('button[aria-label*=\"Stop\" i], button[aria-label*=\"Cancel\" i]');
+        if (stopButton && stopButton.offsetParent !== null) return true;
+        const spinner = document.querySelector('mat-progress-spinner, mat-spinner, [role=\"progressbar\"], .loading, .spinner');
+        if (spinner && spinner.offsetParent !== null) return true;
+        const sendButton = document.querySelector('button[aria-label*=\"Send\" i], button[data-testid=\"send-button\"]');
+        if (sendButton && sendButton.offsetParent !== null && !sendButton.disabled) return false;
+        return false;
+    }
 
-            chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-                if (message.type === 'NEW_PROMPT_SENT' && message.to === 'chatgpt') { // Ensure message is for ChatGPT
-                    console.log(`[MLC ChatGPTCapture] Received new prompt notification: ${message.promptId}`);
-                    currentPromptId = message.promptId;
-                    pendingPromptTimestamp = message.timestamp;
-                    captureComplete = false;
-                    isCapturing = false;
-                    stableCounter = 0;
-                    lastResponseText = '';
-                    // It's important to acknowledge receipt of the message
-                    if (sendResponse) sendResponse({ received: true, for: 'chatgpt' });
-                }
-                // Keep the message channel open for asynchronous response if sendResponse is used
-                return true;
-            });
+    function isGenerating() {
+        return isChatGPT ? isChatGPTGenerating() : isGeminiGenerating();
+    }
 
-            // Helper function: isChatGPTGenerating
-            function isChatGPTGenerating() {
-                // Selector for the "stop generating" button
-                const stopButton = document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop generating"], button[aria-label*="Arrêter le streaming"]');
-                return stopButton && stopButton.offsetParent !== null; // Check for visibility
-            }
-
-            // Helper function: getChatGPTResponseText
-            function getChatGPTResponseText() {
-                console.log('[MLC ChatGPTCapture] Attempting to extract LATEST response text only...');
-                const messageContainers = document.querySelectorAll('div[data-testid^="conversation-turn-"]');
-                if (messageContainers.length === 0) {
-                    console.log('[MLC ChatGPTCapture] No message containers found.');
-                    return '';
-                }
-
-                // Iterate from the last message container to find the latest AI response
-                for (let i = messageContainers.length - 1; i >= 0; i--) {
-                    const turn = messageContainers[i];
-                    // Check if it's an assistant's message. User messages might have a different structure or specific data attributes.
-                    // ChatGPT user messages often have `data-message-author-role="user"` on a child,
-                    // while assistant messages have `data-message-author-role="assistant"`.
-                    // We look for the absence of user role or presence of assistant role on the turn itself or its children.
-                    const authorRoleElement = turn.querySelector('[data-message-author-role]');
-                    if (authorRoleElement && authorRoleElement.getAttribute('data-message-author-role') === 'user') {
-                        continue; // Skip user messages
-                    }
-
-                    // If it's not explicitly a user message, assume it's an assistant message or contains one.
-                    // More robust: Check for actual content containers
-                    const responseContentElement = turn.querySelector('.markdown, .prose, div[class*="result-streaming"], div[class*="text-token-text-primary"], div[data-message-id][data-message-author-role="assistant"] > div > div');
-                    if (responseContentElement) {
-                        const text = responseContentElement.innerText || responseContentElement.textContent;
-                        if (text && text.trim()) {
-                            console.log('[MLC ChatGPTCapture] Found latest AI response text.');
-                            return text.trim();
-                        }
-                    }
-                }
-                console.log('[MLC ChatGPTCapture] No AI response text found after checking containers.');
-                return '';
-            }
-
-            // Main logic function: captureAndSendChatGPTResponse
-            function captureAndSendChatGPTResponse() {
-                // console.log('[MLC ChatGPTCapture] captureAndSendChatGPTResponse called.');
-                if (captureComplete || pendingPromptTimestamp === 0 || (Date.now() - pendingPromptTimestamp < responseCaptureDelayMs)) {
-                    // console.log('[MLC ChatGPTCapture] Pre-checks failed or too early.', { captureComplete, pendingPromptTimestamp });
-                    return;
-                }
-
-                const generating = isChatGPTGenerating();
-                // console.log('[MLC ChatGPTCapture] Generating status:', generating);
-
-                if (generating) {
-                    isCapturing = true;
-                    stableCounter = 0; // Reset stability counter while generating
-                    // console.log('[MLC ChatGPTCapture] ChatGPT is generating. isCapturing=true, stableCounter=0');
-                    return;
-                }
-
-                // If it was generating and now it's not, OR if it's not generating and we were capturing (e.g. intermittent generation)
-                if (!generating && isCapturing) {
-                    // console.log('[MLC ChatGPTCapture] ChatGPT finished generating or was capturing.');
-                    const responseText = getChatGPTResponseText();
-                    // console.log('[MLC ChatGPTCapture] Response text length:', responseText.length);
-
-                    if (!responseText) {
-                        // console.log('[MLC ChatGPTCapture] No response text found after generation finished.');
-                        // Potentially increment a counter for empty responses if needed, or just return
-                        return;
-                    }
-
-                    if (responseText === lastResponseText) {
-                        stableCounter++;
-                        // console.log('[MLC ChatGPTCapture] Response stable. Counter:', stableCounter);
-                    } else {
-                        stableCounter = 0;
-                        lastResponseText = responseText;
-                        // console.log('[MLC ChatGPTCapture] Response changed. Resetting counter, new text length:', lastResponseText.length);
-                    }
-
-                    if (stableCounter >= 3) {
-                        console.log('[MLC ChatGPTCapture] Response appears stable, sending to background. Prompt ID:', currentPromptId);
-                        // console.log('[MLC ChatGPTCapture] Content preview:', responseText.substring(0,100));
-
-                        chrome.runtime.sendMessage({
-                            type: 'CHATGPT_RESPONSE_CAPTURED',
-                            content: responseText,
-                            promptId: currentPromptId,
-                            timestamp: Date.now()
-                        }, response => {
-                            if (chrome.runtime.lastError) {
-                                console.error('[MLC ChatGPTCapture] Error sending message:', chrome.runtime.lastError);
-                                // Don't set captureComplete if send failed, allow retry
-                            } else {
-                                console.log('[MLC ChatGPTCapture] Message sent successfully to background.', response);
-                                captureComplete = true; // Mark as complete for this prompt
-                                lastCaptureTime = Date.now();
-                                // Reset prompt-specific variables only after successful send
-                                // currentPromptId = null;
-                                // pendingPromptTimestamp = 0; // Keep this to prevent immediate re-capture until new prompt.
-                                // Or, reset more carefully:
-                                // If we want to allow re-capture for the same prompt if it updates later (unlikely for ChatGPT stable),
-                                // then we might not reset currentPromptId here. But typical flow is one response per prompt.
-                            }
-                        });
-
-                        isCapturing = false; // Reset capturing state
-
-                        // Optional: Timeout to reset captureComplete to allow for new captures
-                        // This might be useful if a user edits a response or something similar,
-                        // but for typical ChatGPT flow, one capture per prompt is enough.
-                        // setTimeout(() => {
-                        //     if (Date.now() - lastCaptureTime >= 9500) { // Ensure it's still relevant
-                        //        console.log('[MLC ChatGPTCapture] Resetting captureComplete after timeout.');
-                        //        captureComplete = false;
-                        //     }
-                        // }, 10000);
-                    }
-                } else if (!generating && !isCapturing) {
-                    // This case handles when the page loads, and a response is already there,
-                    // or if the generation was missed. We can try a one-off capture.
-                    // However, this should primarily be driven by the NEW_PROMPT_SENT logic.
-                    // console.log('[MLC ChatGPTCapture] Not generating, was not capturing. Maybe check once.');
-                    // For now, rely on the interval and mutation observer to trigger when isCapturing becomes true.
-                }
-            }
-
-            // MutationObserver for ChatGPT
-            const observer = new MutationObserver((mutationsList, obs) => {
-                // Debounce or gate this call.
-                // Only call if not generating AND we were capturing (meaning it just stopped)
-                // OR if we have a pending prompt and aren't yet complete.
-                if ((!isChatGPTGenerating() && isCapturing) || (pendingPromptTimestamp > 0 && !captureComplete)) {
-                    // console.log('[MLC ChatGPTCapture] Mutation observed, calling captureAndSend.');
-                    captureAndSendChatGPTResponse();
-                }
-            });
-
-            observer.observe(document.body, {
-                childList: true,
-                subtree: true,
-                characterData: true // Important for streaming text
-            });
-            console.log('[MLC ChatGPTCapture] MutationObserver started.');
-
-            // Periodic Check (Interval)
-            const intervalCheck = setInterval(() => {
-                if (!document.hidden && pendingPromptTimestamp > 0 && !captureComplete) { // Only run if tab active, prompt pending, and not complete
-                    // console.log('[MLC ChatGPTCapture] Interval check, calling captureAndSend.');
-                    captureAndSendChatGPTResponse();
-                }
-            }, 2500); // Check every 2.5 seconds
-
-            // Cleanup
-            window.addEventListener('beforeunload', () => {
-                observer.disconnect();
-                clearInterval(intervalCheck);
-                console.log('[MLC ChatGPTCapture] Cleaned up observer and interval.');
-            });
+    function extractChatGPTResponseText() {
+        const assistantNodes = document.querySelectorAll('[data-message-author-role=\"assistant\"]');
+        for (let i = assistantNodes.length - 1; i >= 0; i--) {
+            const node = assistantNodes[i];
+            const contentNode = node.querySelector('.markdown, .prose, div[data-message-id]') || node;
+            const text = contentNode.innerText || contentNode.textContent;
+            if (text && text.trim()) return text.trim();
         }
 
-        // Initial call with a delay
-        setTimeout(observeChatGPTResponses, 3000);
+        const markdownNodes = document.querySelectorAll('.markdown, .prose');
+        for (let i = markdownNodes.length - 1; i >= 0; i--) {
+            const node = markdownNodes[i];
+            const isUser = node.closest('[data-message-author-role=\"user\"], .user-message');
+            if (isUser) continue;
+            const text = node.innerText || node.textContent;
+            if (text && text.trim()) return text.trim();
+        }
+
+        return '';
     }
+
+    function isGeminiUserMessage(node) {
+        if (!node) return false;
+        const userSelectors = [
+            '.user-message',
+            '.user-query',
+            '[data-message-author=\"user\"]',
+            '[data-message-author=\"human\"]',
+            '[data-author-is-user=\"true\"]'
+        ];
+        for (const sel of userSelectors) {
+            if (node.matches?.(sel) || node.closest?.(sel)) return true;
+        }
+        if (node.querySelector?.(userSelectors.join(', '))) return true;
+        const ariaLabel = node.getAttribute?.('aria-label') || '';
+        if (/\b(you|user)\b/i.test(ariaLabel)) return true;
+        return false;
+    }
+
+    function extractGeminiResponseText() {
+        const inputEl = findInput({ silent: true });
+        const inputContainer = inputEl
+            ? inputEl.closest('form, .input-area-container, .input-area, .input-row, .composer, .prompt-container')
+            : null;
+        const roots = [document.querySelector('main'), document.body].filter(Boolean);
+        const selectors = [
+            '[data-message-author=\"gemini\"]',
+            '[data-message-author=\"assistant\"]',
+            '[data-author-is-user=\"false\"]',
+            '[data-response-id]',
+            '[data-message-id]',
+            '[data-testid*=\"conversation\"]',
+            '.conversation-turn',
+            '.message-container',
+            '.response-content',
+            '.model-response',
+            '.model-response-text',
+            '.markdown',
+            '.markdown-content',
+            '[data-testid=\"markdown-content\"]',
+            'article',
+            '[role=\"article\"]'
+        ];
+
+        const candidates = [];
+        for (const root of roots) {
+            for (const sel of selectors) {
+                root.querySelectorAll(sel).forEach(node => candidates.push(node));
+            }
+            if (candidates.length) break;
+        }
+
+        const seen = new Set();
+        const uniqueCandidates = candidates.filter(node => {
+            if (seen.has(node)) return false;
+            seen.add(node);
+            return true;
+        });
+
+        let sawMedia = false;
+
+        for (let i = uniqueCandidates.length - 1; i >= 0; i--) {
+            const node = uniqueCandidates[i];
+            if (!node) continue;
+            if (inputContainer && inputContainer.contains(node)) continue;
+            if (isGeminiUserMessage(node)) continue;
+
+            const targetSelectors = '.markdown, .markdown-content, [data-testid=\"markdown-content\"], .response-content, .model-response, .model-response-text';
+            const targetNodes = node.querySelectorAll(targetSelectors);
+            let target = null;
+            for (let j = targetNodes.length - 1; j >= 0; j--) {
+                if (!isGeminiUserMessage(targetNodes[j])) {
+                    target = targetNodes[j];
+                    break;
+                }
+            }
+            if (!target) {
+                target = node;
+            }
+            if (inputContainer && inputContainer.contains(target)) continue;
+            if (isGeminiUserMessage(target)) continue;
+
+            const clone = target.cloneNode(true);
+            const mediaNodes = clone.querySelectorAll('img, video, canvas, svg, figure, picture');
+            if (mediaNodes.length > 0) sawMedia = true;
+            mediaNodes.forEach(el => el.remove());
+
+            const text = clone.innerText || clone.textContent;
+            if (text && text.trim()) return text.trim();
+        }
+
+        if (sawMedia) {
+            return '[Gemini returned an image output; no text was captured. Proceeding with debate.]';
+        }
+        return '';
+    }
+
+    function extractLatestResponseText() {
+        return isChatGPT ? extractChatGPTResponseText() : extractGeminiResponseText();
+    }
+
+    function detectChatGPTModelLabel() {
+        const selectors = [
+            'button[data-testid="model-switcher-button"]',
+            '[data-testid="model-switcher"] button',
+            'button[aria-haspopup="menu"][aria-label*="Model" i]',
+            'button[aria-label*="model" i]'
+        ];
+        for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            const aria = el.getAttribute('aria-label') || '';
+            const text = (el.textContent || '').trim();
+            const label = (text || aria).replace(/^Model:\s*/i, '').trim();
+            if (label) return label;
+        }
+        const badges = Array.from(document.querySelectorAll('span, div'))
+            .map(node => (node.textContent || '').trim())
+            .filter(text => /\b(gpt|o1|o3|o4)\b/i.test(text));
+        return badges[0] || '';
+    }
+
+    function detectGeminiModelLabel() {
+        const selectors = [
+            'button[aria-label*="Model" i]',
+            'button[aria-label*="Gemini" i]',
+            'mat-select[aria-label*="Model" i] .mat-select-value-text',
+            'mat-select .mat-select-value-text',
+            '[data-testid*="model"]'
+        ];
+        for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            const aria = el.getAttribute('aria-label') || '';
+            const text = (el.textContent || '').trim();
+            const label = (text || aria).replace(/^Model:\s*/i, '').trim();
+            if (label) return label;
+        }
+        return '';
+    }
+
+    function detectModelLabel() {
+        return isChatGPT ? detectChatGPTModelLabel() : detectGeminiModelLabel();
+    }
+
+    let lastModelLabel = '';
+    function sendModelInfoIfChanged() {
+        const label = detectModelLabel();
+        if (!label || label === lastModelLabel) return;
+        lastModelLabel = label;
+        chrome.runtime.sendMessage({
+            type: 'PROVIDER_MODEL_INFO',
+            provider: currentLLM,
+            modelLabel: label
+        }, () => {
+            if (chrome.runtime.lastError) {
+                // ignore
+            }
+        });
+    }
+
+    function sendCapturedResponse(text) {
+        const responsePayload = {
+            content: text,
+            promptId: captureState.promptId,
+            sessionId: captureState.sessionId,
+            sourceLLM: currentLLM,
+            turnIndex: captureState.turnIndex,
+            timestamp: Date.now(),
+            responseDelay: captureState.startedAt ? (Date.now() - captureState.startedAt) : null
+        };
+
+        const messageType = captureState.sessionId
+            ? 'MLC_RESPONSE_CAPTURED'
+            : (currentLLM === 'chatgpt' ? 'CHATGPT_RESPONSE_CAPTURED' : 'GEMINI_RESPONSE_CAPTURED');
+
+        chrome.runtime.sendMessage({ type: messageType, ...responsePayload }, () => {
+            if (chrome.runtime.lastError) {
+                console.error(`[MLC Capture - ${currentLLM}] Failed to send response:`, chrome.runtime.lastError);
+                captureState.active = true;
+                captureState.stableTicks = 0;
+                return;
+            }
+            captureState.active = false;
+            captureState.lastEmitAt = Date.now();
+            console.log(`[MLC Capture - ${currentLLM}] Response captured for prompt ${captureState.promptId}`);
+        });
+    }
+
+    function evaluateCapture() {
+        if (!captureState.active) return;
+        const now = Date.now();
+        const minDelayMs = 800;
+        if (now - captureState.startedAt < minDelayMs) return;
+
+        const text = extractLatestResponseText();
+
+        if (!captureState.hasNewText) {
+            if (!text || text === captureState.baselineText) return;
+            captureState.hasNewText = true;
+            captureState.lastText = text;
+            captureState.lastTextChangeAt = now;
+            captureState.stableTicks = 0;
+        }
+
+        if (!text) return;
+
+        const textChanged = text !== captureState.lastText;
+        if (textChanged) {
+            captureState.lastText = text;
+            captureState.lastTextChangeAt = now;
+            captureState.stableTicks = 0;
+        } else {
+            captureState.stableTicks += 1;
+        }
+
+        const generating = isGenerating();
+        const stableForMs = now - captureState.lastTextChangeAt;
+        const forceCaptureMs = isChatGPT ? 20000 : 15000;
+        const minTextLen = 5;
+
+        if (generating) {
+            if (stableForMs >= forceCaptureMs && text.length >= minTextLen) {
+                if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
+                sendCapturedResponse(text);
+            }
+            return;
+        }
+
+        if (captureState.stableTicks >= 3) {
+            if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
+            sendCapturedResponse(text);
+        }
+    }
+
+    function startCaptureObservers() {
+        const observer = new MutationObserver(() => {
+            evaluateCapture();
+        });
+        observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+
+        const interval = setInterval(evaluateCapture, 3000);
+
+        window.addEventListener('beforeunload', () => {
+            observer.disconnect();
+            clearInterval(interval);
+        });
+    }
+
+    startCaptureObservers();
+
+    setInterval(sendModelInfoIfChanged, 8000);
+    setTimeout(sendModelInfoIfChanged, 2500);
 
 })();

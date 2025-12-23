@@ -18,6 +18,16 @@ document.addEventListener('DOMContentLoaded', function() {
     const chatgptStatus = document.getElementById('chatgpt-status');
     const responseContent = document.getElementById('response-content');
     
+    // Multi-agent elements
+    const multiAgentMode = document.getElementById('multi-agent-mode');
+    const multiAgentControls = document.getElementById('multi-agent-controls');
+    const iterationsInput = document.getElementById('iterations-input');
+    const sessionStatus = document.getElementById('session-status');
+    const sessionIteration = document.getElementById('session-iteration');
+    const sessionMax = document.getElementById('session-max');
+    const currentTurn = document.getElementById('current-turn');
+    const stopSessionBtn = document.getElementById('stop-session-btn');
+    
     // Initialize
     init();
     
@@ -57,6 +67,17 @@ document.addEventListener('DOMContentLoaded', function() {
             useChatGPT.addEventListener('change', updateSendButtonState);
         }
         
+        // Multi-agent controls
+        if (multiAgentMode) {
+            multiAgentMode.addEventListener('change', handleMultiAgentModeToggle);
+        }
+        if (iterationsInput) {
+            iterationsInput.addEventListener('change', updateSendButtonState);
+        }
+        if (stopSessionBtn) {
+            stopSessionBtn.addEventListener('click', handleStopSession);
+        }
+        
         // Listen for messages from background
         if (chrome && chrome.runtime) {
             chrome.runtime.onMessage.addListener(handleBackgroundMessage);
@@ -79,6 +100,8 @@ document.addEventListener('DOMContentLoaded', function() {
         const prompt = promptInput?.value?.trim();
         const geminiSelected = useGemini?.checked;
         const chatgptSelected = useChatGPT?.checked;
+        const multiAgentEnabled = multiAgentMode?.checked;
+        const maxIterations = parseInt(iterationsInput?.value) || 3;
         
         if (!prompt) {
             showMessage('Please enter a prompt', 'error');
@@ -90,12 +113,26 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
         
-        console.log('📤 Sending prompt:', prompt);
+        if (multiAgentEnabled && (!geminiSelected || !chatgptSelected)) {
+            showMessage('Multi-agent mode requires both ChatGPT and Gemini to be selected', 'error');
+            return;
+        }
+        
+        console.log('📤 Sending prompt:', prompt, { multiAgent: multiAgentEnabled, maxIterations });
         
         // Update UI
         sendButton.disabled = true;
-        sendButton.textContent = 'Sending...';
-        showMessage('Sending prompt to selected LLMs...', 'info');
+        sendButton.textContent = multiAgentEnabled ? 'Starting Session...' : 'Sending...';
+        
+        if (multiAgentEnabled) {
+            showMessage(`Starting multi-agent session with ${maxIterations} iterations...`, 'info');
+            sessionMax.textContent = maxIterations;
+            sessionIteration.textContent = '1';
+            currentTurn.textContent = 'Starting...';
+            sessionStatus.style.display = 'block';
+        } else {
+            showMessage('Sending prompt to selected LLMs...', 'info');
+        }
         
         // Send to background script
         if (chrome && chrome.runtime) {
@@ -105,7 +142,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 targets: {
                     gemini: geminiSelected,
                     chatgpt: chatgptSelected
-                }
+                },
+                multiAgent: multiAgentEnabled ? {
+                    enabled: true,
+                    maxIterations: maxIterations
+                } : { enabled: false }
             }, (response) => {
                 if (chrome.runtime.lastError) {
                     console.error('Error sending prompt:', chrome.runtime.lastError);
@@ -113,13 +154,18 @@ document.addEventListener('DOMContentLoaded', function() {
                     resetSendButton();
                 } else {
                     console.log('Prompt sent successfully:', response);
+                    if (!multiAgentEnabled) {
+                        resetSendButton();
+                    }
                 }
             });
         }
         
         // Update status
-        if (geminiSelected) updateLLMStatus('gemini', 'Sending...', 'processing');
-        if (chatgptSelected) updateLLMStatus('chatgpt', 'Sending...', 'processing');
+        if (!multiAgentEnabled) {
+            if (geminiSelected) updateLLMStatus('gemini', 'Sending...', 'processing');
+            if (chatgptSelected) updateLLMStatus('chatgpt', 'Sending...', 'processing');
+        }
     }
     
     function handleBackgroundMessage(message, sender, sendResponse) {
@@ -140,6 +186,22 @@ document.addEventListener('DOMContentLoaded', function() {
                 break;
             case 'LLM_PROGRESS':
                 handleLLMProgress(message);
+                sendResponse({ status: 'handled' });
+                break;
+            case 'MULTI_AGENT_SESSION_STARTED':
+                handleMultiAgentSessionStarted(message);
+                sendResponse({ status: 'handled' });
+                break;
+            case 'MULTI_AGENT_TURN_COMPLETE':
+                handleMultiAgentTurnComplete(message);
+                sendResponse({ status: 'handled' });
+                break;
+            case 'MULTI_AGENT_SESSION_ENDED':
+                handleMultiAgentSessionEnded(message);
+                sendResponse({ status: 'handled' });
+                break;
+            case 'MULTI_AGENT_SESSION_ERROR':
+                handleMultiAgentSessionError(message);
                 sendResponse({ status: 'handled' });
                 break;
             default:
@@ -262,5 +324,115 @@ document.addEventListener('DOMContentLoaded', function() {
             `;
             responseContent.className = 'response-content';
         }
+    }
+    
+    // MULTI-AGENT MODE HANDLERS
+    
+    function handleMultiAgentModeToggle() {
+        const enabled = multiAgentMode?.checked;
+        if (multiAgentControls) {
+            multiAgentControls.style.display = enabled ? 'block' : 'none';
+        }
+        
+        if (enabled) {
+            // Auto-select both LLMs when multi-agent is enabled
+            if (useGemini) useGemini.checked = true;
+            if (useChatGPT) useChatGPT.checked = true;
+        }
+        
+        updateSendButtonState();
+    }
+    
+    function handleStopSession() {
+        if (chrome && chrome.runtime) {
+            chrome.runtime.sendMessage({
+                type: 'END_MULTI_AGENT_SESSION',
+                reason: 'User requested stop'
+            }, (response) => {
+                if (chrome.runtime.lastError) {
+                    console.error('Error stopping session:', chrome.runtime.lastError);
+                } else {
+                    console.log('Session stop requested:', response);
+                }
+            });
+        }
+        resetMultiAgentUI();
+    }
+    
+    function handleMultiAgentSessionStarted(message) {
+        const { sessionId, maxIterations, currentIteration, currentTurnLLM } = message;
+        console.log('🤖 Multi-agent session started:', message);
+        
+        if (sessionStatus) {
+            sessionStatus.style.display = 'block';
+        }
+        if (sessionMax) {
+            sessionMax.textContent = maxIterations;
+        }
+        if (sessionIteration) {
+            sessionIteration.textContent = currentIteration;
+        }
+        if (currentTurn) {
+            currentTurn.textContent = `${currentTurnLLM.toUpperCase()}'s turn`;
+        }
+        
+        showMessage(`Multi-agent session started! Session ID: ${sessionId}`, 'success');
+    }
+    
+    function handleMultiAgentTurnComplete(message) {
+        const { sessionId, currentIteration, currentTurnLLM, conversationHistory } = message;
+        console.log('🤖 Multi-agent turn complete:', message);
+        
+        if (sessionIteration) {
+            sessionIteration.textContent = currentIteration;
+        }
+        if (currentTurn) {
+            currentTurn.textContent = `${currentTurnLLM.toUpperCase()}'s turn`;
+        }
+        
+        // Show the latest response in the response section
+        if (conversationHistory && conversationHistory.length > 0) {
+            const latestResponse = conversationHistory[conversationHistory.length - 1];
+            showResponse(`${latestResponse.llm} (Iteration ${latestResponse.iteration})`, latestResponse.content);
+        }
+        
+        showMessage(`Turn complete. Now ${currentTurnLLM}'s turn (Iteration ${currentIteration})`, 'info');
+    }
+    
+    function handleMultiAgentSessionEnded(message) {
+        const { summary } = message;
+        console.log('🤖 Multi-agent session ended:', message);
+        
+        showMessage(`Multi-agent session completed! Total iterations: ${summary.totalIterations}`, 'success');
+        
+        // Show final conversation summary
+        if (summary.conversationHistory && summary.conversationHistory.length > 0) {
+            const finalExchange = summary.conversationHistory[summary.conversationHistory.length - 1];
+            showResponse(`Final Response (${finalExchange.llm})`, finalExchange.content);
+        }
+        
+        resetMultiAgentUI();
+    }
+    
+    function handleMultiAgentSessionError(message) {
+        const { error, sessionId } = message;
+        console.error('🤖 Multi-agent session error:', message);
+        
+        showMessage(`Multi-agent session error: ${error}`, 'error');
+        resetMultiAgentUI();
+    }
+    
+    function resetMultiAgentUI() {
+        if (sessionStatus) {
+            sessionStatus.style.display = 'none';
+        }
+        if (currentTurn) {
+            currentTurn.textContent = 'Ready';
+        }
+        if (sessionIteration) {
+            sessionIteration.textContent = '0';
+        }
+        
+        resetSendButton();
     }
 });
