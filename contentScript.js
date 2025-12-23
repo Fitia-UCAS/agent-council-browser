@@ -17,6 +17,9 @@
         turnIndex: null,
         startedAt: 0,
         lastText: '',
+        baselineText: '',
+        hasNewText: false,
+        lastTextChangeAt: 0,
         stableTicks: 0,
         lastEmitAt: 0
     };
@@ -323,6 +326,9 @@
         captureState.turnIndex = message.turnIndex || null;
         captureState.startedAt = message.timestamp || Date.now();
         captureState.lastText = '';
+        captureState.baselineText = extractLatestResponseText() || '';
+        captureState.hasNewText = false;
+        captureState.lastTextChangeAt = captureState.startedAt;
         captureState.stableTicks = 0;
         captureState.lastEmitAt = 0;
         console.log(`[MLC Capture - ${currentLLM}] Armed for prompt ${message.promptId}`);
@@ -337,10 +343,12 @@
     function isGeminiGenerating() {
         const stopIcon = document.querySelector('mat-icon[fonticon=\"stop\"]');
         if (stopIcon && stopIcon.offsetParent !== null) return true;
-        const stopButton = document.querySelector('button[aria-label*=\"Stop\" i]');
+        const stopButton = document.querySelector('button[aria-label*=\"Stop\" i], button[aria-label*=\"Cancel\" i]');
         if (stopButton && stopButton.offsetParent !== null) return true;
-        const input = findInput({ silent: true });
-        if (input && input.getAttribute('aria-disabled') === 'true') return true;
+        const spinner = document.querySelector('mat-progress-spinner, mat-spinner, [role=\"progressbar\"], .loading, .spinner');
+        if (spinner && spinner.offsetParent !== null) return true;
+        const sendButton = document.querySelector('button[aria-label*=\"Send\" i], button[data-testid=\"send-button\"]');
+        if (sendButton && sendButton.offsetParent !== null && !sendButton.disabled) return false;
         return false;
     }
 
@@ -371,29 +379,96 @@
 
     function isGeminiUserMessage(node) {
         if (!node) return false;
-        if (node.classList.contains('user-message') || node.classList.contains('user-query')) return true;
-        if (node.getAttribute('data-author-is-user') === 'true') return true;
-        if (node.querySelector('[data-author-is-user=\"true\"], .user-message, .user-query')) return true;
+        const userSelectors = [
+            '.user-message',
+            '.user-query',
+            '[data-message-author=\"user\"]',
+            '[data-message-author=\"human\"]',
+            '[data-author-is-user=\"true\"]'
+        ];
+        for (const sel of userSelectors) {
+            if (node.matches?.(sel) || node.closest?.(sel)) return true;
+        }
+        if (node.querySelector?.(userSelectors.join(', '))) return true;
+        const ariaLabel = node.getAttribute?.('aria-label') || '';
+        if (/\b(you|user)\b/i.test(ariaLabel)) return true;
         return false;
     }
 
     function extractGeminiResponseText() {
-        const candidates = document.querySelectorAll('[data-message-author=\"gemini\"], [data-message-author=\"assistant\"], .conversation-turn, .message-container, [data-message-id]');
-        for (let i = candidates.length - 1; i >= 0; i--) {
-            const node = candidates[i];
+        const inputEl = findInput({ silent: true });
+        const inputContainer = inputEl
+            ? inputEl.closest('form, .input-area-container, .input-area, .input-row, .composer, .prompt-container')
+            : null;
+        const roots = [document.querySelector('main'), document.body].filter(Boolean);
+        const selectors = [
+            '[data-message-author=\"gemini\"]',
+            '[data-message-author=\"assistant\"]',
+            '[data-author-is-user=\"false\"]',
+            '[data-response-id]',
+            '[data-message-id]',
+            '[data-testid*=\"conversation\"]',
+            '.conversation-turn',
+            '.message-container',
+            '.response-content',
+            '.model-response',
+            '.model-response-text',
+            '.markdown',
+            '.markdown-content',
+            '[data-testid=\"markdown-content\"]',
+            'article',
+            '[role=\"article\"]'
+        ];
+
+        const candidates = [];
+        for (const root of roots) {
+            for (const sel of selectors) {
+                root.querySelectorAll(sel).forEach(node => candidates.push(node));
+            }
+            if (candidates.length) break;
+        }
+
+        const seen = new Set();
+        const uniqueCandidates = candidates.filter(node => {
+            if (seen.has(node)) return false;
+            seen.add(node);
+            return true;
+        });
+
+        let sawMedia = false;
+
+        for (let i = uniqueCandidates.length - 1; i >= 0; i--) {
+            const node = uniqueCandidates[i];
+            if (!node) continue;
+            if (inputContainer && inputContainer.contains(node)) continue;
             if (isGeminiUserMessage(node)) continue;
 
-            const target = node.querySelector('.markdown, .markdown-content, [data-testid=\"markdown-content\"]') || node;
+            const targetSelectors = '.markdown, .markdown-content, [data-testid=\"markdown-content\"], .response-content, .model-response, .model-response-text';
+            const targetNodes = node.querySelectorAll(targetSelectors);
+            let target = null;
+            for (let j = targetNodes.length - 1; j >= 0; j--) {
+                if (!isGeminiUserMessage(targetNodes[j])) {
+                    target = targetNodes[j];
+                    break;
+                }
+            }
+            if (!target) {
+                target = node;
+            }
+            if (inputContainer && inputContainer.contains(target)) continue;
+            if (isGeminiUserMessage(target)) continue;
+
             const clone = target.cloneNode(true);
             const mediaNodes = clone.querySelectorAll('img, video, canvas, svg, figure, picture');
-            const hadMedia = mediaNodes.length > 0;
+            if (mediaNodes.length > 0) sawMedia = true;
             mediaNodes.forEach(el => el.remove());
 
             const text = clone.innerText || clone.textContent;
             if (text && text.trim()) return text.trim();
-            if (hadMedia) {
-                return '[Gemini returned an image output; no text was captured. Proceeding with debate.]';
-            }
+        }
+
+        if (sawMedia) {
+            return '[Gemini returned an image output; no text was captured. Proceeding with debate.]';
         }
         return '';
     }
@@ -432,31 +507,46 @@
 
     function evaluateCapture() {
         if (!captureState.active) return;
+        const now = Date.now();
         const minDelayMs = 800;
-        if (Date.now() - captureState.startedAt < minDelayMs) return;
+        if (now - captureState.startedAt < minDelayMs) return;
 
-        const generating = isGenerating();
         const text = extractLatestResponseText();
 
-        if (generating) {
+        if (!captureState.hasNewText) {
+            if (!text || text === captureState.baselineText) return;
+            captureState.hasNewText = true;
+            captureState.lastText = text;
+            captureState.lastTextChangeAt = now;
             captureState.stableTicks = 0;
-            if (text && text !== captureState.lastText) {
-                captureState.lastText = text;
-            }
-            return;
         }
 
         if (!text) return;
 
-        if (text === captureState.lastText) {
-            captureState.stableTicks += 1;
-        } else {
-            captureState.stableTicks = 0;
+        const textChanged = text !== captureState.lastText;
+        if (textChanged) {
             captureState.lastText = text;
+            captureState.lastTextChangeAt = now;
+            captureState.stableTicks = 0;
+        } else {
+            captureState.stableTicks += 1;
+        }
+
+        const generating = isGenerating();
+        const stableForMs = now - captureState.lastTextChangeAt;
+        const forceCaptureMs = isChatGPT ? 20000 : 15000;
+        const minTextLen = 5;
+
+        if (generating) {
+            if (stableForMs >= forceCaptureMs && text.length >= minTextLen) {
+                if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
+                sendCapturedResponse(text);
+            }
+            return;
         }
 
         if (captureState.stableTicks >= 3) {
-            if (captureState.lastEmitAt && Date.now() - captureState.lastEmitAt < 1500) return;
+            if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
             sendCapturedResponse(text);
         }
     }

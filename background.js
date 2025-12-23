@@ -452,13 +452,20 @@ async function handleDebateResponse(message) {
         return;
     }
 
-    if (session.lastPromptId && message.promptId && session.lastPromptId !== message.promptId) {
-        console.log('[MLC Debate] Ignoring response with mismatched promptId.');
-        return;
-    }
+    const messageTurnIndex = Number.isFinite(message.turnIndex)
+        ? message.turnIndex
+        : parseInt(message.turnIndex, 10);
+    const hasTurnIndex = Number.isFinite(messageTurnIndex);
+    const promptMismatch = session.lastPromptId && message.promptId && session.lastPromptId !== message.promptId;
+    const turnMismatch = hasTurnIndex && messageTurnIndex !== session.turnIndex;
 
-    if (message.turnIndex && message.turnIndex !== session.turnIndex) {
-        console.log('[MLC Debate] Ignoring response with mismatched turn index.');
+    if (promptMismatch && (!hasTurnIndex || turnMismatch)) {
+        console.log('[MLC Debate] Ignoring response with mismatched promptId/turnIndex.', {
+            expectedPromptId: session.lastPromptId,
+            messagePromptId: message.promptId,
+            expectedTurnIndex: session.turnIndex,
+            messageTurnIndex: messageTurnIndex
+        });
         return;
     }
 
