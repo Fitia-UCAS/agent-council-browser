@@ -477,6 +477,38 @@
         return isChatGPT ? extractChatGPTResponseText() : extractGeminiResponseText();
     }
 
+    function normalizeInlineText(value) {
+        return String(value || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function sanitizeModelLabel(rawLabel) {
+        const normalized = normalizeInlineText(rawLabel).replace(/^Model:\s*/i, '').trim();
+        if (!normalized) return '';
+
+        // Guardrails: model labels should be short and single-line.
+        const maxLen = 80;
+        if (normalized.length > maxLen) return '';
+
+        const words = normalized.split(' ').filter(Boolean);
+        if (words.length > 12) return '';
+
+        // Avoid accidentally capturing page/chat text.
+        const suspicious = [
+            /iteration\s*\d/i,
+            /user (query|message)/i,
+            /\bnow respond\b/i,
+            /\bmulti[-\s]llm\b/i,
+            /\bmulti[-\s]agent\b/i,
+            /\bdebate\b/i,
+            /\bhere is\b/i,
+            /\bchatgpt\b.*\banswer\b/i,
+            /\bgemini\b.*\banswer\b/i
+        ];
+        if (suspicious.some(re => re.test(normalized))) return '';
+
+        return normalized;
+    }
+
     function detectChatGPTModelLabel() {
         const selectors = [
             'button[data-testid="model-switcher-button"]',
@@ -487,15 +519,14 @@
         for (const sel of selectors) {
             const el = document.querySelector(sel);
             if (!el) continue;
-            const aria = el.getAttribute('aria-label') || '';
-            const text = (el.textContent || '').trim();
-            const label = (text || aria).replace(/^Model:\s*/i, '').trim();
-            if (label) return label;
+            const aria = normalizeInlineText(el.getAttribute('aria-label') || '');
+            const text = normalizeInlineText(el.textContent || '');
+            for (const candidate of [text, aria]) {
+                const label = sanitizeModelLabel(candidate);
+                if (label) return label;
+            }
         }
-        const badges = Array.from(document.querySelectorAll('span, div'))
-            .map(node => (node.textContent || '').trim())
-            .filter(text => /\b(gpt|o1|o3|o4)\b/i.test(text));
-        return badges[0] || '';
+        return '';
     }
 
     function detectGeminiModelLabel() {
@@ -503,16 +534,17 @@
             'button[aria-label*="Model" i]',
             'button[aria-label*="Gemini" i]',
             'mat-select[aria-label*="Model" i] .mat-select-value-text',
-            'mat-select .mat-select-value-text',
-            '[data-testid*="model"]'
+            'mat-select .mat-select-value-text'
         ];
         for (const sel of selectors) {
             const el = document.querySelector(sel);
             if (!el) continue;
-            const aria = el.getAttribute('aria-label') || '';
-            const text = (el.textContent || '').trim();
-            const label = (text || aria).replace(/^Model:\s*/i, '').trim();
-            if (label) return label;
+            const aria = normalizeInlineText(el.getAttribute('aria-label') || '');
+            const text = normalizeInlineText(el.textContent || '');
+            for (const candidate of [text, aria]) {
+                const label = sanitizeModelLabel(candidate);
+                if (label) return label;
+            }
         }
         return '';
     }
@@ -521,10 +553,39 @@
         return isChatGPT ? detectChatGPTModelLabel() : detectGeminiModelLabel();
     }
 
+    function shouldConfirmModelLabel(label) {
+        const words = label.split(' ').filter(Boolean);
+        return label.length > 30 || words.length > 4;
+    }
+
     let lastModelLabel = '';
+    let pendingModelLabel = '';
+    let pendingModelHits = 0;
     function sendModelInfoIfChanged() {
-        const label = detectModelLabel();
-        if (!label || label === lastModelLabel) return;
+        const label = sanitizeModelLabel(detectModelLabel());
+        if (!label) {
+            pendingModelLabel = '';
+            pendingModelHits = 0;
+            return;
+        }
+        if (label === lastModelLabel) {
+            pendingModelLabel = '';
+            pendingModelHits = 0;
+            return;
+        }
+
+        if (shouldConfirmModelLabel(label)) {
+            if (label === pendingModelLabel) {
+                pendingModelHits += 1;
+            } else {
+                pendingModelLabel = label;
+                pendingModelHits = 1;
+            }
+            if (pendingModelHits < 2) return;
+            pendingModelLabel = '';
+            pendingModelHits = 0;
+        }
+
         lastModelLabel = label;
         chrome.runtime.sendMessage({
             type: 'PROVIDER_MODEL_INFO',

@@ -310,8 +310,9 @@ function openProviderTab(provider) {
 function claimPendingTab() {
     if (!state.pendingClaim) return;
     const providerLabel = formatProviderLabel(state.pendingClaim.provider);
-    const label = state.pendingClaim.modelLabel
-        ? `${providerLabel} - ${state.pendingClaim.modelLabel}`
+    const modelLabel = truncateInlineText(state.pendingClaim.modelLabel, 48);
+    const label = modelLabel
+        ? `${providerLabel} - ${modelLabel}`
         : `${providerLabel} profile`;
     sendMessage({
         type: 'CLAIM_TAB_AS_PROFILE',
@@ -486,9 +487,11 @@ function buildProfileCard(profile) {
 
     const meta = document.createElement('div');
     meta.className = 'profile-meta';
-    meta.appendChild(buildMetaLine('Tab', formatProfileTabLabel(profile)));
+    const tabFullLabel = (profile.lastKnownTitle || profile.lastKnownUrl || '').trim();
+    meta.appendChild(buildMetaLine('Tab', formatProfileTabLabel(profile), tabFullLabel));
     if (profile.modelHint) {
-        meta.appendChild(buildMetaLine('Model', `${profile.modelHint} (best effort)`));
+        const modelHint = normalizeInlineText(profile.modelHint);
+        meta.appendChild(buildMetaLine('Model', `${modelHint} (best effort)`, modelHint));
     }
     if (profile.windowId !== null && profile.windowId !== undefined) {
         meta.appendChild(buildMetaLine('Window', String(profile.windowId)));
@@ -511,14 +514,19 @@ function buildProfileCard(profile) {
     return card;
 }
 
-function buildMetaLine(label, value) {
+function buildMetaLine(label, value, title = '') {
     const line = document.createElement('div');
     line.className = 'profile-meta-line';
     const strong = document.createElement('span');
     strong.className = 'profile-meta-label';
     strong.textContent = `${label}:`;
     const text = document.createElement('span');
+    text.className = 'profile-meta-value';
     text.textContent = value;
+    const tooltip = title ? String(title) : String(value || '');
+    if (tooltip) {
+        text.title = tooltip;
+    }
     line.appendChild(strong);
     line.appendChild(text);
     return line;
@@ -593,9 +601,12 @@ function renderClaimWizard() {
         elements.claimSubtitle.textContent = `We opened ${providerLabel}. Select the model there, then claim it.`;
     }
     if (elements.claimModel) {
-        elements.claimModel.textContent = state.pendingClaim.modelLabel
-            ? `Detected model: ${state.pendingClaim.modelLabel} (best effort)`
+        const full = normalizeInlineText(state.pendingClaim.modelLabel);
+        const display = truncateInlineText(full, 64);
+        elements.claimModel.textContent = full
+            ? `Detected model: ${display} (best effort)`
             : 'Detected model: not available yet.';
+        elements.claimModel.title = full ? `Detected model: ${full}` : '';
     }
     elements.claimWizard.hidden = false;
 }
@@ -766,6 +777,18 @@ function formatRoleLabel(role) {
 
 function formatProviderLabel(provider) {
     return provider === 'gemini' ? 'Gemini' : 'ChatGPT';
+}
+
+function normalizeInlineText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function truncateInlineText(value, maxLen) {
+    const normalized = normalizeInlineText(value);
+    if (!normalized) return '';
+    if (!Number.isFinite(maxLen) || maxLen <= 0) return normalized;
+    if (normalized.length <= maxLen) return normalized;
+    return `${normalized.slice(0, Math.max(0, maxLen - 1))}…`;
 }
 
 function getProfilesForProvider(provider) {
