@@ -137,6 +137,11 @@ body {
   gap: 14px;
 }
 
+.settings.provider-manager[open] .settings-body {
+  max-height: min(52vh, 520px);
+  overflow-y: auto;
+}
+
 .profile-actions {
   display: flex;
   flex-wrap: wrap;
@@ -262,6 +267,14 @@ body {
 .profile-meta-label {
   font-weight: 600;
   color: var(--text-secondary);
+}
+
+.profile-meta-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .profile-actions-row {

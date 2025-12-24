@@ -88,6 +88,10 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Enforces profile locks during sessions and pauses if tabs drift.
   - Supports open/claim profile flows and focus tab actions.
 
+- `debate_prompts.json`
+  - User-editable debate prompt templates (header + turn prompts) used by `buildDebatePrompt(...)`.
+  - Loaded by `background.js` via `fetch(chrome.runtime.getURL(...))` with a safe inline fallback.
+
 - `contentScript.js`
   - Runs in ChatGPT/Gemini pages.
   - Injects “⇄ OtherLLM” toggle button and forwarding listeners (legacy).
@@ -229,7 +233,8 @@ Claiming / rebinding:
   - Otherwise label is `Provider profile`.
 - Model hint updates:
   - `PROVIDER_MODEL_INFO` updates `profile.modelHint` when the tabId matches a profile.
-  - Stored hint is displayed in profile cards and the claim wizard.
+  - Hints are sanitized/capped (single-line, short label); suspiciously long values are ignored/cleared.
+  - Stored hint is displayed in profile cards and the claim wizard (best effort).
 
 Open provider tab:
 
@@ -273,64 +278,16 @@ Response validation rules:
 
 ### Prompt templates
 
-**Header** (used in first two turns only):
+Debate prompts are configurable via `debate_prompts.json` (schema v1) and rendered with simple `{placeholder}` substitution.
 
-```
-Here is a multi-agent session with ChatGPT and Gemini over N iterations.
-Please be constructive during your debate to bring the most accurate answer to the user.
-Be critical, constructive, and fair.
-```
+Turn selection logic (in `background.js`) uses these templates:
 
-**Turn 1** (Round 1, first LLM):
+- `debate.turn1`: turnIndex 1 (round 1, first LLM)
+- `debate.turn2`: turnIndex 2 (round 1, second LLM; includes `{first_answer}`)
+- `debate.turn3plus_first`: turns 3+ when the expected LLM is `firstLLM`
+- `debate.turn3plus_second`: turns 3+ when the expected LLM is `secondLLM`
 
-```
-[HEADER]
-
-Iteration: 1
-Turn: <ChatGPT|Gemini>
-
-User query:
-<user_query>
-```
-
-**Turn 2** (Round 1, second LLM):
-
-```
-[HEADER]
-
-Iteration: 1
-Turn: <ChatGPT|Gemini>
-
-User query:
-<user_query>
-
-<FirstLLM> answer:
-<first_answer>
-
-Now respond with critique and improvements. If you disagree, explain why.
-```
-
-**Turns 3+**:
-
-- If expected LLM is firstLLM:
-
-```
-Iteration: <round>
-Here is <OtherLLM> answer from iteration <round-1>:
-<last_other_answer>
-
-Now respond as <FirstLLM>.
-```
-
-- If expected LLM is secondLLM:
-
-```
-Iteration: <round>
-Here is <OtherLLM> answer:
-<last_other_answer>
-
-Now respond as <SecondLLM>.
-```
+Defaults include explicit role reminders (e.g., “You are {expected_llm}… do not simulate {other_llm}”) to prevent a model from replying as both participants.
 
 ## 4) Prompt injection (background.js)
 
@@ -384,8 +341,8 @@ Current force‑capture thresholds:
 
 **ChatGPT**:
 
-- Uses `[data-message-author-role="assistant"]` and `.markdown/.prose` fallbacks.
-- Returns last assistant text found.
+- Prefers `.markdown` / `.prose` (and `data-testid="message-content"` when present) within `[data-message-author-role="assistant"]`.
+- Skips sources-only UI blocks (e.g., link title lists with standalone `+N` lines) and returns the latest real answer text.
 
 **Gemini**:
 
@@ -408,9 +365,10 @@ Current force‑capture thresholds:
 ### Model label detection (best effort)
 
 - Content scripts periodically attempt to detect the currently selected model label.
-- Detection uses light DOM heuristics (model switcher buttons, aria labels, common badges).
+- Detection uses light DOM heuristics (model switcher UI + aria labels).
+- Labels are sanitized (single-line, short) to avoid accidentally capturing page/chat text.
 - Emitted as `PROVIDER_MODEL_INFO` to background and then side panel.
-- Stored as `profile.modelHint` if the tabId matches a profile.
+- Background sanitizes again and stores as `profile.modelHint` if the tabId matches a profile.
 - Never blocks claiming or session start; informational only.
 - Current polling cadence: initial attempt after ~2.5s, then every ~8s.
 

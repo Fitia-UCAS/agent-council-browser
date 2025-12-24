@@ -157,6 +157,65 @@ function generateProfileId() {
     return 'profile_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 }
 
+function normalizeInlineText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function sanitizeModelHint(provider, modelHint) {
+    const normalizedProvider = normalizeProvider(provider);
+    const cleaned = normalizeInlineText(modelHint).replace(/^Model:\s*/i, '').trim();
+    if (!cleaned) return '';
+
+    // Model labels should be short and single-line. Anything longer is almost
+    // certainly a bad DOM match (e.g., capturing chat transcript text).
+    const maxLen = 80;
+    if (cleaned.length > maxLen) return '';
+
+    const words = cleaned.split(' ').filter(Boolean);
+    if (words.length > 12) return '';
+
+    const suspicious = [
+        /iteration\s*\d/i,
+        /user (query|message)/i,
+        /\bnow respond\b/i,
+        /\bmulti[-\s]llm\b/i,
+        /\bmulti[-\s]agent\b/i,
+        /\bdebate\b/i,
+        /\bhere is\b/i,
+        /\bchatgpt\b.*\banswer\b/i,
+        /\bgemini\b.*\banswer\b/i
+    ];
+    if (suspicious.some(re => re.test(cleaned))) return '';
+
+    // Lightweight provider sanity checks (non-blocking).
+    if (normalizedProvider === 'chatgpt') {
+        if (!/(gpt|o1|o3|o4)/i.test(cleaned)) {
+            // ChatGPT model labels almost always include GPT/o1/o3/o4; if not, still allow short labels.
+            // No-op.
+        }
+    } else {
+        // Gemini labels often include "Gemini", but may be abbreviated; no strict check.
+    }
+
+    return cleaned;
+}
+
+function sanitizeProfilesState(state) {
+    if (!state || !Array.isArray(state.profiles)) return { state, changed: false };
+    let changed = false;
+    const nextProfiles = state.profiles.map((profile) => {
+        const next = { ...profile };
+        const safeHint = sanitizeModelHint(next.provider, next.modelHint);
+        if (safeHint !== (next.modelHint || '')) {
+            next.modelHint = safeHint;
+            changed = true;
+        }
+        return next;
+    });
+    const nextState = changed ? { ...state, profiles: nextProfiles } : state;
+    return { state: nextState, changed };
+}
+
 function getExpectedHosts(provider) {
     if (provider === 'gemini') {
         return ['gemini.google.com'];
@@ -180,13 +239,18 @@ async function loadTabProfiles() {
     if (stored && stored[TAB_PROFILES_KEY]) {
         const next = stored[TAB_PROFILES_KEY];
         if (Array.isArray(next.profiles) && next.defaults) {
-            return {
+            const state = {
                 profiles: next.profiles,
                 defaults: {
                     chatgpt: next.defaults.chatgpt || null,
                     gemini: next.defaults.gemini || null
                 }
             };
+            const sanitized = sanitizeProfilesState(state);
+            if (sanitized.changed) {
+                await chrome.storage.local.set({ [TAB_PROFILES_KEY]: sanitized.state });
+            }
+            return sanitized.state;
         }
     }
     return getEmptyProfilesState();
@@ -228,7 +292,7 @@ function applyProfilePatch(profile, patch = {}) {
         next.windowId = Number.isFinite(patch.windowId) ? patch.windowId : null;
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'modelHint')) {
-        next.modelHint = patch.modelHint ? String(patch.modelHint) : '';
+        next.modelHint = sanitizeModelHint(next.provider, patch.modelHint);
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'lastKnownTitle')) {
         next.lastKnownTitle = patch.lastKnownTitle ? String(patch.lastKnownTitle) : '';
@@ -273,7 +337,7 @@ async function validateProfile(profile) {
 async function refreshAllProfiles({ persist = true } = {}) {
     const state = await loadTabProfiles();
     const updatedProfiles = await Promise.all(state.profiles.map(profile => validateProfile(profile)));
-    const next = { ...state, profiles: updatedProfiles };
+    const next = sanitizeProfilesState({ ...state, profiles: updatedProfiles }).state;
     if (persist) {
         await saveTabProfiles(next);
     }
@@ -527,7 +591,7 @@ async function updateProfileModelHint(tabId, provider, modelHint) {
     const state = await loadTabProfiles();
     const profile = state.profiles.find(item => item.provider === normalizedProvider && item.tabId === tabId);
     if (!profile) return;
-    const next = applyProfilePatch(profile, { modelHint });
+    const next = applyProfilePatch(profile, { modelHint: sanitizeModelHint(normalizedProvider, modelHint) });
     next.updatedAt = Date.now();
     const index = state.profiles.findIndex(item => item.profileId === profile.profileId);
     if (index >= 0) state.profiles[index] = next;
@@ -665,12 +729,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             return true;
         case 'PROVIDER_MODEL_INFO':
             if (sender?.tab?.id) {
-                updateProfileModelHint(sender.tab.id, message.provider, message.modelLabel || '');
+                const provider = normalizeProvider(message.provider);
+                const modelLabel = sanitizeModelHint(provider, message.modelLabel || '');
+                if (modelLabel) {
+                    updateProfileModelHint(sender.tab.id, provider, modelLabel);
+                }
                 sendMessageToPopup({
                     type: 'PROVIDER_MODEL_INFO',
-                    provider: normalizeProvider(message.provider),
+                    provider,
                     tabId: sender.tab.id,
-                    modelLabel: message.modelLabel || ''
+                    modelLabel
                 });
             }
             sendResponse({ ok: true });
@@ -948,12 +1016,136 @@ function formatLLMLabel(llmType) {
     return llmType === 'gemini' ? 'Gemini' : 'ChatGPT';
 }
 
-function buildDebateHeader(rounds) {
-    return [
-        `Here is a multi-agent session with ChatGPT and Gemini over ${rounds} iterations.`,
-        'Please be constructive during your debate to bring the most accurate answer to the user.',
-        'Be critical, constructive, and fair.'
-    ].join('\n');
+const DEBATE_PROMPTS_PATH = 'debate_prompts.json';
+let cachedDebatePromptConfig = null;
+let debatePromptConfigLoadPromise = null;
+
+function getDefaultDebatePromptConfig() {
+    return {
+        schemaVersion: 1,
+        debate: {
+            placeholders: {},
+            header: [
+                'Multi-LLM debate session ({first_llm} ↔ {second_llm})',
+                'Total iterations: {rounds}',
+                '',
+                'You are {expected_llm}. The other participant is {other_llm}.',
+                'Write only your own response. Do not role-play or simulate the other participant.',
+                'Do not format your response as a dialogue (no "ChatGPT:" / "Gemini:" prefixes).',
+                'Goal: be critical, constructive, fair, and help produce the best final answer for the user.'
+            ].join('\n'),
+            turn1: [
+                '{header}',
+                '',
+                'User message:',
+                '{user_msg}',
+                '',
+                '{expected_llm}, start iteration {round}/{rounds}.',
+                'Provide your best answer to the user.'
+            ].join('\n'),
+            turn2: [
+                '{header}',
+                '',
+                'User message:',
+                '{user_msg}',
+                '',
+                '{first_llm} answer (iteration 1/{rounds}):',
+                '{first_answer}',
+                '',
+                'Now, as {expected_llm}:',
+                "1) Briefly critique {first_llm}'s answer (errors, missing details, risky assumptions).",
+                '2) Provide your improved answer to the user.'
+            ].join('\n'),
+            turn3plus_first: [
+                'Iteration {round}/{rounds} — {expected_llm}',
+                '(Use the chat history for the original user message.)',
+                '',
+                'Only write as {expected_llm}; do not simulate {other_llm}.',
+                '',
+                '{other_llm} answer from iteration {prev_round}/{rounds}:',
+                '{other_answer}',
+                '',
+                'Now provide:',
+                '- Critique (brief, optional)',
+                '- Improved answer'
+            ].join('\n'),
+            turn3plus_second: [
+                'Iteration {round}/{rounds} — {expected_llm}',
+                '(Use the chat history for the original user message.)',
+                '',
+                'Only write as {expected_llm}; do not simulate {other_llm}.',
+                '',
+                '{other_llm} answer for iteration {round}/{rounds}:',
+                '{other_answer}',
+                '',
+                'Now provide:',
+                '- Critique (brief, optional)',
+                '- Improved answer'
+            ].join('\n')
+        }
+    };
+}
+
+function normalizeDebatePromptConfig(rawConfig) {
+    const defaults = getDefaultDebatePromptConfig();
+    if (!rawConfig || typeof rawConfig !== 'object') return defaults;
+
+    const rawDebate = rawConfig.debate && typeof rawConfig.debate === 'object' ? rawConfig.debate : null;
+    if (!rawDebate) return defaults;
+
+    const pickString = (value, fallback) => (typeof value === 'string' ? value : fallback);
+
+    return {
+        schemaVersion: 1,
+        debate: {
+            placeholders:
+                rawDebate.placeholders && typeof rawDebate.placeholders === 'object'
+                    ? rawDebate.placeholders
+                    : defaults.debate.placeholders,
+            header: pickString(rawDebate.header, defaults.debate.header),
+            turn1: pickString(rawDebate.turn1, defaults.debate.turn1),
+            turn2: pickString(rawDebate.turn2, defaults.debate.turn2),
+            turn3plus_first: pickString(rawDebate.turn3plus_first, defaults.debate.turn3plus_first),
+            turn3plus_second: pickString(rawDebate.turn3plus_second, defaults.debate.turn3plus_second)
+        }
+    };
+}
+
+async function loadDebatePromptConfig() {
+    if (cachedDebatePromptConfig) return cachedDebatePromptConfig;
+    if (debatePromptConfigLoadPromise) return debatePromptConfigLoadPromise;
+
+    debatePromptConfigLoadPromise = (async () => {
+        try {
+            const url = chrome.runtime.getURL(DEBATE_PROMPTS_PATH);
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`Failed to load ${DEBATE_PROMPTS_PATH}: ${response.status}`);
+            }
+            const json = await response.json();
+            cachedDebatePromptConfig = normalizeDebatePromptConfig(json);
+            return cachedDebatePromptConfig;
+        } catch (error) {
+            console.warn('[MLC Debate] Failed to load prompt templates; using defaults.', error);
+            cachedDebatePromptConfig = getDefaultDebatePromptConfig();
+            return cachedDebatePromptConfig;
+        } finally {
+            debatePromptConfigLoadPromise = null;
+        }
+    })();
+
+    return debatePromptConfigLoadPromise;
+}
+
+function renderPromptTemplate(template, variables) {
+    if (typeof template !== 'string') return '';
+    const safeVars = variables && typeof variables === 'object' ? variables : {};
+    return template.replace(/{([a-zA-Z0-9_]+)}/g, (match, key) => {
+        if (!Object.prototype.hasOwnProperty.call(safeVars, key)) return match;
+        const value = safeVars[key];
+        if (value === null || value === undefined) return '';
+        return String(value);
+    });
 }
 
 function getLastResponse(session, llmType) {
@@ -965,7 +1157,10 @@ function getLastResponse(session, llmType) {
     return '';
 }
 
-function buildDebatePrompt(session, turnIndex) {
+async function buildDebatePrompt(session, turnIndex) {
+    const promptConfig = await loadDebatePromptConfig();
+    const templates = promptConfig?.debate || getDefaultDebatePromptConfig().debate;
+
     const roundIndex = getRoundIndex(turnIndex);
     const expectedLLM = getTurnLLM(session, turnIndex);
     const expectedLabel = formatLLMLabel(expectedLLM);
@@ -974,19 +1169,47 @@ function buildDebatePrompt(session, turnIndex) {
     const safeOtherResponse = getLastResponse(session, otherLLM) || '[No prior response captured yet]';
     const safeFirstResponse = getLastResponse(session, session.firstLLM) || '[No prior response captured yet]';
 
+    const totalTurns = Number.isFinite(session.totalTurns) ? session.totalTurns : session.rounds * 2;
+    const firstLabel = formatLLMLabel(session.firstLLM);
+    const secondLabel = formatLLMLabel(session.secondLLM);
+    const baseVariables = {
+        rounds: session.rounds,
+        iterations: session.rounds,
+        round: roundIndex,
+        iteration: roundIndex,
+        prev_round: Math.max(0, roundIndex - 1),
+        turn: turnIndex,
+        turn_index: turnIndex,
+        total_turns: totalTurns,
+        expected_llm: expectedLabel,
+        llm: expectedLabel,
+        other_llm: otherLabel,
+        first_llm: firstLabel,
+        fisrt_llm: firstLabel,
+        second_llm: secondLabel,
+        user_msg: session.userQuery,
+        user_query: session.userQuery,
+        first_answer: safeFirstResponse,
+        other_answer: safeOtherResponse,
+        last_other_answer: safeOtherResponse
+    };
+
+    const header = renderPromptTemplate(templates.header, baseVariables);
+    const variables = { ...baseVariables, header };
+
     if (turnIndex === 1) {
-        return `${buildDebateHeader(session.rounds)}\n\nIteration: 1\nTurn: ${expectedLabel}\n\nUser query:\n${session.userQuery}`;
+        return renderPromptTemplate(templates.turn1, variables).trim();
     }
 
     if (turnIndex === 2) {
-        return `${buildDebateHeader(session.rounds)}\n\nIteration: 1\nTurn: ${expectedLabel}\n\nUser query:\n${session.userQuery}\n\n${formatLLMLabel(session.firstLLM)} answer:\n${safeFirstResponse}\n\nNow respond with critique and improvements. If you disagree, explain why.`;
+        return renderPromptTemplate(templates.turn2, variables).trim();
     }
 
     if (expectedLLM === session.firstLLM) {
-        return `Iteration: ${roundIndex}\nHere is ${otherLabel} answer from iteration ${roundIndex - 1}:\n${safeOtherResponse}\n\nNow respond as ${expectedLabel}.`;
+        return renderPromptTemplate(templates.turn3plus_first, variables).trim();
     }
 
-    return `Iteration: ${roundIndex}\nHere is ${otherLabel} answer:\n${safeOtherResponse}\n\nNow respond as ${expectedLabel}.`;
+    return renderPromptTemplate(templates.turn3plus_second, variables).trim();
 }
 
 async function validateTabForProvider(tabId, provider) {
@@ -1180,7 +1403,7 @@ async function sendDebateTurn(session) {
         return;
     }
 
-    const promptText = buildDebatePrompt(session, turnIndex);
+    const promptText = await buildDebatePrompt(session, turnIndex);
     const promptId = `${session.sessionId}:turn:${turnIndex}`;
 
     activeDebateState.waitingFor = expectedLLM;
