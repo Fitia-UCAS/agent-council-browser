@@ -341,8 +341,8 @@ Current force‑capture thresholds:
 
 **ChatGPT**:
 
-- Uses `[data-message-author-role="assistant"]` and `.markdown/.prose` fallbacks.
-- Returns last assistant text found.
+- Prefers `.markdown` / `.prose` (and `data-testid="message-content"` when present) within `[data-message-author-role="assistant"]`.
+- Skips sources-only UI blocks (e.g., link title lists with standalone `+N` lines) and returns the latest real answer text.
 
 **Gemini**:
 

@@ -356,13 +356,57 @@
         return isChatGPT ? isChatGPTGenerating() : isGeminiGenerating();
     }
 
+    function getTrimmedText(node) {
+        if (!node) return '';
+        const text = node.innerText || node.textContent || '';
+        return (text || '').trim();
+    }
+
+    function looksLikeChatGPTSourcesOnly(text) {
+        const raw = (text || '').trim();
+        if (!raw) return false;
+
+        const lines = raw
+            .split('\n')
+            .map(line => line.trim())
+            .filter(Boolean);
+
+        if (lines.length < 4) return false;
+
+        // ChatGPT "Sources" UI often renders as a list of titles plus "+N" lines.
+        const plusLines = lines.filter(line => /^\+\d+$/.test(line)).length;
+        if (plusLines === 0) return false;
+
+        const totalLen = lines.reduce((sum, line) => sum + line.length, 0);
+        const avgLen = totalLen / Math.max(1, lines.length);
+        const hasSentencePunct = /[.!?]\s/.test(raw);
+
+        if (hasSentencePunct) return false;
+
+        // Most sources lists are short per-line, with many repeated titles.
+        const uniqueRatio = new Set(lines).size / lines.length;
+        if (avgLen <= 45 && uniqueRatio <= 0.9) return true;
+
+        return avgLen <= 32;
+    }
+
     function extractChatGPTResponseText() {
         const assistantNodes = document.querySelectorAll('[data-message-author-role=\"assistant\"]');
         for (let i = assistantNodes.length - 1; i >= 0; i--) {
             const node = assistantNodes[i];
-            const contentNode = node.querySelector('.markdown, .prose, div[data-message-id]') || node;
-            const text = contentNode.innerText || contentNode.textContent;
-            if (text && text.trim()) return text.trim();
+            const candidates = [
+                node.querySelector('.markdown'),
+                node.querySelector('.prose'),
+                node.querySelector('[data-testid=\"message-content\"]'),
+                node
+            ].filter(Boolean);
+
+            for (const candidate of candidates) {
+                const text = getTrimmedText(candidate);
+                if (!text) continue;
+                if (looksLikeChatGPTSourcesOnly(text)) continue;
+                return text;
+            }
         }
 
         const markdownNodes = document.querySelectorAll('.markdown, .prose');
@@ -370,8 +414,10 @@
             const node = markdownNodes[i];
             const isUser = node.closest('[data-message-author-role=\"user\"], .user-message');
             if (isUser) continue;
-            const text = node.innerText || node.textContent;
-            if (text && text.trim()) return text.trim();
+            const text = getTrimmedText(node);
+            if (!text) continue;
+            if (looksLikeChatGPTSourcesOnly(text)) continue;
+            return text;
         }
 
         return '';
