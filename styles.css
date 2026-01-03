@@ -137,6 +137,44 @@ body {
   gap: 14px;
 }
 
+.prompt-note {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.prompt-editor {
+  min-height: 220px;
+  resize: vertical;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: rgba(10, 15, 24, 0.85);
+  color: var(--text-primary);
+  font-family: var(--font-family-mono);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.prompt-status {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  padding: 8px 12px;
+  background: rgba(18, 24, 36, 0.75);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+}
+
+.prompt-status.is-error {
+  color: #fecaca;
+  border-color: rgba(239, 68, 68, 0.45);
+}
+
 .settings.provider-manager[open] .settings-body {
   max-height: min(52vh, 520px);
   overflow-y: auto;

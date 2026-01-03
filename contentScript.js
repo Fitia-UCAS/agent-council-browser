@@ -5,24 +5,42 @@
     if (!isChatGPT && !isGemini) return;
 
     let forwardEnabled = false;
-    const forwardTo = isChatGPT ? 'gemini' : 'chatgpt';
-    const currentLLM = isChatGPT ? 'chatgpt' : 'gemini';
+	    const forwardTo = isChatGPT ? 'gemini' : 'chatgpt';
+	    const currentLLM = isChatGPT ? 'chatgpt' : 'gemini';
 
-    console.log(`[MLC ContentScript] Initializing for ${currentLLM}. Forwarding to ${forwardTo}.`);
+	    console.log(`[MLC ContentScript] Initializing for ${currentLLM}. Forwarding to ${forwardTo}.`);
 
-    const captureState = {
-        active: false,
-        promptId: null,
-        sessionId: null,
-        turnIndex: null,
-        startedAt: 0,
-        lastText: '',
-        baselineText: '',
-        hasNewText: false,
-        lastTextChangeAt: 0,
-        stableTicks: 0,
-        lastEmitAt: 0
-    };
+	    const CaptureUtils = globalThis.MLCCaptureUtils || null;
+
+	    function isCaptureDebugEnabled() {
+	        try {
+	            const value = localStorage.getItem('mlc_capture_debug');
+	            return value === '1' || value === 'true';
+	        } catch (error) {
+	            return false;
+	        }
+	    }
+
+	    function captureDebug(...args) {
+	        if (!isCaptureDebugEnabled()) return;
+	        console.log('[MLC Capture Debug]', ...args);
+	    }
+
+	    const captureState = {
+	        active: false,
+	        promptId: null,
+	        sessionId: null,
+	        turnIndex: null,
+	        startedAt: 0,
+	        lastText: '',
+	        baselineText: '',
+	        baselineAssistantCount: null,
+	        hasNewText: false,
+	        lastTextChangeAt: 0,
+	        stableTicks: 0,
+	        lastEmitAt: 0,
+	        lastExtractionMeta: null
+	    };
 
     // Global message listener for connection testing and capture arming
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -318,22 +336,34 @@
         attachListeners();
     }, 2500); // Slightly increased delay
 
-    function armCapture(message) {
-        if (!message || !message.promptId) return;
-        captureState.active = true;
-        captureState.promptId = message.promptId;
-        captureState.sessionId = message.sessionId || null;
-        captureState.turnIndex = message.turnIndex || null;
-        captureState.startedAt = message.timestamp || Date.now();
-        captureState.lastText = '';
-        captureState.baselineText = extractLatestResponseText() || '';
-        captureState.hasNewText = false;
-        captureState.lastTextChangeAt = captureState.startedAt;
-        captureState.stableTicks = 0;
-        captureState.lastEmitAt = 0;
-        console.log(`[MLC Capture - ${currentLLM}] Armed for prompt ${message.promptId}`);
-        setTimeout(evaluateCapture, 1200);
-    }
+	    function armCapture(message) {
+	        if (!message || !message.promptId) return;
+	        captureState.active = true;
+	        captureState.promptId = message.promptId;
+	        captureState.sessionId = message.sessionId || null;
+	        captureState.turnIndex = message.turnIndex || null;
+	        captureState.startedAt = message.timestamp || Date.now();
+	        captureState.lastText = '';
+	        captureState.baselineAssistantCount = isChatGPT
+	            ? document.querySelectorAll('[data-message-author-role="assistant"]').length
+	            : null;
+	        captureState.baselineText = extractLatestResponseText() || '';
+	        captureState.hasNewText = false;
+	        captureState.lastTextChangeAt = captureState.startedAt;
+	        captureState.stableTicks = 0;
+	        captureState.lastEmitAt = 0;
+	        captureState.lastExtractionMeta = null;
+	        console.log(`[MLC Capture - ${currentLLM}] Armed for prompt ${message.promptId}`);
+	        captureDebug('Armed', {
+	            llm: currentLLM,
+	            promptId: message.promptId,
+	            sessionId: captureState.sessionId,
+	            turnIndex: captureState.turnIndex,
+	            baselineAssistantCount: captureState.baselineAssistantCount,
+	            baselinePreview: String(captureState.baselineText || '').slice(0, 160)
+	        });
+	        setTimeout(evaluateCapture, 1200);
+	    }
 
     function isChatGPTGenerating() {
         const stopButton = document.querySelector('button[data-testid=\"stop-button\"], button[aria-label*=\"Stop\" i]');
@@ -356,72 +386,163 @@
         return isChatGPT ? isChatGPTGenerating() : isGeminiGenerating();
     }
 
-    function getTrimmedText(node) {
-        if (!node) return '';
-        const text = node.innerText || node.textContent || '';
-        return (text || '').trim();
-    }
+	    function getTrimmedText(node) {
+	        if (!node) return '';
+	        const text = node.innerText || node.textContent || '';
+	        return (text || '').trim();
+	    }
 
-    function looksLikeChatGPTSourcesOnly(text) {
-        const raw = (text || '').trim();
-        if (!raw) return false;
+	    function looksLikeChatGPTSourcesOnly(text) {
+	        if (CaptureUtils && typeof CaptureUtils.looksLikeReferenceList === 'function') {
+	            return CaptureUtils.looksLikeReferenceList(text, { provider: 'chatgpt' });
+	        }
 
-        const lines = raw
-            .split('\n')
-            .map(line => line.trim())
-            .filter(Boolean);
+	        const raw = (text || '').trim();
+	        if (!raw) return false;
 
-        if (lines.length < 4) return false;
+	        const lines = raw
+	            .split('\n')
+	            .map(line => line.trim())
+	            .filter(Boolean);
 
-        // ChatGPT "Sources" UI often renders as a list of titles plus "+N" lines.
-        const plusLines = lines.filter(line => /^\+\d+$/.test(line)).length;
-        if (plusLines === 0) return false;
+	        if (lines.length < 4) return false;
 
-        const totalLen = lines.reduce((sum, line) => sum + line.length, 0);
-        const avgLen = totalLen / Math.max(1, lines.length);
-        const hasSentencePunct = /[.!?]\s/.test(raw);
+	        // Legacy fallback: list of titles plus "+N" lines.
+	        const plusLines = lines.filter(line => /^\+\d+$/.test(line)).length;
+	        if (plusLines === 0) return false;
 
-        if (hasSentencePunct) return false;
+	        const totalLen = lines.reduce((sum, line) => sum + line.length, 0);
+	        const avgLen = totalLen / Math.max(1, lines.length);
+	        const hasSentencePunct = /[.!?]\s/.test(raw);
 
-        // Most sources lists are short per-line, with many repeated titles.
-        const uniqueRatio = new Set(lines).size / lines.length;
-        if (avgLen <= 45 && uniqueRatio <= 0.9) return true;
+	        if (hasSentencePunct) return false;
 
-        return avgLen <= 32;
-    }
+	        const uniqueRatio = new Set(lines).size / lines.length;
+	        if (avgLen <= 45 && uniqueRatio <= 0.9) return true;
+	        return avgLen <= 32;
+	    }
 
-    function extractChatGPTResponseText() {
-        const assistantNodes = document.querySelectorAll('[data-message-author-role=\"assistant\"]');
-        for (let i = assistantNodes.length - 1; i >= 0; i--) {
-            const node = assistantNodes[i];
-            const candidates = [
-                node.querySelector('.markdown'),
-                node.querySelector('.prose'),
-                node.querySelector('[data-testid=\"message-content\"]'),
-                node
-            ].filter(Boolean);
+	    function extractChatGPTResponse(options = {}) {
+	        const assistantNodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+	        const baselineCount = Number.isFinite(captureState.baselineAssistantCount)
+	            ? captureState.baselineAssistantCount
+	            : null;
 
-            for (const candidate of candidates) {
-                const text = getTrimmedText(candidate);
-                if (!text) continue;
-                if (looksLikeChatGPTSourcesOnly(text)) continue;
-                return text;
-            }
-        }
+	        const preferredStart = baselineCount !== null
+	            ? Math.min(baselineCount, Math.max(0, assistantNodes.length - 1))
+	            : 0;
 
-        const markdownNodes = document.querySelectorAll('.markdown, .prose');
-        for (let i = markdownNodes.length - 1; i >= 0; i--) {
-            const node = markdownNodes[i];
-            const isUser = node.closest('[data-message-author-role=\"user\"], .user-message');
-            if (isUser) continue;
-            const text = getTrimmedText(node);
-            if (!text) continue;
-            if (looksLikeChatGPTSourcesOnly(text)) continue;
-            return text;
-        }
+	        let messageRoot = null;
+	        for (let i = assistantNodes.length - 1; i >= preferredStart; i--) {
+	            const node = assistantNodes[i];
+	            if (!node) continue;
+	            if (node.querySelector('[data-testid="message-content"], .markdown, .prose')) {
+	                messageRoot = node;
+	                break;
+	            }
+	            if (getTrimmedText(node)) {
+	                messageRoot = node;
+	                break;
+	            }
+	        }
+	        if (!messageRoot) {
+	            for (let i = assistantNodes.length - 1; i >= 0; i--) {
+	                const node = assistantNodes[i];
+	                if (!node) continue;
+	                if (node.querySelector('[data-testid="message-content"], .markdown, .prose')) {
+	                    messageRoot = node;
+	                    break;
+	                }
+	                if (getTrimmedText(node)) {
+	                    messageRoot = node;
+	                    break;
+	                }
+	            }
+	        }
 
-        return '';
-    }
+	        const candidateNodes = [];
+	        if (messageRoot) {
+	            const selectors = [
+	                '[data-testid="message-content"]',
+	                '.prose',
+	                '.markdown'
+	            ];
+	            for (const sel of selectors) {
+	                messageRoot.querySelectorAll(sel).forEach(node => candidateNodes.push(node));
+	            }
+	            candidateNodes.push(messageRoot);
+	        }
+
+	        // Fallback: scan for content nodes outside of the assistant root.
+	        if (candidateNodes.length === 0) {
+	            document.querySelectorAll('[data-testid="message-content"], .markdown, .prose').forEach(node => candidateNodes.push(node));
+	        }
+
+	        const seenNodes = new Set();
+	        const seenText = new Set();
+	        const candidates = [];
+	        for (const node of candidateNodes) {
+	            if (!node || seenNodes.has(node)) continue;
+	            seenNodes.add(node);
+	            const isUser = node.closest?.('[data-message-author-role="user"], .user-message');
+	            if (isUser) continue;
+	            const text = getTrimmedText(node);
+	            if (!text) continue;
+	            const normalized = CaptureUtils?.normalizeWhitespace
+	                ? CaptureUtils.normalizeWhitespace(text)
+	                : String(text).replace(/\s+/g, ' ').trim();
+	            if (!normalized) continue;
+	            if (seenText.has(normalized)) continue;
+	            seenText.add(normalized);
+	            candidates.push({ node, text });
+	        }
+
+	        if (candidates.length === 0) {
+	            return options.withMeta ? { text: '', meta: null } : { text: '' };
+	        }
+
+	        const texts = candidates.map(candidate => candidate.text);
+	        const ranking = CaptureUtils?.chooseBestTextCandidate
+	            ? CaptureUtils.chooseBestTextCandidate(texts, { provider: 'chatgpt' })
+	            : { bestIndex: 0, best: { index: 0, score: texts[0].length, isReferenceList: looksLikeChatGPTSourcesOnly(texts[0]) }, ranked: [] };
+
+	        const bestIndex = Number.isFinite(ranking.bestIndex) && ranking.bestIndex >= 0
+	            ? ranking.bestIndex
+	            : 0;
+	        const bestText = texts[bestIndex] || texts[0] || '';
+
+	        const meta = {
+	            provider: 'chatgpt',
+	            assistantCount: assistantNodes.length,
+	            baselineAssistantCount: captureState.baselineAssistantCount,
+	            candidateCount: texts.length,
+	            bestIndex: bestIndex,
+	            bestScore: ranking.best?.score ?? null,
+	            bestIsReferenceList: ranking.best?.isReferenceList ?? null,
+	            rankingTop: Array.isArray(ranking.ranked)
+	                ? ranking.ranked.slice(0, 6).map(r => ({
+	                    index: r.index,
+	                    score: r.score,
+	                    isReferenceList: r.isReferenceList,
+	                    wordCount: r.analysis?.wordCount,
+	                    lineCount: r.analysis?.lineCount
+	                }))
+	                : []
+	        };
+
+	        captureDebug('extractChatGPTResponse', meta);
+	        if (isCaptureDebugEnabled()) {
+	            captureDebug('Best preview', String(bestText).slice(0, 200));
+	            if (meta.rankingTop?.length) {
+	                meta.rankingTop.forEach((item) => {
+	                    const preview = String(texts[item.index] || '').slice(0, 120);
+	                    captureDebug(`Candidate #${item.index}`, { ...item, preview });
+	                });
+	            }
+	        }
+
+	        return options.withMeta ? { text: bestText, meta } : { text: bestText };
+	    }
 
     function isGeminiUserMessage(node) {
         if (!node) return false;
@@ -515,13 +636,19 @@
 
         if (sawMedia) {
             return '[Gemini returned an image output; no text was captured. Proceeding with debate.]';
-        }
-        return '';
-    }
+	        }
+	        return '';
+	    }
 
-    function extractLatestResponseText() {
-        return isChatGPT ? extractChatGPTResponseText() : extractGeminiResponseText();
-    }
+	    function extractLatestResponse(options = {}) {
+	        if (isChatGPT) return extractChatGPTResponse(options);
+	        const text = extractGeminiResponseText();
+	        return options.withMeta ? { text, meta: { provider: 'gemini' } } : { text };
+	    }
+
+	    function extractLatestResponseText() {
+	        return extractLatestResponse({ withMeta: false }).text || '';
+	    }
 
     function normalizeInlineText(value) {
         return String(value || '').replace(/\s+/g, ' ').trim();
@@ -672,18 +799,20 @@
         });
     }
 
-    function evaluateCapture() {
-        if (!captureState.active) return;
-        const now = Date.now();
-        const minDelayMs = 800;
-        if (now - captureState.startedAt < minDelayMs) return;
+	    function evaluateCapture() {
+	        if (!captureState.active) return;
+	        const now = Date.now();
+	        const minDelayMs = 800;
+	        if (now - captureState.startedAt < minDelayMs) return;
 
-        const text = extractLatestResponseText();
+	        const extraction = extractLatestResponse({ withMeta: true });
+	        const text = extraction.text || '';
+	        captureState.lastExtractionMeta = extraction.meta || null;
 
-        if (!captureState.hasNewText) {
-            if (!text || text === captureState.baselineText) return;
-            captureState.hasNewText = true;
-            captureState.lastText = text;
+	        if (!captureState.hasNewText) {
+	            if (!text || text === captureState.baselineText) return;
+	            captureState.hasNewText = true;
+	            captureState.lastText = text;
             captureState.lastTextChangeAt = now;
             captureState.stableTicks = 0;
         }
@@ -699,24 +828,43 @@
             captureState.stableTicks += 1;
         }
 
-        const generating = isGenerating();
-        const stableForMs = now - captureState.lastTextChangeAt;
-        const forceCaptureMs = isChatGPT ? 20000 : 15000;
-        const minTextLen = 5;
+	        const generating = isGenerating();
+	        const stableForMs = now - captureState.lastTextChangeAt;
+	        const baseForceCaptureMs = isChatGPT ? 20000 : 15000;
+	        const isLikelyReferenceOnly = isChatGPT
+	            ? Boolean(captureState.lastExtractionMeta?.bestIsReferenceList || looksLikeChatGPTSourcesOnly(text))
+	            : false;
+	        const forceCaptureMs = isLikelyReferenceOnly ? Math.max(baseForceCaptureMs, 45000) : baseForceCaptureMs;
+	        const minTextLen = 5;
 
-        if (generating) {
-            if (stableForMs >= forceCaptureMs && text.length >= minTextLen) {
-                if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
-                sendCapturedResponse(text);
-            }
-            return;
-        }
+	        if (generating) {
+	            if (stableForMs >= forceCaptureMs && text.length >= minTextLen) {
+	                if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
+	                captureDebug('Force capture', {
+	                    llm: currentLLM,
+	                    stableForMs,
+	                    forceCaptureMs,
+	                    isLikelyReferenceOnly,
+	                    textLen: text.length,
+	                    meta: captureState.lastExtractionMeta
+	                });
+	                sendCapturedResponse(text);
+	            }
+	            return;
+	        }
 
-        if (captureState.stableTicks >= 3) {
-            if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
-            sendCapturedResponse(text);
-        }
-    }
+	        if (captureState.stableTicks >= 3) {
+	            if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
+	            captureDebug('Stable capture', {
+	                llm: currentLLM,
+	                stableTicks: captureState.stableTicks,
+	                stableForMs,
+	                textLen: text.length,
+	                meta: captureState.lastExtractionMeta
+	            });
+	            sendCapturedResponse(text);
+	        }
+	    }
 
     function startCaptureObservers() {
         const observer = new MutationObserver(() => {

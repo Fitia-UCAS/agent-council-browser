@@ -51,6 +51,11 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.resumeButton = document.getElementById('resume-session');
     elements.pausedFocusButton = document.getElementById('paused-focus');
     elements.pausedRebindButton = document.getElementById('paused-rebind');
+    elements.promptEditor = document.getElementById('prompt-editor');
+    elements.promptLoadButton = document.getElementById('prompt-load');
+    elements.promptSaveButton = document.getElementById('prompt-save');
+    elements.promptResetButton = document.getElementById('prompt-reset');
+    elements.promptStatus = document.getElementById('prompt-status');
 
     bindEvents();
     updateCharCount();
@@ -59,6 +64,7 @@ document.addEventListener('DOMContentLoaded', () => {
     requestProfiles();
     requestConnectionStatus();
     requestActiveSession();
+    loadPromptTemplates();
 });
 
 function bindEvents() {
@@ -167,6 +173,18 @@ function bindEvents() {
         elements.pausedRebindButton.addEventListener('click', rebindPausedProvider);
     }
 
+    if (elements.promptLoadButton) {
+        elements.promptLoadButton.addEventListener('click', loadPromptTemplates);
+    }
+
+    if (elements.promptSaveButton) {
+        elements.promptSaveButton.addEventListener('click', savePromptTemplates);
+    }
+
+    if (elements.promptResetButton) {
+        elements.promptResetButton.addEventListener('click', resetPromptTemplates);
+    }
+
     if (chrome?.runtime?.onMessage) {
         chrome.runtime.onMessage.addListener(handleBackgroundMessage);
     }
@@ -186,6 +204,61 @@ function handleActionResponse(response) {
     if (response && response.ok === false && response.error) {
         setSessionStatus(`Error: ${response.error}`);
     }
+}
+
+function setPromptStatus(text, isError = false) {
+    if (!elements.promptStatus) return;
+    elements.promptStatus.textContent = text;
+    elements.promptStatus.classList.toggle('is-error', Boolean(isError));
+}
+
+function loadPromptTemplates() {
+    if (!elements.promptEditor) return;
+    setPromptStatus('Loading prompt templates...');
+    sendMessage({ type: 'GET_DEBATE_PROMPTS' }, (response) => {
+        if (!response || response.ok === false) {
+            setPromptStatus(`Error: ${response?.error || 'Failed to load prompts.'}`, true);
+            return;
+        }
+        const json = JSON.stringify(response.config || {}, null, 2);
+        elements.promptEditor.value = json;
+        const sourceLabel = response.source === 'override'
+            ? 'Editing custom prompts.'
+            : 'Editing defaults (no override saved).';
+        setPromptStatus(sourceLabel);
+    });
+}
+
+function savePromptTemplates() {
+    if (!elements.promptEditor) return;
+    let parsed;
+    try {
+        parsed = JSON.parse(elements.promptEditor.value);
+    } catch (error) {
+        setPromptStatus(`Invalid JSON: ${error.message}`, true);
+        return;
+    }
+
+    sendMessage({ type: 'SET_DEBATE_PROMPTS', config: parsed }, (response) => {
+        if (!response || response.ok === false) {
+            setPromptStatus(`Error: ${response?.error || 'Failed to save prompts.'}`, true);
+            return;
+        }
+        const json = JSON.stringify(response.config || parsed, null, 2);
+        elements.promptEditor.value = json;
+        setPromptStatus('Saved custom prompts.');
+    });
+}
+
+function resetPromptTemplates() {
+    if (!elements.promptEditor) return;
+    sendMessage({ type: 'RESET_DEBATE_PROMPTS' }, (response) => {
+        if (!response || response.ok === false) {
+            setPromptStatus(`Error: ${response?.error || 'Failed to reset prompts.'}`, true);
+            return;
+        }
+        loadPromptTemplates();
+    });
 }
 
 function updateCharCount() {

@@ -4,7 +4,7 @@
     "description": "Send prompts to multiple LLM providers (Gemini and ChatGPT) simultaneously and compare responses side-by-side",
     "main": "background.js",
     "scripts": {
-      "test": "echo \"Error: no test specified\" && exit 1"
+      "test": "node tests/test-capture-heuristics.js"
     },
     "author": "Multi-LLM Coder Team",
     "license": "ISC"

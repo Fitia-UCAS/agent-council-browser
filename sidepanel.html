@@ -100,6 +100,23 @@
             </div>
         </details>
 
+        <details class="settings" id="prompt-templates" open>
+            <summary class="settings-summary">
+                <span>Prompt templates</span>
+                <span class="material-symbols-rounded">code</span>
+            </summary>
+            <div class="settings-body">
+                <div class="prompt-note">Edit debate prompt templates (JSON). Saved locally in this extension.</div>
+                <textarea id="prompt-editor" class="prompt-editor" rows="12" spellcheck="false" placeholder="Loading prompt templates..."></textarea>
+                <div class="settings-actions prompt-actions">
+                    <button class="ghost-button" id="prompt-load" type="button">Load current</button>
+                    <button class="ghost-button" id="prompt-save" type="button">Save</button>
+                    <button class="ghost-button" id="prompt-reset" type="button">Reset to default</button>
+                </div>
+                <div class="prompt-status" id="prompt-status">Not loaded</div>
+            </div>
+        </details>
+
         <main class="timeline" id="timeline">
             <div class="empty-state" id="empty-state">
                 <div class="empty-title">No session yet</div>
