@@ -20,11 +20,11 @@
   "content_scripts": [
     {
       "matches": ["https://chat.openai.com/*", "https://chatgpt.com/*"],
-      "js": ["contentScript.js"]
+      "js": ["captureUtils.js", "contentScript.js"]
     },
     {
       "matches": ["https://gemini.google.com/*"],
-      "js": ["contentScript.js"]
+      "js": ["captureUtils.js", "contentScript.js"]
     }
   ],
   

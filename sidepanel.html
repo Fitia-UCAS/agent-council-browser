@@ -100,6 +100,58 @@
             </div>
         </details>
 
+        <details class="settings" id="prompt-templates" open>
+            <summary class="settings-summary">
+                <span>Prompt templates</span>
+                <span class="material-symbols-rounded">code</span>
+            </summary>
+            <div class="settings-body">
+                <div class="prompt-note">
+                    Customize how each agent is instructed (saved locally in this extension). Templates support placeholders like
+                    <code>{other_llm}</code>, <code>{round}</code>, <code>{rounds}</code>, and <code>{other_answer}</code>.
+                </div>
+
+                <div class="prompt-template-fields">
+                    <label class="field">
+                        <span class="field-label">Initial message</span>
+                        <textarea id="prompt-initial" class="prompt-template" rows="4" spellcheck="false" placeholder="Shown for iteration 1 (both models)."></textarea>
+                        <div class="field-help">Used on turns 1–2 (iteration 1 context).</div>
+                    </label>
+
+                    <label class="field">
+                        <span class="field-label">Intermediary message</span>
+                        <textarea id="prompt-intermediary" class="prompt-template" rows="4" spellcheck="false" placeholder="Shown for intermediary turns."></textarea>
+                        <div class="field-help">Used for turns 2..N-1 by default.</div>
+                    </label>
+
+                    <label class="field">
+                        <span class="field-label">Final message</span>
+                        <textarea id="prompt-final" class="prompt-template" rows="4" spellcheck="false" placeholder="Shown only on the last turn."></textarea>
+                        <div class="field-help">Used only when <code>turn == total_turns</code>.</div>
+                    </label>
+                </div>
+
+                <details class="prompt-advanced" id="prompt-advanced">
+                    <summary class="prompt-advanced-summary">
+                        <span>Advanced (raw JSON)</span>
+                        <span class="material-symbols-rounded">code</span>
+                    </summary>
+                    <div class="prompt-advanced-body">
+                        <textarea id="prompt-json-editor" class="prompt-editor" rows="10" spellcheck="false" placeholder="Loading prompt templates..."></textarea>
+                        <div class="settings-actions prompt-actions">
+                            <button class="ghost-button" id="prompt-json-save" type="button">Save JSON</button>
+                        </div>
+                    </div>
+                </details>
+                <div class="settings-actions prompt-actions">
+                    <button class="ghost-button" id="prompt-load" type="button">Load current</button>
+                    <button class="ghost-button" id="prompt-save" type="button">Save</button>
+                    <button class="ghost-button" id="prompt-reset" type="button">Reset to default</button>
+                </div>
+                <div class="prompt-status" id="prompt-status">Not loaded</div>
+            </div>
+        </details>
+
         <main class="timeline" id="timeline">
             <div class="empty-state" id="empty-state">
                 <div class="empty-title">No session yet</div>

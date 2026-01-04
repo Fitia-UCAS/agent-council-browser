@@ -89,8 +89,13 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Supports open/claim profile flows and focus tab actions.
 
 - `debate_prompts.json`
-  - User-editable debate prompt templates (header + turn prompts) used by `buildDebatePrompt(...)`.
+  - User-editable debate prompt templates (initial/header + per-turn scaffolding + intermediary/final messages) used by `buildDebatePrompt(...)`.
   - Loaded by `background.js` via `fetch(chrome.runtime.getURL(...))` with a safe inline fallback.
+  - Side panel can override these templates via local storage (see prompt editor below).
+
+- `captureUtils.js`
+  - Shared capture heuristics (reference-list detection + candidate scoring) used by `contentScript.js`.
+  - Loaded before `contentScript.js` via `manifest.json` content script ordering.
 
 - `contentScript.js`
   - Runs in ChatGPT/Gemini pages.
@@ -179,6 +184,11 @@ Structure (`activeDebateState`):
 ### Tab profiles store (background.js)
 
 Stored in `chrome.storage.local` key: `mlc_tab_profiles_v1`.
+
+Prompt template overrides:
+
+- Stored in `chrome.storage.local` key: `mlc_debate_prompts_override_v1`.
+- If present, overrides `debate_prompts.json` for `buildDebatePrompt(...)`.
 
 Structure:
 
@@ -280,6 +290,14 @@ Response validation rules:
 
 Debate prompts are configurable via `debate_prompts.json` (schema v1) and rendered with simple `{placeholder}` substitution.
 
+The side panel exposes a simple 3-field editor that maps to:
+
+- `debate.header` (Initial message): used on turns 1–2 (iteration 1 context for both models)
+- `debate.intermediary_message` (Intermediary message): used on non-final improvement turns (by default, turns 2..N-1)
+- `debate.final_message` (Final message): used only on the last turn (`turn == total_turns`)
+
+Implementation detail: the default turn templates include `{intermediary_message}` and the background swaps that variable to `final_message` on the final turn.
+
 Turn selection logic (in `background.js`) uses these templates:
 
 - `debate.turn1`: turnIndex 1 (round 1, first LLM)
@@ -287,7 +305,7 @@ Turn selection logic (in `background.js`) uses these templates:
 - `debate.turn3plus_first`: turns 3+ when the expected LLM is `firstLLM`
 - `debate.turn3plus_second`: turns 3+ when the expected LLM is `secondLLM`
 
-Defaults include explicit role reminders (e.g., “You are {expected_llm}… do not simulate {other_llm}”) to prevent a model from replying as both participants.
+Defaults are intentionally lightweight; additional role reminders can be added via templates if needed.
 
 ## 4) Prompt injection (background.js)
 
@@ -315,6 +333,7 @@ Defaults include explicit role reminders (e.g., “You are {expected_llm}… do 
 - `armCapture` stores:
   - `promptId`, `sessionId`, `turnIndex`
   - `baselineText` (current latest response text, to avoid capturing old output)
+  - `baselineAssistantCount` (ChatGPT only; number of assistant messages pre-turn)
   - `hasNewText` flag (must see new output before capturing)
 
 ### Capture algorithm
@@ -329,7 +348,7 @@ Defaults include explicit role reminders (e.g., “You are {expected_llm}… do 
 
 Current force‑capture thresholds:
 
-- ChatGPT: 20s stable
+- ChatGPT: 20s stable (45s stable when extracted text looks like a sources-only/reference list)
 - Gemini: 15s stable
 
 ### Generating detection
@@ -341,8 +360,9 @@ Current force‑capture thresholds:
 
 **ChatGPT**:
 
-- Prefers `.markdown` / `.prose` (and `data-testid="message-content"` when present) within `[data-message-author-role="assistant"]`.
-- Skips sources-only UI blocks (e.g., link title lists with standalone `+N` lines) and returns the latest real answer text.
+- Collects multiple candidate content nodes within the latest `[data-message-author-role="assistant"]` (e.g., `data-testid="message-content"`, `.prose`, `.markdown`, and the message root).
+- Ranks candidates using `captureUtils.js` heuristics to avoid capturing sources-only/reference blocks when a real answer is present.
+- Debugging: set `localStorage.mlc_capture_debug = '1'` in the provider tab console to log candidate scoring and capture decisions.
 
 **Gemini**:
 
@@ -390,6 +410,9 @@ Current force‑capture thresholds:
 - `OPEN_PROVIDER_TAB` `{ provider, windowId?, focus }`
 - `FOCUS_TAB` `{ tabId }`
 - `GET_ACTIVE_SESSION`
+- `GET_DEBATE_PROMPTS`
+- `SET_DEBATE_PROMPTS` `{ config }`
+- `RESET_DEBATE_PROMPTS`
 - `SEND_PROMPT`:
   - `{ prompt, targets:{chatgpt, gemini}, multiAgent:{enabled, maxIterations} }`
 - Legacy (still supported by background):
@@ -447,6 +470,7 @@ TAB_PROFILES updates:
   - Rebind to current tab (calls CREATE_PROFILE_FROM_ACTIVE_TAB with profileId)
   - Resume session (RESUME_SESSION)
 - Dropdown entries show profile label plus status and in-use hints when applicable.
+- Prompt templates can be edited in the side panel (3-field editor; optional advanced raw JSON) and saved to `mlc_debate_prompts_override_v1`.
 
 ## 7) Tab selection logic
 

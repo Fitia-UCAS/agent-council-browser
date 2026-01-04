@@ -685,6 +685,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
             sendResponse({ status: 'profiles_sent', type: message.type });
             break;
+        case 'GET_DEBATE_PROMPTS':
+            getDebatePromptConfigForUi().then(sendResponse).catch(error => {
+                console.error('[MLC Debate] Error loading prompt templates:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'SET_DEBATE_PROMPTS':
+            setDebatePromptOverride(message.config).then(sendResponse).catch(error => {
+                console.error('[MLC Debate] Error saving prompt templates:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'RESET_DEBATE_PROMPTS':
+            clearDebatePromptOverride().then(sendResponse).catch(error => {
+                console.error('[MLC Debate] Error resetting prompt templates:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
         case 'CREATE_PROFILE_FROM_ACTIVE_TAB':
             createProfileFromActiveTab(message.provider, message.label, message.profileId).then(sendResponse).catch(error => {
                 console.error('[MLC Profiles] Error creating profile from active tab:', error);
@@ -1017,7 +1035,9 @@ function formatLLMLabel(llmType) {
 }
 
 const DEBATE_PROMPTS_PATH = 'debate_prompts.json';
+const PROMPT_TEMPLATES_OVERRIDE_KEY = 'mlc_debate_prompts_override_v1';
 let cachedDebatePromptConfig = null;
+let cachedDebatePromptSource = null;
 let debatePromptConfigLoadPromise = null;
 
 function getDefaultDebatePromptConfig() {
@@ -1026,61 +1046,57 @@ function getDefaultDebatePromptConfig() {
         debate: {
             placeholders: {},
             header: [
-                'Multi-LLM debate session ({first_llm} ↔ {second_llm})',
-                'Total iterations: {rounds}',
+                'You will participate in a multi-agent debate with {other_llm} over {rounds} iterations to produce the most accurate answer to the user.',
                 '',
-                'You are {expected_llm}. The other participant is {other_llm}.',
-                'Write only your own response. Do not role-play or simulate the other participant.',
-                'Do not format your response as a dialogue (no "ChatGPT:" / "Gemini:" prefixes).',
-                'Goal: be critical, constructive, fair, and help produce the best final answer for the user.'
+                'Guidelines:',
+                '- Be precise and non-egoic (optimize for correctness, not for "being right").',
+                '- Be constructive: critique to make progress and improve the answer.',
+                '- If unsure, say so briefly and propose a way to verify.'
             ].join('\n'),
+            intermediary_message: [
+                'Provide a constructive improvement for iteration {round}/{rounds}:',
+                '- Critique key issues (short bullets)',
+                '- Revised answer'
+            ].join('\n'),
+            final_message: 'Provide your final best answer for the user. Output only the final answer (no critique section).',
             turn1: [
                 '{header}',
                 '',
-                'User message:',
+                'Iteration {round}/{rounds}',
+                '',
+                'User question:',
                 '{user_msg}',
                 '',
-                '{expected_llm}, start iteration {round}/{rounds}.',
-                'Provide your best answer to the user.'
+                'Provide your best answer.'
             ].join('\n'),
             turn2: [
                 '{header}',
                 '',
-                'User message:',
+                'Iteration {round}/{rounds}',
+                '',
+                'User question:',
                 '{user_msg}',
                 '',
                 '{first_llm} answer (iteration 1/{rounds}):',
                 '{first_answer}',
                 '',
-                'Now, as {expected_llm}:',
-                "1) Briefly critique {first_llm}'s answer (errors, missing details, risky assumptions).",
-                '2) Provide your improved answer to the user.'
+                '{intermediary_message}'
             ].join('\n'),
             turn3plus_first: [
-                'Iteration {round}/{rounds} — {expected_llm}',
-                '(Use the chat history for the original user message.)',
+                'Iteration {round}/{rounds}',
                 '',
-                'Only write as {expected_llm}; do not simulate {other_llm}.',
-                '',
-                '{other_llm} answer from iteration {prev_round}/{rounds}:',
+                `Here is {other_llm}'s answer for iteration {prev_round}/{rounds}:`,
                 '{other_answer}',
                 '',
-                'Now provide:',
-                '- Critique (brief, optional)',
-                '- Improved answer'
+                '{intermediary_message}'
             ].join('\n'),
             turn3plus_second: [
-                'Iteration {round}/{rounds} — {expected_llm}',
-                '(Use the chat history for the original user message.)',
+                'Iteration {round}/{rounds}',
                 '',
-                'Only write as {expected_llm}; do not simulate {other_llm}.',
-                '',
-                '{other_llm} answer for iteration {round}/{rounds}:',
+                `Here is {other_llm}'s answer for iteration {round}/{rounds}:`,
                 '{other_answer}',
                 '',
-                'Now provide:',
-                '- Critique (brief, optional)',
-                '- Improved answer'
+                '{intermediary_message}'
             ].join('\n')
         }
     };
@@ -1103,6 +1119,8 @@ function normalizeDebatePromptConfig(rawConfig) {
                     ? rawDebate.placeholders
                     : defaults.debate.placeholders,
             header: pickString(rawDebate.header, defaults.debate.header),
+            intermediary_message: pickString(rawDebate.intermediary_message, defaults.debate.intermediary_message),
+            final_message: pickString(rawDebate.final_message, defaults.debate.final_message),
             turn1: pickString(rawDebate.turn1, defaults.debate.turn1),
             turn2: pickString(rawDebate.turn2, defaults.debate.turn2),
             turn3plus_first: pickString(rawDebate.turn3plus_first, defaults.debate.turn3plus_first),
@@ -1111,23 +1129,40 @@ function normalizeDebatePromptConfig(rawConfig) {
     };
 }
 
+async function getDebatePromptOverride() {
+    const stored = await chrome.storage.local.get(PROMPT_TEMPLATES_OVERRIDE_KEY);
+    return stored?.[PROMPT_TEMPLATES_OVERRIDE_KEY] || null;
+}
+
+async function loadDebatePromptConfigFromFile() {
+    try {
+        const url = chrome.runtime.getURL(DEBATE_PROMPTS_PATH);
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`Failed to load ${DEBATE_PROMPTS_PATH}: ${response.status}`);
+        }
+        const json = await response.json();
+        return normalizeDebatePromptConfig(json);
+    } catch (error) {
+        console.warn('[MLC Debate] Failed to load prompt templates; using defaults.', error);
+        return getDefaultDebatePromptConfig();
+    }
+}
+
 async function loadDebatePromptConfig() {
     if (cachedDebatePromptConfig) return cachedDebatePromptConfig;
     if (debatePromptConfigLoadPromise) return debatePromptConfigLoadPromise;
 
     debatePromptConfigLoadPromise = (async () => {
         try {
-            const url = chrome.runtime.getURL(DEBATE_PROMPTS_PATH);
-            const response = await fetch(url);
-            if (!response.ok) {
-                throw new Error(`Failed to load ${DEBATE_PROMPTS_PATH}: ${response.status}`);
+            const override = await getDebatePromptOverride();
+            if (override) {
+                cachedDebatePromptConfig = normalizeDebatePromptConfig(override);
+                cachedDebatePromptSource = 'override';
+                return cachedDebatePromptConfig;
             }
-            const json = await response.json();
-            cachedDebatePromptConfig = normalizeDebatePromptConfig(json);
-            return cachedDebatePromptConfig;
-        } catch (error) {
-            console.warn('[MLC Debate] Failed to load prompt templates; using defaults.', error);
-            cachedDebatePromptConfig = getDefaultDebatePromptConfig();
+            cachedDebatePromptConfig = await loadDebatePromptConfigFromFile();
+            cachedDebatePromptSource = 'default';
             return cachedDebatePromptConfig;
         } finally {
             debatePromptConfigLoadPromise = null;
@@ -1135,6 +1170,33 @@ async function loadDebatePromptConfig() {
     })();
 
     return debatePromptConfigLoadPromise;
+}
+
+async function getDebatePromptConfigForUi() {
+    const override = await getDebatePromptOverride();
+    if (override) {
+        return { ok: true, config: normalizeDebatePromptConfig(override), source: 'override' };
+    }
+    const config = await loadDebatePromptConfigFromFile();
+    return { ok: true, config, source: 'default' };
+}
+
+async function setDebatePromptOverride(config) {
+    if (!config || typeof config !== 'object') {
+        return { ok: false, error: 'Invalid prompt config.' };
+    }
+    const normalized = normalizeDebatePromptConfig(config);
+    await chrome.storage.local.set({ [PROMPT_TEMPLATES_OVERRIDE_KEY]: normalized });
+    cachedDebatePromptConfig = normalized;
+    cachedDebatePromptSource = 'override';
+    return { ok: true, config: normalized, source: 'override' };
+}
+
+async function clearDebatePromptOverride() {
+    await chrome.storage.local.remove(PROMPT_TEMPLATES_OVERRIDE_KEY);
+    cachedDebatePromptConfig = null;
+    cachedDebatePromptSource = null;
+    return { ok: true };
 }
 
 function renderPromptTemplate(template, variables) {
@@ -1195,7 +1257,15 @@ async function buildDebatePrompt(session, turnIndex) {
     };
 
     const header = renderPromptTemplate(templates.header, baseVariables);
-    const variables = { ...baseVariables, header };
+    const renderedIntermediary = renderPromptTemplate(templates.intermediary_message, { ...baseVariables, header });
+    const renderedFinal = renderPromptTemplate(templates.final_message, { ...baseVariables, header });
+    const isFinalTurn = turnIndex === totalTurns;
+    const variables = {
+        ...baseVariables,
+        header,
+        intermediary_message: isFinalTurn ? renderedFinal : renderedIntermediary,
+        final_message: renderedFinal
+    };
 
     if (turnIndex === 1) {
         return renderPromptTemplate(templates.turn1, variables).trim();
