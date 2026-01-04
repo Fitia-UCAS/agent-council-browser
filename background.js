@@ -1539,18 +1539,26 @@ async function handleDebateResponse(message) {
 
     const content = (message.content || '').trim();
     if (!content) return;
+    const rawHtml = typeof message.contentHtml === 'string' ? message.contentHtml : '';
+    const trimmedHtml = rawHtml.trim();
+    const MAX_HTML_CHARS = 120000;
+    const contentHtml = trimmedHtml && trimmedHtml.length <= MAX_HTML_CHARS
+        ? rawHtml
+        : '';
 
     const turnIndex = session.turnIndex;
     const roundIndex = getRoundIndex(turnIndex);
     const timestamp = Date.now();
 
-    session.messages.push({
+    const entry = {
         role: expectedLLM || message.sourceLLM || 'assistant',
         content: content,
         timestamp: timestamp,
         turnIndex: turnIndex,
         roundIndex: roundIndex
-    });
+    };
+    if (contentHtml) entry.contentHtml = contentHtml;
+    session.messages.push(entry);
 
     session.waitingFor = null;
     session.lastPromptId = null;
@@ -1562,6 +1570,7 @@ async function handleDebateResponse(message) {
         type: 'UI_MESSAGE_ADD',
         role: expectedLLM || message.sourceLLM,
         content: content,
+        contentHtml: contentHtml || undefined,
         timestamp: timestamp,
         turnIndex: turnIndex,
         roundIndex: roundIndex
@@ -1710,7 +1719,8 @@ function handleGeminiResponse(message) {
     sendMessageToPopup({
         type: 'LLM_RESPONSE',
         llm: 'gemini',
-        content: message.content
+        content: message.content,
+        contentHtml: message.contentHtml || undefined
     });
 }
 
@@ -1739,7 +1749,8 @@ function handleChatGPTResponse(message) {
     sendMessageToPopup({
         type: 'LLM_RESPONSE',
         llm: 'chatgpt',
-        content: message.content
+        content: message.content,
+        contentHtml: message.contentHtml || undefined
     });
 }
 

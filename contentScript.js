@@ -392,6 +392,36 @@
 	        return (text || '').trim();
 	    }
 
+        function extractCleanHtmlFromNode(node) {
+            if (!node) return '';
+            const clone = node.cloneNode(true);
+
+            // Remove obvious non-content UI and media elements that can bloat messages.
+            const removeSelectors = [
+                'script',
+                'style',
+                'noscript',
+                'button',
+                'form',
+                'input',
+                'textarea',
+                'select',
+                'option',
+                'img',
+                'video',
+                'audio',
+                'canvas',
+                'picture'
+            ];
+            clone.querySelectorAll(removeSelectors.join(',')).forEach(el => el.remove());
+
+            const html = clone.innerHTML || '';
+            // Keep payloads bounded; if too large, fall back to plain text rendering in the UI.
+            const MAX_HTML_CHARS = 120000;
+            if (html.length > MAX_HTML_CHARS) return '';
+            return html;
+        }
+
 	    function looksLikeChatGPTSourcesOnly(text) {
 	        if (CaptureUtils && typeof CaptureUtils.looksLikeReferenceList === 'function') {
 	            return CaptureUtils.looksLikeReferenceList(text, { provider: 'chatgpt' });
@@ -510,6 +540,7 @@
 	            ? ranking.bestIndex
 	            : 0;
 	        const bestText = texts[bestIndex] || texts[0] || '';
+            const bestNode = candidates[bestIndex]?.node || candidates[0]?.node || null;
 
 	        const meta = {
 	            provider: 'chatgpt',
@@ -541,7 +572,13 @@
 	            }
 	        }
 
-	        return options.withMeta ? { text: bestText, meta } : { text: bestText };
+            const result = {
+                text: bestText
+            };
+            if (options.withHtml) {
+                result.html = extractCleanHtmlFromNode(bestNode);
+            }
+	        return options.withMeta ? { ...result, meta } : result;
 	    }
 
     function isGeminiUserMessage(node) {
@@ -562,7 +599,7 @@
         return false;
     }
 
-    function extractGeminiResponseText() {
+    function extractGeminiResponse(options = {}) {
         const inputEl = findInput({ silent: true });
         const inputContainer = inputEl
             ? inputEl.closest('form, .input-area-container, .input-area, .input-row, .composer, .prompt-container')
@@ -625,25 +662,33 @@
             if (inputContainer && inputContainer.contains(target)) continue;
             if (isGeminiUserMessage(target)) continue;
 
-            const clone = target.cloneNode(true);
-            const mediaNodes = clone.querySelectorAll('img, video, canvas, svg, figure, picture');
+            const mediaNodes = target.querySelectorAll('img, video, canvas, svg, figure, picture');
             if (mediaNodes.length > 0) sawMedia = true;
-            mediaNodes.forEach(el => el.remove());
 
-            const text = clone.innerText || clone.textContent;
-            if (text && text.trim()) return text.trim();
+            // Use innerText from the live node to preserve provider-intended line breaks.
+            // (textContent collapses <br>/<p>/<li> into a single squashed line.)
+            const text = target.innerText || target.textContent;
+            if (text && text.trim()) {
+                const result = { text: text.trim() };
+                if (options.withHtml) {
+                    result.html = extractCleanHtmlFromNode(target);
+                }
+                return options.withMeta ? { ...result, meta: { provider: 'gemini' } } : result;
+            }
         }
 
         if (sawMedia) {
-            return '[Gemini returned an image output; no text was captured. Proceeding with debate.]';
+            const placeholder = '[Gemini returned an image output; no text was captured. Proceeding with debate.]';
+            return options.withMeta
+                ? { text: placeholder, meta: { provider: 'gemini', sawMedia: true } }
+                : { text: placeholder };
 	        }
-	        return '';
+	        return options.withMeta ? { text: '', meta: { provider: 'gemini' } } : { text: '' };
 	    }
 
 	    function extractLatestResponse(options = {}) {
 	        if (isChatGPT) return extractChatGPTResponse(options);
-	        const text = extractGeminiResponseText();
-	        return options.withMeta ? { text, meta: { provider: 'gemini' } } : { text };
+	        return extractGeminiResponse(options);
 	    }
 
 	    function extractLatestResponseText() {
@@ -771,9 +816,17 @@
         });
     }
 
-    function sendCapturedResponse(text) {
+    function sendCapturedResponse(extraction) {
+        const text = typeof extraction === 'string'
+            ? extraction
+            : (extraction?.text || extraction?.content || '');
+        const contentHtml = typeof extraction === 'object' && extraction
+            ? (extraction.html || extraction.contentHtml || '')
+            : '';
+
         const responsePayload = {
             content: text,
+            contentHtml,
             promptId: captureState.promptId,
             sessionId: captureState.sessionId,
             sourceLLM: currentLLM,
@@ -848,7 +901,7 @@
 	                    textLen: text.length,
 	                    meta: captureState.lastExtractionMeta
 	                });
-	                sendCapturedResponse(text);
+	                sendCapturedResponse(extractLatestResponse({ withMeta: false, withHtml: true }));
 	            }
 	            return;
 	        }
@@ -862,7 +915,7 @@
 	                textLen: text.length,
 	                meta: captureState.lastExtractionMeta
 	            });
-	            sendCapturedResponse(text);
+	            sendCapturedResponse(extractLatestResponse({ withMeta: false, withHtml: true }));
 	        }
 	    }
 

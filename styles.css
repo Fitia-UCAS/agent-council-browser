@@ -601,6 +601,126 @@ textarea:focus {
   color: var(--text-primary);
 }
 
+.message-content.rich {
+  white-space: normal;
+}
+
+.message-content.rich > :first-child {
+  margin-top: 0;
+}
+
+.message-content.rich > :last-child {
+  margin-bottom: 0;
+}
+
+.message-content.rich p {
+  margin: 0.55em 0;
+}
+
+.message-content.rich h1,
+.message-content.rich h2,
+.message-content.rich h3,
+.message-content.rich h4,
+.message-content.rich h5,
+.message-content.rich h6 {
+  margin: 0.75em 0 0.35em;
+  line-height: 1.25;
+}
+
+.message-content.rich h1 {
+  font-size: 1.2rem;
+}
+
+.message-content.rich h2 {
+  font-size: 1.12rem;
+}
+
+.message-content.rich h3 {
+  font-size: 1.05rem;
+}
+
+.message-content.rich ul,
+.message-content.rich ol {
+  margin: 0.55em 0 0.55em 1.25em;
+  padding: 0;
+}
+
+.message-content.rich li {
+  margin: 0.25em 0;
+}
+
+.message-content.rich blockquote {
+  margin: 0.65em 0;
+  padding: 0.25em 0.9em;
+  border-left: 3px solid rgba(148, 163, 184, 0.35);
+  background: rgba(148, 163, 184, 0.08);
+  color: var(--text-secondary);
+}
+
+.message-content.rich pre {
+  white-space: pre;
+  margin: 0.65em 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(10, 15, 22, 0.75);
+  overflow-x: auto;
+}
+
+.message-content.rich pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: 0.85rem;
+}
+
+.message-content.rich hr {
+  border: none;
+  border-top: 1px solid rgba(148, 163, 184, 0.22);
+  margin: 0.8em 0;
+}
+
+.message-content.rich a {
+  color: rgba(96, 165, 250, 0.95);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.message-content.rich a:hover {
+  color: rgba(147, 197, 253, 0.98);
+}
+
+.table-wrap {
+  margin: 0.65em 0;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  overflow-x: auto;
+  background: rgba(10, 15, 22, 0.55);
+}
+
+.table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table-wrap th,
+.table-wrap td {
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  padding: 8px 10px;
+  vertical-align: top;
+}
+
+.table-wrap th {
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.message-content.rich math[display="block"] {
+  display: block;
+  margin: 0.65em 0;
+}
+
 .message-content code {
   font-family: var(--font-family-mono);
   font-size: 0.85rem;
