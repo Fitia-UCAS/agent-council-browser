@@ -89,6 +89,8 @@
     const { lineCount, wordCount, codeFenceCount, sentenceEndPunctCount } = analysis;
     const urlishRatio = analysis.urlishLineCount / Math.max(1, lineCount);
     const bulletRatio = analysis.bulletLikeCount / Math.max(1, lineCount);
+    const firstLine = analysis.lines[0] || '';
+    const strictSourcesHeading = /^(sources?|references?|citations?)\s*[:\-]?\s*$/i.test(firstLine);
 
     // If it contains real prose or code blocks, it's usually not a sources-only block.
     if (sentenceEndPunctCount >= 2) return false;
@@ -98,6 +100,8 @@
     if (analysis.startsWithSourcesHeading && lineCount >= 3 && sentenceEndPunctCount === 0) {
       // Some UIs render sources as title lists without explicit URLs; accept bullet/title structure too.
       if (urlishRatio >= 0.2 || bulletRatio >= 0.4 || analysis.plusLineCount >= 1) return true;
+      // Title-only sources: headings + list of short lines (no URLs/bullets).
+      if (strictSourcesHeading && lineCount >= 4 && analysis.avgLineLen <= 80 && analysis.uniqueLineRatio >= 0.6) return true;
     }
     if (analysis.plusLineCount >= 1 && lineCount >= 4 && sentenceEndPunctCount === 0) return true;
 
