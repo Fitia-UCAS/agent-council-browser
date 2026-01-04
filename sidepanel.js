@@ -11,7 +11,9 @@ const state = {
     defaults: { chatgpt: null, gemini: null },
     selectedProfiles: { chatgpt: 'default', gemini: 'default' },
     sessionProfiles: { chatgpt: null, gemini: null },
-    pendingClaim: null
+    pendingClaim: null,
+    promptConfig: null,
+    promptConfigSource: null
 };
 
 const elements = {};
@@ -51,7 +53,11 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.resumeButton = document.getElementById('resume-session');
     elements.pausedFocusButton = document.getElementById('paused-focus');
     elements.pausedRebindButton = document.getElementById('paused-rebind');
-    elements.promptEditor = document.getElementById('prompt-editor');
+    elements.promptInitial = document.getElementById('prompt-initial');
+    elements.promptIntermediary = document.getElementById('prompt-intermediary');
+    elements.promptFinal = document.getElementById('prompt-final');
+    elements.promptJsonEditor = document.getElementById('prompt-json-editor');
+    elements.promptJsonSaveButton = document.getElementById('prompt-json-save');
     elements.promptLoadButton = document.getElementById('prompt-load');
     elements.promptSaveButton = document.getElementById('prompt-save');
     elements.promptResetButton = document.getElementById('prompt-reset');
@@ -185,6 +191,10 @@ function bindEvents() {
         elements.promptResetButton.addEventListener('click', resetPromptTemplates);
     }
 
+    if (elements.promptJsonSaveButton) {
+        elements.promptJsonSaveButton.addEventListener('click', savePromptTemplatesJson);
+    }
+
     if (chrome?.runtime?.onMessage) {
         chrome.runtime.onMessage.addListener(handleBackgroundMessage);
     }
@@ -212,28 +222,92 @@ function setPromptStatus(text, isError = false) {
     elements.promptStatus.classList.toggle('is-error', Boolean(isError));
 }
 
+function getIntermediaryPlaceholderWarning(config) {
+    const debate = config?.debate && typeof config.debate === 'object' ? config.debate : {};
+    const templates = [
+        ['turn2', debate.turn2],
+        ['turn3plus_first', debate.turn3plus_first],
+        ['turn3plus_second', debate.turn3plus_second]
+    ];
+    const missing = templates
+        .filter(([, value]) => typeof value !== 'string' || !value.includes('{intermediary_message}'))
+        .map(([key]) => key);
+    if (missing.length === 0) return null;
+    return `Note: your templates (${missing.join(', ')}) do not include {intermediary_message}; the intermediary/final fields may have no effect unless you reset to defaults or edit JSON.`;
+}
+
 function loadPromptTemplates() {
-    if (!elements.promptEditor) return;
     setPromptStatus('Loading prompt templates...');
     sendMessage({ type: 'GET_DEBATE_PROMPTS' }, (response) => {
         if (!response || response.ok === false) {
             setPromptStatus(`Error: ${response?.error || 'Failed to load prompts.'}`, true);
             return;
         }
-        const json = JSON.stringify(response.config || {}, null, 2);
-        elements.promptEditor.value = json;
+        state.promptConfig = response.config || {};
+        state.promptConfigSource = response.source || 'default';
+
+        const debate = state.promptConfig?.debate && typeof state.promptConfig.debate === 'object'
+            ? state.promptConfig.debate
+            : {};
+
+        if (elements.promptInitial) elements.promptInitial.value = debate.header || '';
+        if (elements.promptIntermediary) elements.promptIntermediary.value = debate.intermediary_message || '';
+        if (elements.promptFinal) elements.promptFinal.value = debate.final_message || '';
+
+        if (elements.promptJsonEditor) {
+            elements.promptJsonEditor.value = JSON.stringify(state.promptConfig, null, 2);
+        }
+
         const sourceLabel = response.source === 'override'
             ? 'Editing custom prompts.'
             : 'Editing defaults (no override saved).';
-        setPromptStatus(sourceLabel);
+        const warning = getIntermediaryPlaceholderWarning(state.promptConfig);
+        setPromptStatus(warning ? `${sourceLabel}\n${warning}` : sourceLabel);
     });
 }
 
 function savePromptTemplates() {
-    if (!elements.promptEditor) return;
+    const baseConfig = state.promptConfig && typeof state.promptConfig === 'object' ? state.promptConfig : {};
+    const baseDebate = baseConfig.debate && typeof baseConfig.debate === 'object' ? baseConfig.debate : {};
+
+    const nextConfig = {
+        ...baseConfig,
+        schemaVersion: 1,
+        debate: {
+            ...baseDebate,
+            header: elements.promptInitial?.value ?? baseDebate.header ?? '',
+            intermediary_message: elements.promptIntermediary?.value ?? baseDebate.intermediary_message ?? '',
+            final_message: elements.promptFinal?.value ?? baseDebate.final_message ?? ''
+        }
+    };
+
+    sendMessage({ type: 'SET_DEBATE_PROMPTS', config: nextConfig }, (response) => {
+        if (!response || response.ok === false) {
+            setPromptStatus(`Error: ${response?.error || 'Failed to save prompts.'}`, true);
+            return;
+        }
+        state.promptConfig = response.config || nextConfig;
+        state.promptConfigSource = response.source || 'override';
+
+        const debate = state.promptConfig?.debate && typeof state.promptConfig.debate === 'object'
+            ? state.promptConfig.debate
+            : {};
+
+        if (elements.promptInitial) elements.promptInitial.value = debate.header || '';
+        if (elements.promptIntermediary) elements.promptIntermediary.value = debate.intermediary_message || '';
+        if (elements.promptFinal) elements.promptFinal.value = debate.final_message || '';
+        if (elements.promptJsonEditor) elements.promptJsonEditor.value = JSON.stringify(state.promptConfig, null, 2);
+
+        const warning = getIntermediaryPlaceholderWarning(state.promptConfig);
+        setPromptStatus(warning ? `Saved custom prompts.\n${warning}` : 'Saved custom prompts.');
+    });
+}
+
+function savePromptTemplatesJson() {
+    if (!elements.promptJsonEditor) return;
     let parsed;
     try {
-        parsed = JSON.parse(elements.promptEditor.value);
+        parsed = JSON.parse(elements.promptJsonEditor.value);
     } catch (error) {
         setPromptStatus(`Invalid JSON: ${error.message}`, true);
         return;
@@ -244,14 +318,24 @@ function savePromptTemplates() {
             setPromptStatus(`Error: ${response?.error || 'Failed to save prompts.'}`, true);
             return;
         }
-        const json = JSON.stringify(response.config || parsed, null, 2);
-        elements.promptEditor.value = json;
-        setPromptStatus('Saved custom prompts.');
+        state.promptConfig = response.config || parsed;
+        state.promptConfigSource = response.source || 'override';
+
+        const debate = state.promptConfig?.debate && typeof state.promptConfig.debate === 'object'
+            ? state.promptConfig.debate
+            : {};
+
+        if (elements.promptInitial) elements.promptInitial.value = debate.header || '';
+        if (elements.promptIntermediary) elements.promptIntermediary.value = debate.intermediary_message || '';
+        if (elements.promptFinal) elements.promptFinal.value = debate.final_message || '';
+        elements.promptJsonEditor.value = JSON.stringify(state.promptConfig, null, 2);
+
+        const warning = getIntermediaryPlaceholderWarning(state.promptConfig);
+        setPromptStatus(warning ? `Saved custom prompts.\n${warning}` : 'Saved custom prompts.');
     });
 }
 
 function resetPromptTemplates() {
-    if (!elements.promptEditor) return;
     sendMessage({ type: 'RESET_DEBATE_PROMPTS' }, (response) => {
         if (!response || response.ok === false) {
             setPromptStatus(`Error: ${response?.error || 'Failed to reset prompts.'}`, true);

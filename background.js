@@ -1053,6 +1053,12 @@ function getDefaultDebatePromptConfig() {
                 '- Be constructive: critique to make progress and improve the answer.',
                 '- If unsure, say so briefly and propose a way to verify.'
             ].join('\n'),
+            intermediary_message: [
+                'Provide a constructive improvement for iteration {round}/{rounds}:',
+                '- Critique key issues (short bullets)',
+                '- Revised answer'
+            ].join('\n'),
+            final_message: 'Provide your final best answer for the user. Output only the final answer (no critique section).',
             turn1: [
                 '{header}',
                 '',
@@ -1074,9 +1080,7 @@ function getDefaultDebatePromptConfig() {
                 '{first_llm} answer (iteration 1/{rounds}):',
                 '{first_answer}',
                 '',
-                'Provide a constructive improvement for iteration {round}/{rounds}:',
-                '- Critique key issues (short bullets)',
-                '- Revised answer'
+                '{intermediary_message}'
             ].join('\n'),
             turn3plus_first: [
                 'Iteration {round}/{rounds}',
@@ -1084,9 +1088,7 @@ function getDefaultDebatePromptConfig() {
                 `Here is {other_llm}'s answer for iteration {prev_round}/{rounds}:`,
                 '{other_answer}',
                 '',
-                'Provide a constructive improvement for iteration {round}/{rounds}:',
-                '- Critique key issues (short bullets)',
-                '- Revised answer'
+                '{intermediary_message}'
             ].join('\n'),
             turn3plus_second: [
                 'Iteration {round}/{rounds}',
@@ -1094,9 +1096,7 @@ function getDefaultDebatePromptConfig() {
                 `Here is {other_llm}'s answer for iteration {round}/{rounds}:`,
                 '{other_answer}',
                 '',
-                'Provide a constructive improvement for iteration {round}/{rounds}:',
-                '- Critique key issues (short bullets)',
-                '- Revised answer'
+                '{intermediary_message}'
             ].join('\n')
         }
     };
@@ -1119,6 +1119,8 @@ function normalizeDebatePromptConfig(rawConfig) {
                     ? rawDebate.placeholders
                     : defaults.debate.placeholders,
             header: pickString(rawDebate.header, defaults.debate.header),
+            intermediary_message: pickString(rawDebate.intermediary_message, defaults.debate.intermediary_message),
+            final_message: pickString(rawDebate.final_message, defaults.debate.final_message),
             turn1: pickString(rawDebate.turn1, defaults.debate.turn1),
             turn2: pickString(rawDebate.turn2, defaults.debate.turn2),
             turn3plus_first: pickString(rawDebate.turn3plus_first, defaults.debate.turn3plus_first),
@@ -1255,7 +1257,15 @@ async function buildDebatePrompt(session, turnIndex) {
     };
 
     const header = renderPromptTemplate(templates.header, baseVariables);
-    const variables = { ...baseVariables, header };
+    const renderedIntermediary = renderPromptTemplate(templates.intermediary_message, { ...baseVariables, header });
+    const renderedFinal = renderPromptTemplate(templates.final_message, { ...baseVariables, header });
+    const isFinalTurn = turnIndex === totalTurns;
+    const variables = {
+        ...baseVariables,
+        header,
+        intermediary_message: isFinalTurn ? renderedFinal : renderedIntermediary,
+        final_message: renderedFinal
+    };
 
     if (turnIndex === 1) {
         return renderPromptTemplate(templates.turn1, variables).trim();

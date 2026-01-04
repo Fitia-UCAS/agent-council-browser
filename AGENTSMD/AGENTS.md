@@ -89,7 +89,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Supports open/claim profile flows and focus tab actions.
 
 - `debate_prompts.json`
-  - User-editable debate prompt templates (header + turn prompts) used by `buildDebatePrompt(...)`.
+  - User-editable debate prompt templates (initial/header + per-turn scaffolding + intermediary/final messages) used by `buildDebatePrompt(...)`.
   - Loaded by `background.js` via `fetch(chrome.runtime.getURL(...))` with a safe inline fallback.
   - Side panel can override these templates via local storage (see prompt editor below).
 
@@ -290,6 +290,14 @@ Response validation rules:
 
 Debate prompts are configurable via `debate_prompts.json` (schema v1) and rendered with simple `{placeholder}` substitution.
 
+The side panel exposes a simple 3-field editor that maps to:
+
+- `debate.header` (Initial message): used on turns 1–2 (iteration 1 context for both models)
+- `debate.intermediary_message` (Intermediary message): used on non-final improvement turns (by default, turns 2..N-1)
+- `debate.final_message` (Final message): used only on the last turn (`turn == total_turns`)
+
+Implementation detail: the default turn templates include `{intermediary_message}` and the background swaps that variable to `final_message` on the final turn.
+
 Turn selection logic (in `background.js`) uses these templates:
 
 - `debate.turn1`: turnIndex 1 (round 1, first LLM)
@@ -297,7 +305,7 @@ Turn selection logic (in `background.js`) uses these templates:
 - `debate.turn3plus_first`: turns 3+ when the expected LLM is `firstLLM`
 - `debate.turn3plus_second`: turns 3+ when the expected LLM is `secondLLM`
 
-Defaults include explicit role reminders (e.g., “You are {expected_llm}… do not simulate {other_llm}”) to prevent a model from replying as both participants.
+Defaults are intentionally lightweight; additional role reminders can be added via templates if needed.
 
 ## 4) Prompt injection (background.js)
 
@@ -462,7 +470,7 @@ TAB_PROFILES updates:
   - Rebind to current tab (calls CREATE_PROFILE_FROM_ACTIVE_TAB with profileId)
   - Resume session (RESUME_SESSION)
 - Dropdown entries show profile label plus status and in-use hints when applicable.
-- Prompt templates can be edited in the side panel and saved to `mlc_debate_prompts_override_v1` (JSON).
+- Prompt templates can be edited in the side panel (3-field editor; optional advanced raw JSON) and saved to `mlc_debate_prompts_override_v1`.
 
 ## 7) Tab selection logic
 
