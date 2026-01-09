@@ -2,16 +2,19 @@
 
 const state = {
     sessionId: null,
+    activeChatId: null,
+    activeChat: null,
+    chats: [],
     running: false,
     paused: false,
     pausedProvider: null,
     pausedReason: null,
     autoScroll: true,
+    connectionStatus: { chatgpt: false, gemini: false },
+    connecting: { chatgpt: false, gemini: false },
     profiles: [],
     defaults: { chatgpt: null, gemini: null },
-    selectedProfiles: { chatgpt: 'default', gemini: 'default' },
     sessionProfiles: { chatgpt: null, gemini: null },
-    pendingClaim: null,
     promptConfig: null,
     promptConfigSource: null
 };
@@ -25,8 +28,6 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.charCount = document.getElementById('char-count');
     elements.firstLLM = document.getElementById('first-llm');
     elements.iterations = document.getElementById('iterations');
-    elements.chatgptProfile = document.getElementById('chatgpt-profile');
-    elements.geminiProfile = document.getElementById('gemini-profile');
     elements.refreshProfiles = document.getElementById('refresh-profiles');
     elements.autoScroll = document.getElementById('auto-scroll');
     elements.timeline = document.getElementById('timeline');
@@ -34,20 +35,35 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.statusChatGPT = document.getElementById('status-chatgpt');
     elements.statusGemini = document.getElementById('status-gemini');
     elements.sessionStatus = document.getElementById('session-status');
+    elements.sessionBanner = document.getElementById('session-banner');
+    elements.composerHint = document.getElementById('composer-hint');
 
     elements.profileListChatgpt = document.getElementById('profile-list-chatgpt');
     elements.profileListGemini = document.getElementById('profile-list-gemini');
-    elements.useCurrentChatgpt = document.getElementById('use-current-chatgpt');
-    elements.useCurrentGemini = document.getElementById('use-current-gemini');
-    elements.openChatgptTab = document.getElementById('open-chatgpt-tab');
-    elements.openGeminiTab = document.getElementById('open-gemini-tab');
+    elements.connectionLabelChatgpt = document.getElementById('connection-label-chatgpt');
+    elements.connectionLabelGemini = document.getElementById('connection-label-gemini');
 
-    elements.claimWizard = document.getElementById('claim-wizard');
-    elements.claimTitle = document.getElementById('claim-title');
-    elements.claimSubtitle = document.getElementById('claim-subtitle');
-    elements.claimModel = document.getElementById('claim-model');
-    elements.claimTabButton = document.getElementById('claim-tab-button');
-    elements.cancelClaimButton = document.getElementById('cancel-claim-button');
+    elements.chatsButton = document.getElementById('chats-button');
+    elements.newChatButton = document.getElementById('new-chat-button');
+    elements.settingsButton = document.getElementById('settings-button');
+
+    elements.chatsDrawer = document.getElementById('chats-drawer');
+    elements.chatsBackdrop = document.getElementById('chats-backdrop');
+    elements.closeChatsButton = document.getElementById('close-chats');
+    elements.drawerNewChatButton = document.getElementById('drawer-new-chat');
+    elements.chatList = document.getElementById('chat-list');
+
+    elements.settingsDrawer = document.getElementById('settings-drawer');
+    elements.settingsBackdrop = document.getElementById('settings-backdrop');
+    elements.closeSettingsButton = document.getElementById('close-settings');
+    elements.settingsConnectChatgpt = document.getElementById('settings-connect-chatgpt');
+    elements.settingsConnectGemini = document.getElementById('settings-connect-gemini');
+    elements.settingsFocusChatgpt = document.getElementById('settings-focus-chatgpt');
+    elements.settingsFocusGemini = document.getElementById('settings-focus-gemini');
+
+    elements.connectChatgpt = document.getElementById('connect-chatgpt');
+    elements.connectGemini = document.getElementById('connect-gemini');
+    elements.connectBoth = document.getElementById('connect-both');
 
     elements.pausedActions = document.getElementById('paused-actions');
     elements.resumeButton = document.getElementById('resume-session');
@@ -69,6 +85,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     requestProfiles();
     requestConnectionStatus();
+    requestChatsState();
     requestActiveSession();
     loadPromptTemplates();
 });
@@ -109,54 +126,79 @@ function bindEvents() {
         });
     }
 
-    if (elements.chatgptProfile) {
-        elements.chatgptProfile.addEventListener('change', () => {
-            state.selectedProfiles.chatgpt = elements.chatgptProfile.value;
-            updateSendState();
+    if (elements.statusChatGPT) {
+        elements.statusChatGPT.addEventListener('click', () => handleProviderPillClick('chatgpt'));
+    }
+
+    if (elements.statusGemini) {
+        elements.statusGemini.addEventListener('click', () => handleProviderPillClick('gemini'));
+    }
+
+    if (elements.chatsButton) {
+        elements.chatsButton.addEventListener('click', openChatsDrawer);
+    }
+
+    if (elements.newChatButton) {
+        elements.newChatButton.addEventListener('click', createNewChat);
+    }
+
+    if (elements.chatsBackdrop) {
+        elements.chatsBackdrop.addEventListener('click', closeChatsDrawer);
+    }
+
+    if (elements.closeChatsButton) {
+        elements.closeChatsButton.addEventListener('click', closeChatsDrawer);
+    }
+
+    if (elements.drawerNewChatButton) {
+        elements.drawerNewChatButton.addEventListener('click', () => {
+            createNewChat();
+            closeChatsDrawer();
         });
     }
 
-    if (elements.geminiProfile) {
-        elements.geminiProfile.addEventListener('change', () => {
-            state.selectedProfiles.gemini = elements.geminiProfile.value;
-            updateSendState();
-        });
+    if (elements.chatList) {
+        elements.chatList.addEventListener('click', handleChatListClick);
     }
 
-    if (elements.useCurrentChatgpt) {
-        elements.useCurrentChatgpt.addEventListener('click', () => {
-            sendMessage({ type: 'CREATE_PROFILE_FROM_ACTIVE_TAB', provider: 'chatgpt' }, handleActionResponse);
-        });
+    if (elements.settingsButton) {
+        elements.settingsButton.addEventListener('click', openSettingsDrawer);
     }
 
-    if (elements.useCurrentGemini) {
-        elements.useCurrentGemini.addEventListener('click', () => {
-            sendMessage({ type: 'CREATE_PROFILE_FROM_ACTIVE_TAB', provider: 'gemini' }, handleActionResponse);
-        });
+    if (elements.settingsBackdrop) {
+        elements.settingsBackdrop.addEventListener('click', closeSettingsDrawer);
     }
 
-    if (elements.openChatgptTab) {
-        elements.openChatgptTab.addEventListener('click', () => {
-            openProviderTab('chatgpt');
-        });
+    if (elements.closeSettingsButton) {
+        elements.closeSettingsButton.addEventListener('click', closeSettingsDrawer);
     }
 
-    if (elements.openGeminiTab) {
-        elements.openGeminiTab.addEventListener('click', () => {
-            openProviderTab('gemini');
-        });
+    if (elements.connectChatgpt) {
+        elements.connectChatgpt.addEventListener('click', () => connectProvider('chatgpt'));
     }
 
-    if (elements.claimTabButton) {
-        elements.claimTabButton.addEventListener('click', () => {
-            claimPendingTab();
-        });
+    if (elements.connectGemini) {
+        elements.connectGemini.addEventListener('click', () => connectProvider('gemini'));
     }
 
-    if (elements.cancelClaimButton) {
-        elements.cancelClaimButton.addEventListener('click', () => {
-            clearPendingClaim();
-        });
+    if (elements.connectBoth) {
+        elements.connectBoth.addEventListener('click', connectBothProviders);
+    }
+
+    if (elements.settingsConnectChatgpt) {
+        elements.settingsConnectChatgpt.addEventListener('click', () => connectProvider('chatgpt'));
+    }
+
+    if (elements.settingsConnectGemini) {
+        elements.settingsConnectGemini.addEventListener('click', () => connectProvider('gemini'));
+    }
+
+    if (elements.settingsFocusChatgpt) {
+        elements.settingsFocusChatgpt.addEventListener('click', () => focusProvider('chatgpt'));
+    }
+
+    if (elements.settingsFocusGemini) {
+        elements.settingsFocusGemini.addEventListener('click', () => focusProvider('gemini'));
     }
 
     if (elements.profileListChatgpt) {
@@ -354,8 +396,11 @@ function updateSendState() {
     if (!elements.sendButton || !elements.promptInput || !elements.iterations) return;
     const hasPrompt = elements.promptInput.value.trim().length > 0;
     const iterations = parseInt(elements.iterations.value, 10) || 0;
-    const profilesReady = isProfileSelectionValid('chatgpt') && isProfileSelectionValid('gemini');
-    elements.sendButton.disabled = state.running || state.paused || !hasPrompt || iterations <= 0 || !profilesReady;
+    const isLocked = state.running || state.paused;
+    const connected = isFullyConnected();
+    elements.sendButton.disabled = isLocked || !hasPrompt || iterations <= 0 || !connected;
+    updateComposerHint();
+    updateEmptyState();
 }
 
 function setSessionState({ running, paused }) {
@@ -365,9 +410,9 @@ function setSessionState({ running, paused }) {
 
     if (elements.sendButton) {
         const hasPrompt = elements.promptInput?.value.trim().length > 0;
-        const label = running ? 'Running...' : (paused ? 'Paused' : 'Start debate');
+        const label = running ? 'Running…' : (paused ? 'Paused' : 'Run');
         elements.sendButton.textContent = label;
-        elements.sendButton.disabled = locked || !hasPrompt || !isProfileSelectionValid('chatgpt') || !isProfileSelectionValid('gemini');
+        elements.sendButton.disabled = locked || !hasPrompt || !isFullyConnected();
     }
     if (elements.stopButton) {
         elements.stopButton.disabled = !locked;
@@ -375,15 +420,21 @@ function setSessionState({ running, paused }) {
 
     if (elements.firstLLM) elements.firstLLM.disabled = locked;
     if (elements.iterations) elements.iterations.disabled = locked;
-    if (elements.chatgptProfile) elements.chatgptProfile.disabled = locked;
-    if (elements.geminiProfile) elements.geminiProfile.disabled = locked;
     if (elements.refreshProfiles) elements.refreshProfiles.disabled = locked;
+    if (elements.newChatButton) elements.newChatButton.disabled = locked;
+    if (elements.drawerNewChatButton) elements.drawerNewChatButton.disabled = locked;
     updatePausedActions();
+    updateComposerHint();
 }
 
 function setSessionStatus(text) {
     if (elements.sessionStatus) {
         elements.sessionStatus.textContent = text;
+    }
+    if (elements.sessionBanner) {
+        const normalized = String(text || '').trim();
+        const show = state.running || state.paused || (normalized && normalized.toLowerCase() !== 'idle');
+        elements.sessionBanner.hidden = !show;
     }
 }
 
@@ -399,6 +450,319 @@ function requestActiveSession() {
     sendMessage({ type: 'GET_ACTIVE_SESSION' });
 }
 
+function requestChatsState() {
+    sendMessage({ type: 'GET_CHATS_STATE' }, (response) => {
+        if (!response || response.ok === false) {
+            setSessionStatus(`Error: ${response?.error || 'Failed to load chats.'}`);
+            return;
+        }
+        handleChatsState(response);
+    });
+}
+
+function handleChatsState(payload) {
+    const chats = Array.isArray(payload.chats) ? payload.chats : [];
+    state.chats = chats;
+    const nextActiveId = typeof payload.activeChatId === 'string' ? payload.activeChatId : state.activeChatId;
+    const shouldLoad = nextActiveId && (!state.activeChat || state.activeChat.chatId !== nextActiveId);
+    state.activeChatId = nextActiveId;
+    renderChatList();
+    if (shouldLoad) {
+        loadChat(nextActiveId);
+    }
+}
+
+function createNewChat() {
+    if (state.running || state.paused) {
+        setSessionStatus('Stop the current debate to start a new chat.');
+        return;
+    }
+    sendMessage({ type: 'CREATE_CHAT' }, (response) => {
+        if (!response || response.ok === false) {
+            handleActionResponse(response || { ok: false, error: 'Failed to create chat.' });
+            return;
+        }
+        if (response.activeChatId) {
+            state.activeChatId = response.activeChatId;
+            loadChat(response.activeChatId);
+        } else if (response.chat?.chatId) {
+            state.activeChatId = response.chat.chatId;
+            loadChat(response.chat.chatId);
+        }
+    });
+}
+
+function loadChat(chatId) {
+    if (!chatId) return;
+    sendMessage({ type: 'GET_CHAT', chatId }, (response) => {
+        if (!response || response.ok === false) {
+            handleActionResponse(response || { ok: false, error: 'Failed to load chat.' });
+            return;
+        }
+        state.activeChat = response.chat || null;
+        state.activeChatId = response.chat?.chatId || chatId;
+        clearTranscript();
+        if (Array.isArray(response.chat?.messages) && response.chat.messages.length) {
+            response.chat.messages.forEach(addMessage);
+        } else {
+            updateEmptyState();
+        }
+        renderChatList();
+        updateSendState();
+    });
+}
+
+function handleChatListClick(event) {
+    const item = event.target.closest('.chat-item');
+    if (!item || !item.dataset.chatId) return;
+    const chatId = item.dataset.chatId;
+    if (chatId === state.activeChatId) {
+        closeChatsDrawer();
+        return;
+    }
+    if (state.running || state.paused) {
+        setSessionStatus('Stop the current debate to switch chats.');
+        closeChatsDrawer();
+        return;
+    }
+    sendMessage({ type: 'SET_ACTIVE_CHAT', chatId }, (response) => {
+        if (!response || response.ok === false) {
+            handleActionResponse(response || { ok: false, error: 'Failed to switch chat.' });
+            return;
+        }
+        state.activeChatId = response.activeChatId || chatId;
+        loadChat(state.activeChatId);
+        closeChatsDrawer();
+    });
+}
+
+function renderChatList() {
+    if (!elements.chatList) return;
+    elements.chatList.innerHTML = '';
+    if (!state.chats.length) {
+        const empty = document.createElement('div');
+        empty.className = 'profile-empty';
+        empty.textContent = 'No chats yet.';
+        elements.chatList.appendChild(empty);
+        return;
+    }
+    state.chats.forEach((chat) => {
+        const item = document.createElement('div');
+        item.className = `chat-item${chat.chatId === state.activeChatId ? ' is-active' : ''}`;
+        item.dataset.chatId = chat.chatId;
+
+        const title = document.createElement('div');
+        title.className = 'chat-item-title';
+        title.textContent = chat.title || 'New chat';
+
+        const meta = document.createElement('div');
+        meta.className = 'chat-item-meta';
+        const updatedAt = Number.isFinite(chat.updatedAt) ? chat.updatedAt : null;
+        const count = Number.isFinite(chat.messageCount) ? chat.messageCount : null;
+        const parts = [];
+        if (count !== null) parts.push(`${count} msg${count === 1 ? '' : 's'}`);
+        if (updatedAt) parts.push(formatRelativeTime(updatedAt));
+        meta.textContent = parts.join(' • ');
+
+        item.appendChild(title);
+        if (meta.textContent) item.appendChild(meta);
+        elements.chatList.appendChild(item);
+    });
+}
+
+function formatRelativeTime(timestampMs) {
+    const delta = Math.max(0, Date.now() - timestampMs);
+    const minute = 60 * 1000;
+    const hour = 60 * minute;
+    const day = 24 * hour;
+    if (delta < minute) return 'just now';
+    if (delta < hour) return `${Math.floor(delta / minute)}m ago`;
+    if (delta < day) return `${Math.floor(delta / hour)}h ago`;
+    return `${Math.floor(delta / day)}d ago`;
+}
+
+function openChatsDrawer() {
+    if (!elements.chatsDrawer || !elements.chatsBackdrop) return;
+    elements.chatsBackdrop.hidden = false;
+    elements.chatsDrawer.classList.add('is-open');
+    elements.chatsDrawer.setAttribute('aria-hidden', 'false');
+    renderChatList();
+}
+
+function closeChatsDrawer() {
+    if (!elements.chatsDrawer || !elements.chatsBackdrop) return;
+    elements.chatsDrawer.classList.remove('is-open');
+    elements.chatsDrawer.setAttribute('aria-hidden', 'true');
+    elements.chatsBackdrop.hidden = true;
+}
+
+function openSettingsDrawer() {
+    if (!elements.settingsDrawer || !elements.settingsBackdrop) return;
+    elements.settingsBackdrop.hidden = false;
+    elements.settingsDrawer.classList.add('is-open');
+    elements.settingsDrawer.setAttribute('aria-hidden', 'false');
+}
+
+function closeSettingsDrawer() {
+    if (!elements.settingsDrawer || !elements.settingsBackdrop) return;
+    elements.settingsDrawer.classList.remove('is-open');
+    elements.settingsDrawer.setAttribute('aria-hidden', 'true');
+    elements.settingsBackdrop.hidden = true;
+}
+
+function getDefaultProfile(provider) {
+    const profileId = state.defaults?.[provider] || null;
+    return profileId ? getProfileById(profileId) : null;
+}
+
+function focusProvider(provider) {
+    const profile = getDefaultProfile(provider);
+    if (profile?.tabId) {
+        sendMessage({ type: 'FOCUS_TAB', tabId: profile.tabId }, handleActionResponse);
+        return;
+    }
+    connectProvider(provider);
+}
+
+function handleProviderPillClick(provider) {
+    const ready = Boolean(state.connectionStatus?.[provider]);
+    const profile = getDefaultProfile(provider);
+    if (ready && profile?.tabId) {
+        focusProvider(provider);
+        return;
+    }
+    connectProvider(provider);
+}
+
+function connectProvider(provider) {
+    if (!provider) return;
+    if (state.connecting[provider]) return;
+    state.connecting[provider] = true;
+    updateProviderUi();
+    sendMessage({ type: 'CONNECT_PROVIDER', provider }, (response) => {
+        state.connecting[provider] = false;
+        updateProviderUi();
+        if (!response || response.ok === false) {
+            handleActionResponse(response || { ok: false, error: 'Failed to connect.' });
+            return;
+        }
+        requestProfiles();
+        requestConnectionStatus();
+        window.setTimeout(requestConnectionStatus, 2500);
+        window.setTimeout(requestConnectionStatus, 8000);
+    });
+}
+
+async function connectBothProviders() {
+    connectProvider('chatgpt');
+    connectProvider('gemini');
+}
+
+function updateProviderUi() {
+    const providers = [
+        ['chatgpt', elements.statusChatGPT, elements.connectionLabelChatgpt],
+        ['gemini', elements.statusGemini, elements.connectionLabelGemini]
+    ];
+
+    providers.forEach(([provider, pill, label]) => {
+        if (!pill) return;
+        const ready = Boolean(state.connectionStatus?.[provider]);
+        const connecting = Boolean(state.connecting?.[provider]);
+        const profile = getDefaultProfile(provider);
+        const modelHint = profile?.modelHint ? ` • ${profile.modelHint}` : '';
+
+        pill.classList.toggle('is-ready', ready);
+        pill.classList.toggle('is-offline', !ready && !connecting);
+        pill.classList.toggle('is-connecting', connecting);
+
+        const baseLabel = formatProviderLabel(provider);
+        let statusText = 'offline';
+        let labelText = 'Not connected';
+
+        if (connecting) {
+            statusText = 'connecting…';
+            labelText = 'Connecting…';
+        } else if (ready) {
+            statusText = 'ready';
+            labelText = `Connected${modelHint}`;
+        } else if (profile?.status === 'wrong_host') {
+            statusText = 'wrong host';
+            labelText = 'Wrong host';
+        } else if (profile?.status === 'unknown') {
+            statusText = 'loading…';
+            labelText = 'Loading…';
+        } else if (profile?.status === 'ok') {
+            statusText = 'waiting…';
+            labelText = 'Waiting…';
+        }
+        pill.textContent = `${baseLabel}: ${statusText}`;
+
+        if (label) {
+            label.textContent = labelText;
+        }
+    });
+
+    if (elements.settingsFocusChatgpt) {
+        elements.settingsFocusChatgpt.disabled = !getDefaultProfile('chatgpt')?.tabId;
+    }
+    if (elements.settingsFocusGemini) {
+        elements.settingsFocusGemini.disabled = !getDefaultProfile('gemini')?.tabId;
+    }
+}
+
+function updateComposerHint() {
+    if (!elements.composerHint || !elements.promptInput) return;
+
+    if (state.running || state.paused) {
+        elements.composerHint.hidden = true;
+        return;
+    }
+
+    const connected = isFullyConnected();
+    const hasPrompt = elements.promptInput.value.trim().length > 0;
+    const iterations = parseInt(elements.iterations?.value, 10) || 0;
+
+    let hint = '';
+    if (!connected) {
+        hint = 'Connect ChatGPT and Gemini to start.';
+    } else if (!hasPrompt) {
+        hint = '';
+    } else if (iterations <= 0) {
+        hint = 'Iterations must be at least 1.';
+    }
+
+    elements.composerHint.textContent = hint;
+    elements.composerHint.hidden = !hint;
+    elements.promptInput.placeholder = connected
+        ? 'Ask a question for ChatGPT and Gemini...'
+        : 'Connect ChatGPT + Gemini to start...';
+}
+
+function updateEmptyState() {
+    if (!elements.emptyState || !elements.timeline) return;
+    const hasMessages = Boolean(state.activeChat && Array.isArray(state.activeChat.messages) && state.activeChat.messages.length > 0);
+    if (hasMessages) return;
+
+    if (!elements.timeline.contains(elements.emptyState)) {
+        elements.timeline.appendChild(elements.emptyState);
+    }
+
+    const connected = isFullyConnected();
+    const titleEl = elements.emptyState.querySelector('.empty-title');
+    const subtitleEl = elements.emptyState.querySelector('.empty-subtitle');
+    const actionsEl = elements.emptyState.querySelector('.empty-actions');
+
+    if (titleEl) titleEl.textContent = connected ? 'New chat' : 'Connect to start';
+    if (subtitleEl) {
+        subtitleEl.textContent = connected
+            ? 'Write a prompt below to run your first debate.'
+            : 'Open ChatGPT and Gemini once. Then run debates from this panel.';
+    }
+    if (actionsEl) {
+        actionsEl.hidden = connected;
+    }
+}
+
 function startSession() {
     if (state.running || state.paused) return;
     if (!elements.promptInput) return;
@@ -409,14 +773,12 @@ function startSession() {
     const rounds = parseInt(elements.iterations?.value, 10) || 0;
     if (rounds <= 0) return;
 
-    if (!isProfileSelectionValid('chatgpt') || !isProfileSelectionValid('gemini')) {
-        setSessionStatus('Select valid profiles for ChatGPT and Gemini.');
+    if (!isFullyConnected()) {
+        setSessionStatus('Connect ChatGPT and Gemini to start.');
         return;
     }
 
     const firstLLM = elements.firstLLM?.value || 'chatgpt';
-    const chatgptSelection = elements.chatgptProfile?.value || 'default';
-    const geminiSelection = elements.geminiProfile?.value || 'default';
 
     setSessionState({ running: true, paused: false });
     setSessionStatus('Starting session...');
@@ -426,11 +788,12 @@ function startSession() {
         prompt,
         firstLLM,
         rounds,
-        profileIds: {
-            chatgpt: chatgptSelection,
-            gemini: geminiSelection
-        }
+        chatId: state.activeChatId
     });
+
+    elements.promptInput.value = '';
+    updateCharCount();
+    updateSendState();
 }
 
 function stopSession() {
@@ -448,45 +811,8 @@ function resumeSession() {
     sendMessage({ type: 'RESUME_SESSION' }, handleActionResponse);
 }
 
-function openProviderTab(provider) {
-    sendMessage({ type: 'OPEN_PROVIDER_TAB', provider, focus: true }, (response) => {
-        if (!response || response.ok === false) {
-            handleActionResponse(response || { ok: false, error: 'Failed to open tab.' });
-            return;
-        }
-        state.pendingClaim = {
-            provider: response.provider,
-            tabId: response.tabId,
-            windowId: response.windowId,
-            modelLabel: ''
-        };
-        renderClaimWizard();
-    });
-}
-
-function claimPendingTab() {
-    if (!state.pendingClaim) return;
-    const providerLabel = formatProviderLabel(state.pendingClaim.provider);
-    const modelLabel = truncateInlineText(state.pendingClaim.modelLabel, 48);
-    const label = modelLabel
-        ? `${providerLabel} - ${modelLabel}`
-        : `${providerLabel} profile`;
-    sendMessage({
-        type: 'CLAIM_TAB_AS_PROFILE',
-        provider: state.pendingClaim.provider,
-        tabId: state.pendingClaim.tabId,
-        label
-    }, (response) => {
-        handleActionResponse(response);
-        if (response?.ok) {
-            clearPendingClaim();
-        }
-    });
-}
-
-function clearPendingClaim() {
-    state.pendingClaim = null;
-    renderClaimWizard();
+function isFullyConnected() {
+    return Boolean(state.connectionStatus.chatgpt && state.connectionStatus.gemini);
 }
 
 function handleBackgroundMessage(message) {
@@ -494,11 +820,11 @@ function handleBackgroundMessage(message) {
         case 'TAB_PROFILES':
             handleProfileList(message);
             break;
-        case 'PROVIDER_MODEL_INFO':
-            handleModelInfo(message);
-            break;
         case 'CONNECTION_STATUS':
             handleConnectionStatus(message);
+            break;
+        case 'CHATS_STATE':
+            handleChatsState(message);
             break;
         case 'ACTIVE_SESSION':
             hydrateSession(message.session);
@@ -508,13 +834,29 @@ function handleBackgroundMessage(message) {
             state.sessionProfiles = message.profileIds || state.sessionProfiles;
             setSessionState({ running: true, paused: false });
             setSessionStatus(`Running round 1 of ${message.rounds}`);
-            clearTranscript();
+            if (message.chatId && message.chatId !== state.activeChatId) {
+                loadChat(message.chatId);
+            }
             break;
         case 'UI_SESSION_PROGRESS':
             handleProgress(message);
             break;
         case 'UI_MESSAGE_ADD':
-            addMessage(message);
+            if (!message.chatId || message.chatId === state.activeChatId) {
+                if (state.activeChat && (!message.chatId || message.chatId === state.activeChat.chatId)) {
+                    if (!Array.isArray(state.activeChat.messages)) state.activeChat.messages = [];
+                    state.activeChat.messages.push({
+                        role: message.role,
+                        content: message.content,
+                        contentHtml: message.contentHtml,
+                        timestamp: message.timestamp,
+                        sessionId: message.sessionId,
+                        turnIndex: message.turnIndex,
+                        roundIndex: message.roundIndex
+                    });
+                }
+                addMessage(message);
+            }
             break;
         case 'UI_SESSION_PAUSED':
             handleSessionPaused(message);
@@ -539,50 +881,9 @@ function handleBackgroundMessage(message) {
 function handleProfileList(message) {
     state.profiles = Array.isArray(message.profiles) ? message.profiles : [];
     state.defaults = message.defaults || { chatgpt: null, gemini: null };
-    renderProfileSelect(elements.chatgptProfile, 'chatgpt');
-    renderProfileSelect(elements.geminiProfile, 'gemini');
     renderProfileLists();
+    updateProviderUi();
     updateSendState();
-}
-
-function handleModelInfo(message) {
-    if (!message || !state.pendingClaim) return;
-    if (state.pendingClaim.tabId !== message.tabId) return;
-    state.pendingClaim.modelLabel = message.modelLabel || '';
-    renderClaimWizard();
-}
-
-function renderProfileSelect(selectEl, provider) {
-    if (!selectEl) return;
-    selectEl.innerHTML = '';
-
-    const defaultProfile = getProfileById(state.defaults[provider]);
-    const defaultOption = document.createElement('option');
-    defaultOption.value = 'default';
-    defaultOption.textContent = defaultProfile
-        ? `Default (${defaultProfile.label})`
-        : 'Default (not set)';
-    selectEl.appendChild(defaultOption);
-
-    const profiles = getProfilesForProvider(provider);
-    if (profiles.length === 0) {
-        const emptyOption = document.createElement('option');
-        emptyOption.value = 'none';
-        emptyOption.textContent = `No ${formatProviderLabel(provider)} profiles`;
-        selectEl.appendChild(emptyOption);
-    } else {
-        profiles.forEach((profile) => {
-            const option = document.createElement('option');
-            option.value = profile.profileId;
-            option.textContent = formatProfileOptionLabel(profile);
-            selectEl.appendChild(option);
-        });
-    }
-
-    const selected = state.selectedProfiles[provider] || 'default';
-    const hasSelected = Array.from(selectEl.options).some(option => option.value === selected);
-    selectEl.value = hasSelected ? selected : 'default';
-    state.selectedProfiles[provider] = selectEl.value;
 }
 
 function renderProfileLists() {
@@ -744,30 +1045,6 @@ function handleProfileListClick(event) {
     }
 }
 
-function renderClaimWizard() {
-    if (!elements.claimWizard) return;
-    if (!state.pendingClaim) {
-        elements.claimWizard.hidden = true;
-        return;
-    }
-    const providerLabel = formatProviderLabel(state.pendingClaim.provider);
-    if (elements.claimTitle) {
-        elements.claimTitle.textContent = `Claim ${providerLabel} tab`;
-    }
-    if (elements.claimSubtitle) {
-        elements.claimSubtitle.textContent = `We opened ${providerLabel}. Select the model there, then claim it.`;
-    }
-    if (elements.claimModel) {
-        const full = normalizeInlineText(state.pendingClaim.modelLabel);
-        const display = truncateInlineText(full, 64);
-        elements.claimModel.textContent = full
-            ? `Detected model: ${display} (best effort)`
-            : 'Detected model: not available yet.';
-        elements.claimModel.title = full ? `Detected model: ${full}` : '';
-    }
-    elements.claimWizard.hidden = false;
-}
-
 function updatePausedActions() {
     if (!elements.pausedActions) return;
     elements.pausedActions.hidden = !state.paused;
@@ -794,23 +1071,22 @@ function rebindPausedProvider() {
 
 function handleConnectionStatus(message) {
     const { gemini, chatgpt } = message.status || {};
-    if (elements.statusChatGPT) {
-        elements.statusChatGPT.textContent = `ChatGPT: ${chatgpt ? 'ready' : 'offline'}`;
-        elements.statusChatGPT.style.borderColor = chatgpt ? 'rgba(245, 158, 11, 0.5)' : 'rgba(148, 163, 184, 0.3)';
-    }
-    if (elements.statusGemini) {
-        elements.statusGemini.textContent = `Gemini: ${gemini ? 'ready' : 'offline'}`;
-        elements.statusGemini.style.borderColor = gemini ? 'rgba(34, 197, 94, 0.5)' : 'rgba(148, 163, 184, 0.3)';
-    }
+    state.connectionStatus = {
+        chatgpt: Boolean(chatgpt),
+        gemini: Boolean(gemini)
+    };
+    updateProviderUi();
+    updateSendState();
 }
 
 function hydrateSession(session) {
-    if (!session) {
+    if (!session || (!session.isActive && !session.isPaused)) {
         setSessionState({ running: false, paused: false });
         state.sessionId = null;
         state.sessionProfiles = { chatgpt: null, gemini: null };
         state.pausedProvider = null;
         state.pausedReason = null;
+        setSessionStatus('Idle');
         return;
     }
 
@@ -828,13 +1104,8 @@ function hydrateSession(session) {
         setSessionStatus(session.isActive ? `Resumed round ${session.roundIndex || 1} of ${session.rounds}` : 'Idle');
     }
 
-    clearTranscript();
-    if (Array.isArray(session.messages)) {
-        const ordered = [...session.messages].sort((a, b) => {
-            if (a.turnIndex && b.turnIndex) return a.turnIndex - b.turnIndex;
-            return (a.timestamp || 0) - (b.timestamp || 0);
-        });
-        ordered.forEach(addMessage);
+    if (session.chatId && session.chatId !== state.activeChatId) {
+        loadChat(session.chatId);
     }
 }
 
@@ -1154,14 +1425,6 @@ function normalizeInlineText(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
-function truncateInlineText(value, maxLen) {
-    const normalized = normalizeInlineText(value);
-    if (!normalized) return '';
-    if (!Number.isFinite(maxLen) || maxLen <= 0) return normalized;
-    if (normalized.length <= maxLen) return normalized;
-    return `${normalized.slice(0, Math.max(0, maxLen - 1))}…`;
-}
-
 function getProfilesForProvider(provider) {
     return state.profiles.filter(profile => profile.provider === provider);
 }
@@ -1169,27 +1432,6 @@ function getProfilesForProvider(provider) {
 function getProfileById(profileId) {
     if (!profileId) return null;
     return state.profiles.find(profile => profile.profileId === profileId) || null;
-}
-
-function resolveSelectedProfileId(provider) {
-    const selection = state.selectedProfiles[provider] || 'default';
-    if (selection === 'default') {
-        return state.defaults?.[provider] || null;
-    }
-    return selection;
-}
-
-function isProfileSelectionValid(provider) {
-    const profileId = resolveSelectedProfileId(provider);
-    if (!profileId) return false;
-    const profile = getProfileById(profileId);
-    return Boolean(profile && profile.status === 'ok' && profile.tabId);
-}
-
-function formatProfileOptionLabel(profile) {
-    const statusSuffix = profile.status && profile.status !== 'ok' ? ` (${formatStatusLabel(profile.status)})` : '';
-    const inUse = profile.inUseBySessionId ? ' [in use]' : '';
-    return `${profile.label || 'Untitled'}${statusSuffix}${inUse}`;
 }
 
 function formatProfileTabLabel(profile) {

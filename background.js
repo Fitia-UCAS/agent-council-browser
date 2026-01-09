@@ -68,6 +68,188 @@ function generatePromptId() {
 const ACTIVE_SESSION_KEY = 'mlc_active_session_v2';
 const PREFERRED_TABS_KEY = 'mlc_preferred_tabs';
 const TAB_PROFILES_KEY = 'mlc_tab_profiles_v1';
+const CHATS_KEY = 'mlc_chats_v1';
+
+let tabProfilesOpChain = Promise.resolve();
+
+function withTabProfilesLock(operation) {
+    const run = async () => operation();
+    const next = tabProfilesOpChain.then(run, run);
+    tabProfilesOpChain = next.catch(() => {});
+    return next;
+}
+
+const defaultChatsState = {
+    schemaVersion: 1,
+    activeChatId: null,
+    chats: []
+};
+
+function generateChatId() {
+    return 'chat_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+function normalizeChatTitle(title) {
+    const value = String(title || '').replace(/\s+/g, ' ').trim();
+    return value;
+}
+
+function getChatTitleFromPrompt(prompt) {
+    const cleaned = normalizeInlineText(prompt);
+    if (!cleaned) return '';
+    return cleaned.length > 48 ? `${cleaned.slice(0, 48).trim()}…` : cleaned;
+}
+
+function toChatSummary(chat) {
+    return {
+        chatId: chat.chatId,
+        title: chat.title,
+        createdAt: chat.createdAt,
+        updatedAt: chat.updatedAt,
+        messageCount: Array.isArray(chat.messages) ? chat.messages.length : 0
+    };
+}
+
+async function loadChatsState({ ensureActive = true } = {}) {
+    const stored = await chrome.storage.local.get(CHATS_KEY);
+    const raw = stored?.[CHATS_KEY];
+    const state = raw && typeof raw === 'object'
+        ? {
+            schemaVersion: 1,
+            activeChatId: typeof raw.activeChatId === 'string' ? raw.activeChatId : null,
+            chats: Array.isArray(raw.chats) ? raw.chats : []
+        }
+        : { ...defaultChatsState };
+
+    if (!ensureActive) return state;
+
+    const hasActive = state.activeChatId && state.chats.some(chat => chat.chatId === state.activeChatId);
+    if (state.chats.length === 0 || !hasActive) {
+        const now = Date.now();
+        const chatId = generateChatId();
+        state.chats.unshift({
+            chatId,
+            title: 'New chat',
+            createdAt: now,
+            updatedAt: now,
+            messages: []
+        });
+        state.activeChatId = chatId;
+        await chrome.storage.local.set({ [CHATS_KEY]: state });
+    }
+
+    return state;
+}
+
+async function saveChatsState(state) {
+    await chrome.storage.local.set({ [CHATS_KEY]: state });
+}
+
+async function notifyChatsState(stateOverride = null) {
+    const state = stateOverride || await loadChatsState();
+    sendMessageToPopup({
+        type: 'CHATS_STATE',
+        activeChatId: state.activeChatId,
+        chats: state.chats.map(toChatSummary)
+    });
+}
+
+function findChatById(state, chatId) {
+    return state.chats.find(chat => chat.chatId === chatId) || null;
+}
+
+async function createChat({ makeActive = true } = {}) {
+    const state = await loadChatsState({ ensureActive: false });
+    const now = Date.now();
+    const chat = {
+        chatId: generateChatId(),
+        title: 'New chat',
+        createdAt: now,
+        updatedAt: now,
+        messages: []
+    };
+    state.chats.unshift(chat);
+    if (makeActive) {
+        state.activeChatId = chat.chatId;
+    } else if (!state.activeChatId) {
+        state.activeChatId = chat.chatId;
+    }
+    await saveChatsState(state);
+    await notifyChatsState(state);
+    return { ok: true, chat: chat, state };
+}
+
+async function setActiveChat(chatId) {
+    const state = await loadChatsState({ ensureActive: false });
+    const chat = chatId ? findChatById(state, chatId) : null;
+    if (!chat) {
+        return { ok: false, error: 'Chat not found.' };
+    }
+    state.activeChatId = chat.chatId;
+    await saveChatsState(state);
+    await notifyChatsState(state);
+    return { ok: true, chat, state };
+}
+
+async function renameChat(chatId, title) {
+    const state = await loadChatsState({ ensureActive: false });
+    const chat = findChatById(state, chatId);
+    if (!chat) return { ok: false, error: 'Chat not found.' };
+    const nextTitle = normalizeChatTitle(title);
+    if (!nextTitle) return { ok: false, error: 'Title is empty.' };
+    chat.title = nextTitle;
+    chat.updatedAt = Date.now();
+    await saveChatsState(state);
+    await notifyChatsState(state);
+    return { ok: true, chat };
+}
+
+async function deleteChat(chatId) {
+    const state = await loadChatsState({ ensureActive: false });
+    const exists = state.chats.some(chat => chat.chatId === chatId);
+    if (!exists) return { ok: false, error: 'Chat not found.' };
+    state.chats = state.chats.filter(chat => chat.chatId !== chatId);
+    if (state.activeChatId === chatId) {
+        state.activeChatId = state.chats[0]?.chatId || null;
+    }
+    await saveChatsState(state);
+    await notifyChatsState(state);
+    return { ok: true, state };
+}
+
+async function appendChatMessage(chatId, message) {
+    if (!chatId || !message) return { ok: false, error: 'Missing chatId or message.' };
+    const state = await loadChatsState({ ensureActive: false });
+    const chat = findChatById(state, chatId);
+    if (!chat) return { ok: false, error: 'Chat not found.' };
+
+    const entry = {
+        role: message.role || 'assistant',
+        content: String(message.content || ''),
+        timestamp: Number.isFinite(message.timestamp) ? message.timestamp : Date.now(),
+        sessionId: message.sessionId || null,
+        turnIndex: Number.isFinite(message.turnIndex) ? message.turnIndex : null,
+        roundIndex: Number.isFinite(message.roundIndex) ? message.roundIndex : null
+    };
+    if (typeof message.contentHtml === 'string' && message.contentHtml.trim()) {
+        entry.contentHtml = message.contentHtml;
+    }
+    if (!entry.content.trim()) return { ok: false, error: 'Empty message content.' };
+
+    if (!Array.isArray(chat.messages)) chat.messages = [];
+    chat.messages.push(entry);
+    chat.updatedAt = Date.now();
+    if ((chat.title === 'New chat' || !chat.title) && entry.role === 'user') {
+        const derived = getChatTitleFromPrompt(entry.content);
+        if (derived) {
+            chat.title = derived;
+        }
+    }
+
+    await saveChatsState(state);
+    await notifyChatsState(state);
+    return { ok: true };
+}
 
 const defaultDebateState = {
     isActive: false,
@@ -75,6 +257,7 @@ const defaultDebateState = {
     pausedReason: null,
     pausedProvider: null,
     pausedAt: 0,
+    chatId: null,
     sessionId: null,
     rounds: 0,
     totalTurns: 0,
@@ -147,6 +330,13 @@ async function setPreferredTabs(payload = {}) {
 
 function normalizeProvider(provider) {
     return provider === 'gemini' ? 'gemini' : 'chatgpt';
+}
+
+function getTabUrlCandidate(tab) {
+    if (!tab) return '';
+    if (typeof tab.url === 'string' && tab.url) return tab.url;
+    if (typeof tab.pendingUrl === 'string' && tab.pendingUrl) return tab.pendingUrl;
+    return '';
 }
 
 function getEmptyProfilesState() {
@@ -246,11 +436,7 @@ async function loadTabProfiles() {
                     gemini: next.defaults.gemini || null
                 }
             };
-            const sanitized = sanitizeProfilesState(state);
-            if (sanitized.changed) {
-                await chrome.storage.local.set({ [TAB_PROFILES_KEY]: sanitized.state });
-            }
-            return sanitized.state;
+            return sanitizeProfilesState(state).state;
         }
     }
     return getEmptyProfilesState();
@@ -308,13 +494,13 @@ async function validateProfile(profile) {
     if (!profile || !profile.tabId) {
         return { ...profile, status: 'offline', updatedAt };
     }
-    try {
-        const tab = await chrome.tabs.get(profile.tabId);
-        const url = tab?.url || '';
-        const status = url
-            ? (isExpectedHost(profile.provider, url) ? 'ok' : 'wrong_host')
-            : 'unknown';
-        return {
+	try {
+	    const tab = await chrome.tabs.get(profile.tabId);
+	    const url = getTabUrlCandidate(tab);
+	    const status = url
+	        ? (isExpectedHost(profile.provider, url) ? 'ok' : 'wrong_host')
+	        : 'unknown';
+	    return {
             ...profile,
             tabId: tab.id,
             windowId: tab.windowId,
@@ -335,13 +521,19 @@ async function validateProfile(profile) {
 }
 
 async function refreshAllProfiles({ persist = true } = {}) {
-    const state = await loadTabProfiles();
-    const updatedProfiles = await Promise.all(state.profiles.map(profile => validateProfile(profile)));
-    const next = sanitizeProfilesState({ ...state, profiles: updatedProfiles }).state;
-    if (persist) {
-        await saveTabProfiles(next);
+    if (!persist) {
+        const state = await loadTabProfiles();
+        const updatedProfiles = await Promise.all(state.profiles.map(profile => validateProfile(profile)));
+        return sanitizeProfilesState({ ...state, profiles: updatedProfiles }).state;
     }
-    return next;
+
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        const updatedProfiles = await Promise.all(state.profiles.map(profile => validateProfile(profile)));
+        const next = sanitizeProfilesState({ ...state, profiles: updatedProfiles }).state;
+        await saveTabProfiles(next);
+        return next;
+    });
 }
 
 async function notifyTabProfiles(stateOverride = null) {
@@ -368,104 +560,113 @@ async function pingTab(tabId, provider) {
 }
 
 async function migratePreferredTabsToProfiles() {
-    const existing = await chrome.storage.local.get(TAB_PROFILES_KEY);
-    if (existing && existing[TAB_PROFILES_KEY]) return;
-    const preferred = await getPreferredTabs();
-    if (!preferred.chatgpt && !preferred.gemini) return;
+    return withTabProfilesLock(async () => {
+        const existing = await chrome.storage.local.get(TAB_PROFILES_KEY);
+        if (existing && existing[TAB_PROFILES_KEY]) return;
+        const preferred = await getPreferredTabs();
+        if (!preferred.chatgpt && !preferred.gemini) return;
 
-    const state = getEmptyProfilesState();
-    for (const provider of ['chatgpt', 'gemini']) {
-        const tabId = preferred[provider];
-        if (!Number.isFinite(tabId)) continue;
-        const profileId = generateProfileId();
-        let profile = {
-            profileId,
-            provider,
-            tabId,
-            windowId: null,
-            label: provider === 'gemini' ? 'Gemini profile' : 'ChatGPT profile',
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            lastSeenAt: 0,
-            status: 'unknown',
-            modelHint: '',
-            lastKnownTitle: '',
-            lastKnownUrl: '',
-            inUseBySessionId: null
-        };
-        profile = await validateProfile(profile);
-        state.profiles.push(profile);
-        state.defaults[provider] = profileId;
-    }
+        const state = getEmptyProfilesState();
+        for (const provider of ['chatgpt', 'gemini']) {
+            const tabId = preferred[provider];
+            if (!Number.isFinite(tabId)) continue;
+            const profileId = generateProfileId();
+            let profile = {
+                profileId,
+                provider,
+                tabId,
+                windowId: null,
+                label: provider === 'gemini' ? 'Gemini profile' : 'ChatGPT profile',
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+                lastSeenAt: 0,
+                status: 'unknown',
+                modelHint: '',
+                lastKnownTitle: '',
+                lastKnownUrl: '',
+                inUseBySessionId: null
+            };
+            profile = await validateProfile(profile);
+            state.profiles.push(profile);
+            state.defaults[provider] = profileId;
+        }
 
-    await saveTabProfiles(state);
-    await notifyTabProfiles(state);
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+    });
 }
 
-async function claimTabAsProfile({ provider, tabId, label, profileId }) {
-    const normalizedProvider = normalizeProvider(provider);
-    if (!Number.isFinite(tabId)) {
-        return { ok: false, error: 'Tab ID is invalid.' };
-    }
-    let tab;
-    try {
-        tab = await chrome.tabs.get(tabId);
-    } catch (error) {
-        return { ok: false, error: 'Tab not found.' };
-    }
-    if (!isExpectedHost(normalizedProvider, tab.url || '')) {
-        return { ok: false, error: `Selected tab is not a valid ${normalizedProvider === 'gemini' ? 'Gemini' : 'ChatGPT'} tab.` };
-    }
+async function claimTabAsProfile({ provider, tabId, label, profileId, setDefault = false, skipHostCheck = false }) {
+    return withTabProfilesLock(async () => {
+        const normalizedProvider = normalizeProvider(provider);
+        if (!Number.isFinite(tabId)) {
+            return { ok: false, error: 'Tab ID is invalid.' };
+        }
+        let tab;
+        try {
+            tab = await chrome.tabs.get(tabId);
+        } catch (error) {
+            return { ok: false, error: 'Tab not found.' };
+        }
+        const tabUrl = getTabUrlCandidate(tab);
+        const status = tabUrl
+            ? (isExpectedHost(normalizedProvider, tabUrl) ? 'ok' : 'wrong_host')
+            : 'unknown';
 
-    const state = await loadTabProfiles();
-    let profile = profileId ? findProfileById(state, profileId) : null;
-    if (!profile) {
-        profile = findProfileByTabId(state, normalizedProvider, tabId);
-    }
+        if (!skipHostCheck && status !== 'ok') {
+            return { ok: false, error: `Selected tab is not a valid ${normalizedProvider === 'gemini' ? 'Gemini' : 'ChatGPT'} tab.` };
+        }
 
-    if (!profile) {
-        profile = {
-            profileId: generateProfileId(),
-            provider: normalizedProvider,
-            tabId: tabId,
-            windowId: tab.windowId || null,
-            label: label ? String(label).trim() : formatDefaultProfileLabel(normalizedProvider, tab),
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            lastSeenAt: Date.now(),
-            status: 'ok',
-            modelHint: '',
-            lastKnownTitle: tab.title || '',
-            lastKnownUrl: tab.url || '',
-            inUseBySessionId: null
-        };
-        state.profiles.push(profile);
-    } else {
-        profile = applyProfilePatch(profile, {
-            tabId: tabId,
-            windowId: tab.windowId,
-            label: label ? String(label).trim() : profile.label,
-            lastKnownTitle: tab.title || profile.lastKnownTitle,
-            lastKnownUrl: tab.url || profile.lastKnownUrl
-        });
-        profile.updatedAt = Date.now();
-        profile.lastSeenAt = Date.now();
-        profile.status = 'ok';
+        const state = await loadTabProfiles();
+        let profile = profileId ? findProfileById(state, profileId) : null;
+        if (!profile) {
+            profile = findProfileByTabId(state, normalizedProvider, tabId);
+        }
+
+        if (!profile) {
+            profile = {
+                profileId: generateProfileId(),
+                provider: normalizedProvider,
+                tabId: tabId,
+                windowId: tab.windowId || null,
+                label: label ? String(label).trim() : formatDefaultProfileLabel(normalizedProvider, tab),
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+                lastSeenAt: Date.now(),
+                status,
+                modelHint: '',
+                lastKnownTitle: tab.title || '',
+                lastKnownUrl: tabUrl || '',
+                inUseBySessionId: null
+            };
+            state.profiles.push(profile);
+        } else {
+            profile = applyProfilePatch(profile, {
+                tabId: tabId,
+                windowId: tab.windowId,
+                label: label ? String(label).trim() : profile.label,
+                lastKnownTitle: tab.title || profile.lastKnownTitle,
+                lastKnownUrl: tabUrl || profile.lastKnownUrl
+            });
+            profile.updatedAt = Date.now();
+            profile.lastSeenAt = Date.now();
+            profile.status = status;
+            const index = state.profiles.findIndex(item => item.profileId === profile.profileId);
+            if (index >= 0) state.profiles[index] = profile;
+        }
+
+        if (setDefault || !state.defaults[normalizedProvider]) {
+            state.defaults[normalizedProvider] = profile.profileId;
+        }
+
+        profile = await validateProfile(profile);
         const index = state.profiles.findIndex(item => item.profileId === profile.profileId);
         if (index >= 0) state.profiles[index] = profile;
-    }
-
-    if (!state.defaults[normalizedProvider]) {
-        state.defaults[normalizedProvider] = profile.profileId;
-    }
-
-    profile = await validateProfile(profile);
-    const index = state.profiles.findIndex(item => item.profileId === profile.profileId);
-    if (index >= 0) state.profiles[index] = profile;
-    await saveTabProfiles(state);
-    await syncSessionProfileBinding(profile);
-    await notifyTabProfiles(state);
-    return { ok: true, profile };
+        await saveTabProfiles(state);
+        await syncSessionProfileBinding(profile);
+        await notifyTabProfiles(state);
+        return { ok: true, profile };
+    });
 }
 
 async function createProfileFromActiveTab(provider, label, profileId) {
@@ -482,72 +683,79 @@ async function createProfileFromActiveTab(provider, label, profileId) {
 }
 
 async function updateTabProfile(profileId, patch) {
-    const state = await loadTabProfiles();
-    const profile = findProfileById(state, profileId);
-    if (!profile) return { ok: false, error: 'Profile not found.' };
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        const profile = findProfileById(state, profileId);
+        if (!profile) return { ok: false, error: 'Profile not found.' };
 
-    let next = applyProfilePatch(profile, patch);
-    if (Number.isFinite(patch?.tabId)) {
-        try {
-            const tab = await chrome.tabs.get(patch.tabId);
-            if (!isExpectedHost(profile.provider, tab.url || '')) {
-                return { ok: false, error: 'Selected tab is not valid for this provider.' };
+        let next = applyProfilePatch(profile, patch);
+        if (Number.isFinite(patch?.tabId)) {
+            try {
+                const tab = await chrome.tabs.get(patch.tabId);
+                const tabUrl = getTabUrlCandidate(tab);
+                if (!isExpectedHost(profile.provider, tabUrl)) {
+                    return { ok: false, error: 'Selected tab is not valid for this provider.' };
+                }
+                next = applyProfilePatch(next, {
+                    windowId: tab.windowId,
+                    lastKnownTitle: tab.title || next.lastKnownTitle,
+                    lastKnownUrl: tabUrl || next.lastKnownUrl
+                });
+                next.status = 'ok';
+                next.lastSeenAt = Date.now();
+            } catch (error) {
+                return { ok: false, error: 'Tab not found.' };
             }
-            next = applyProfilePatch(next, {
-                windowId: tab.windowId,
-                lastKnownTitle: tab.title || next.lastKnownTitle,
-                lastKnownUrl: tab.url || next.lastKnownUrl
-            });
-            next.status = 'ok';
-            next.lastSeenAt = Date.now();
-        } catch (error) {
-            return { ok: false, error: 'Tab not found.' };
         }
-    }
 
-    next.updatedAt = Date.now();
-    const updated = await validateProfile(next);
-    const index = state.profiles.findIndex(item => item.profileId === profileId);
-    if (index >= 0) state.profiles[index] = updated;
-    await saveTabProfiles(state);
-    await syncSessionProfileBinding(updated);
-    await notifyTabProfiles(state);
-    return { ok: true, profile: updated };
+        next.updatedAt = Date.now();
+        const updated = await validateProfile(next);
+        const index = state.profiles.findIndex(item => item.profileId === profileId);
+        if (index >= 0) state.profiles[index] = updated;
+        await saveTabProfiles(state);
+        await syncSessionProfileBinding(updated);
+        await notifyTabProfiles(state);
+        return { ok: true, profile: updated };
+    });
 }
 
 async function deleteTabProfile(profileId) {
-    const state = await loadTabProfiles();
-    const profile = findProfileById(state, profileId);
-    if (!profile) return { ok: false, error: 'Profile not found.' };
-    state.profiles = state.profiles.filter(item => item.profileId !== profileId);
-    for (const provider of ['chatgpt', 'gemini']) {
-        if (state.defaults[provider] === profileId) {
-            state.defaults[provider] = null;
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        const profile = findProfileById(state, profileId);
+        if (!profile) return { ok: false, error: 'Profile not found.' };
+        state.profiles = state.profiles.filter(item => item.profileId !== profileId);
+        for (const provider of ['chatgpt', 'gemini']) {
+            if (state.defaults[provider] === profileId) {
+                state.defaults[provider] = null;
+            }
         }
-    }
-    await saveTabProfiles(state);
-    if (profile.inUseBySessionId) {
-        await pauseDebateSession(`Profile "${profile.label}" was removed.`, profile.provider);
-    }
-    await notifyTabProfiles(state);
-    return { ok: true };
+        await saveTabProfiles(state);
+        if (profile.inUseBySessionId) {
+            await pauseDebateSession(`Profile "${profile.label}" was removed.`, profile.provider);
+        }
+        await notifyTabProfiles(state);
+        return { ok: true };
+    });
 }
 
 async function setDefaultProfile(provider, profileId) {
-    const normalizedProvider = normalizeProvider(provider);
-    const state = await loadTabProfiles();
-    if (profileId) {
-        const profile = findProfileById(state, profileId);
-        if (!profile || profile.provider !== normalizedProvider) {
-            return { ok: false, error: 'Profile not found for provider.' };
+    return withTabProfilesLock(async () => {
+        const normalizedProvider = normalizeProvider(provider);
+        const state = await loadTabProfiles();
+        if (profileId) {
+            const profile = findProfileById(state, profileId);
+            if (!profile || profile.provider !== normalizedProvider) {
+                return { ok: false, error: 'Profile not found for provider.' };
+            }
+            state.defaults[normalizedProvider] = profileId;
+        } else {
+            state.defaults[normalizedProvider] = null;
         }
-        state.defaults[normalizedProvider] = profileId;
-    } else {
-        state.defaults[normalizedProvider] = null;
-    }
-    await saveTabProfiles(state);
-    await notifyTabProfiles(state);
-    return { ok: true };
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+        return { ok: true };
+    });
 }
 
 async function focusTab(tabId) {
@@ -576,6 +784,30 @@ async function openProviderTab(provider, options = {}) {
     return { ok: true, provider: normalizedProvider, tabId: tab.id, windowId: tab.windowId };
 }
 
+async function connectProvider(provider, options = {}) {
+    const normalizedProvider = normalizeProvider(provider);
+    const opened = await openProviderTab(normalizedProvider, options);
+    if (!opened?.ok) return opened || { ok: false, error: 'Failed to open provider tab.' };
+    const label = normalizedProvider === 'gemini' ? 'Gemini' : 'ChatGPT';
+    let claimed = await claimTabAsProfile({
+        provider: normalizedProvider,
+        tabId: opened.tabId,
+        label,
+        setDefault: true
+    });
+    if (!claimed?.ok) {
+        claimed = await claimTabAsProfile({
+            provider: normalizedProvider,
+            tabId: opened.tabId,
+            label,
+            setDefault: true,
+            skipHostCheck: true
+        });
+    }
+    if (!claimed?.ok) return claimed || { ok: false, error: 'Failed to bind provider tab.' };
+    return { ok: true, provider: normalizedProvider, tabId: opened.tabId, profile: claimed.profile };
+}
+
 async function syncSessionProfileBinding(profile) {
     const session = await loadActiveDebateState();
     if (!session.sessionId || !profile) return;
@@ -587,16 +819,18 @@ async function syncSessionProfileBinding(profile) {
 
 async function updateProfileModelHint(tabId, provider, modelHint) {
     if (!Number.isFinite(tabId)) return;
-    const normalizedProvider = normalizeProvider(provider);
-    const state = await loadTabProfiles();
-    const profile = state.profiles.find(item => item.provider === normalizedProvider && item.tabId === tabId);
-    if (!profile) return;
-    const next = applyProfilePatch(profile, { modelHint: sanitizeModelHint(normalizedProvider, modelHint) });
-    next.updatedAt = Date.now();
-    const index = state.profiles.findIndex(item => item.profileId === profile.profileId);
-    if (index >= 0) state.profiles[index] = next;
-    await saveTabProfiles(state);
-    await notifyTabProfiles(state);
+    return withTabProfilesLock(async () => {
+        const normalizedProvider = normalizeProvider(provider);
+        const state = await loadTabProfiles();
+        const profile = state.profiles.find(item => item.provider === normalizedProvider && item.tabId === tabId);
+        if (!profile) return;
+        const next = applyProfilePatch(profile, { modelHint: sanitizeModelHint(normalizedProvider, modelHint) });
+        next.updatedAt = Date.now();
+        const index = state.profiles.findIndex(item => item.profileId === profile.profileId);
+        if (index >= 0) state.profiles[index] = next;
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+    });
 }
 
 function resolveProfileSelection(provider, selection, defaults) {
@@ -607,67 +841,73 @@ function resolveProfileSelection(provider, selection, defaults) {
 }
 
 async function validateProfileForSession(provider, profileId, { requirePing = false } = {}) {
-    const state = await loadTabProfiles();
-    const profile = findProfileById(state, profileId);
-    if (!profile) {
-        return { ok: false, error: 'Profile not found.' };
-    }
-    const validated = await validateProfile(profile);
-    const index = state.profiles.findIndex(item => item.profileId === profileId);
-    if (index >= 0) state.profiles[index] = validated;
-    await saveTabProfiles(state);
-    await notifyTabProfiles(state);
-    if (validated.status !== 'ok') {
-        const statusLabel = validated.status === 'offline'
-            ? 'offline'
-            : (validated.status === 'wrong_host' ? 'not on the right host' : 'unavailable');
-        return { ok: false, error: `${validated.label} is ${statusLabel}.` };
-    }
-    if (requirePing) {
-        const pingOk = await pingTab(validated.tabId, provider);
-        if (!pingOk) {
-            return { ok: false, error: `${validated.label} is not responding. Refresh the tab and try again.` };
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        const profile = findProfileById(state, profileId);
+        if (!profile) {
+            return { ok: false, error: 'Profile not found.' };
         }
-    }
-    return { ok: true, profile: validated };
+        const validated = await validateProfile(profile);
+        const index = state.profiles.findIndex(item => item.profileId === profileId);
+        if (index >= 0) state.profiles[index] = validated;
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+        if (validated.status !== 'ok') {
+            const statusLabel = validated.status === 'offline'
+                ? 'offline'
+                : (validated.status === 'wrong_host' ? 'not on the right host' : 'unavailable');
+            return { ok: false, error: `${validated.label} is ${statusLabel}.` };
+        }
+        if (requirePing) {
+            const pingOk = await pingTab(validated.tabId, provider);
+            if (!pingOk) {
+                return { ok: false, error: `${validated.label} is not responding. Refresh the tab and try again.` };
+            }
+        }
+        return { ok: true, profile: validated };
+    });
 }
 
 async function lockProfilesForSession(sessionId, profileIds) {
     if (!sessionId || !profileIds) return;
-    const state = await loadTabProfiles();
-    let changed = false;
-    for (const provider of ['chatgpt', 'gemini']) {
-        const profileId = profileIds[provider];
-        if (!profileId) continue;
-        const profile = findProfileById(state, profileId);
-        if (!profile) continue;
-        if (profile.inUseBySessionId !== sessionId) {
-            profile.inUseBySessionId = sessionId;
-            profile.updatedAt = Date.now();
-            changed = true;
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        let changed = false;
+        for (const provider of ['chatgpt', 'gemini']) {
+            const profileId = profileIds[provider];
+            if (!profileId) continue;
+            const profile = findProfileById(state, profileId);
+            if (!profile) continue;
+            if (profile.inUseBySessionId !== sessionId) {
+                profile.inUseBySessionId = sessionId;
+                profile.updatedAt = Date.now();
+                changed = true;
+            }
         }
-    }
-    if (changed) {
-        await saveTabProfiles(state);
-        await notifyTabProfiles(state);
-    }
+        if (changed) {
+            await saveTabProfiles(state);
+            await notifyTabProfiles(state);
+        }
+    });
 }
 
 async function releaseProfilesForSession(sessionId) {
     if (!sessionId) return;
-    const state = await loadTabProfiles();
-    let changed = false;
-    state.profiles.forEach(profile => {
-        if (profile.inUseBySessionId === sessionId) {
-            profile.inUseBySessionId = null;
-            profile.updatedAt = Date.now();
-            changed = true;
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        let changed = false;
+        state.profiles.forEach(profile => {
+            if (profile.inUseBySessionId === sessionId) {
+                profile.inUseBySessionId = null;
+                profile.updatedAt = Date.now();
+                changed = true;
+            }
+        });
+        if (changed) {
+            await saveTabProfiles(state);
+            await notifyTabProfiles(state);
         }
     });
-    if (changed) {
-        await saveTabProfiles(state);
-        await notifyTabProfiles(state);
-    }
 }
 
 // Message handling
@@ -742,6 +982,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'OPEN_PROVIDER_TAB':
             openProviderTab(message.provider, message).then(sendResponse).catch(error => {
                 console.error('[MLC Profiles] Error opening provider tab:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'CONNECT_PROVIDER':
+            connectProvider(message.provider, { focus: true }).then(sendResponse).catch((error) => {
+                console.error('[MLC Profiles] Error connecting provider:', error);
                 sendResponse({ ok: false, error: error.message });
             });
             return true;
@@ -821,6 +1067,63 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
             sendResponse({ status: 'active_session_sent', type: message.type });
             break;
+        case 'GET_CHATS_STATE':
+            loadChatsState().then((state) => {
+                sendResponse({
+                    ok: true,
+                    activeChatId: state.activeChatId,
+                    chats: state.chats.map(toChatSummary)
+                });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error loading chats:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'GET_CHAT':
+            loadChatsState().then((state) => {
+                const chat = message.chatId ? findChatById(state, message.chatId) : null;
+                if (!chat) {
+                    sendResponse({ ok: false, error: 'Chat not found.' });
+                    return;
+                }
+                sendResponse({ ok: true, chat });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error loading chat:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'CREATE_CHAT':
+            createChat({ makeActive: true }).then((result) => {
+                sendResponse({ ok: true, chat: result.chat, activeChatId: result.state.activeChatId });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error creating chat:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'SET_ACTIVE_CHAT':
+            setActiveChat(message.chatId).then((result) => {
+                if (!result.ok) {
+                    sendResponse(result);
+                    return;
+                }
+                sendResponse({ ok: true, chat: result.chat, activeChatId: result.state.activeChatId });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error selecting chat:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'RENAME_CHAT':
+            renameChat(message.chatId, message.title).then(sendResponse).catch((error) => {
+                console.error('[MLC Chats] Error renaming chat:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'DELETE_CHAT':
+            deleteChat(message.chatId).then(sendResponse).catch((error) => {
+                console.error('[MLC Chats] Error deleting chat:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
         case 'START_DEBATE_SESSION':
             handleStartDebateSession(message).catch(error => {
                 console.error('[MLC Debate] Error starting session:', error);
@@ -902,6 +1205,7 @@ async function handleStartDebateSession(message) {
     const secondLLM = firstLLM === 'chatgpt' ? 'gemini' : 'chatgpt';
     const requestedTabs = message.tabIds || {};
     const requestedProfiles = message.profileIds || null;
+    const requestedChatId = typeof message.chatId === 'string' ? message.chatId : null;
 
     if (!prompt) {
         sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: 'Prompt is empty.' });
@@ -915,6 +1219,13 @@ async function handleStartDebateSession(message) {
     let chatgptTab = null;
     let geminiTab = null;
     let profileIds = { chatgpt: null, gemini: null };
+    const chatsState = await loadChatsState();
+    const chatIdCandidate = requestedChatId || chatsState.activeChatId;
+    const chat = chatIdCandidate ? findChatById(chatsState, chatIdCandidate) : null;
+    const chatId = chat?.chatId || chatsState.activeChatId;
+    if (chatId && chatsState.activeChatId !== chatId) {
+        await setActiveChat(chatId);
+    }
 
     const profilesState = await loadTabProfiles();
     const hasDefaultProfiles = Boolean(profilesState.defaults?.chatgpt && profilesState.defaults?.gemini);
@@ -975,6 +1286,7 @@ async function handleStartDebateSession(message) {
     activeDebateState = {
         ...defaultDebateState,
         isActive: true,
+        chatId: chatId,
         sessionId: generateSessionId(),
         rounds: rounds,
         totalTurns: rounds * 2,
@@ -996,6 +1308,7 @@ async function handleStartDebateSession(message) {
     sendMessageToPopup({
         type: 'UI_SESSION_STARTED',
         sessionId: activeDebateState.sessionId,
+        chatId: activeDebateState.chatId,
         rounds: rounds,
         firstLLM: firstLLM,
         tabIds: activeDebateState.tabIds,
@@ -1004,11 +1317,23 @@ async function handleStartDebateSession(message) {
 
     sendMessageToPopup({
         type: 'UI_MESSAGE_ADD',
+        chatId: activeDebateState.chatId,
         role: 'user',
         content: prompt,
         timestamp: now,
-        turnIndex: 0
+        turnIndex: 0,
+        sessionId: activeDebateState.sessionId
     });
+
+    if (activeDebateState.chatId) {
+        await appendChatMessage(activeDebateState.chatId, {
+            role: 'user',
+            content: prompt,
+            timestamp: now,
+            turnIndex: 0,
+            sessionId: activeDebateState.sessionId
+        });
+    }
 
     await lockProfilesForSession(activeDebateState.sessionId, activeDebateState.profileIds);
     await sendDebateTurn(activeDebateState);
@@ -1288,7 +1613,7 @@ async function validateTabForProvider(tabId, provider) {
     }
     try {
         const tab = await chrome.tabs.get(tabId);
-        if (!isExpectedHost(provider, tab.url || '')) {
+        if (!isExpectedHost(provider, getTabUrlCandidate(tab))) {
             return { ok: false, error: 'Tab is not on the expected host.' };
         }
         return { ok: true, tabId: tab.id };
@@ -1354,64 +1679,69 @@ async function resumeDebateSession() {
 
 async function updateProfilesForTab(tab) {
     if (!tab || !Number.isFinite(tab.id)) return null;
-    const state = await loadTabProfiles();
-    let changed = false;
-    const affected = [];
-    state.profiles = state.profiles.map(profile => {
-        if (profile.tabId !== tab.id) return profile;
-        const status = tab.url
-            ? (isExpectedHost(profile.provider, tab.url) ? 'ok' : 'wrong_host')
-            : 'unknown';
-        const next = {
-            ...profile,
-            windowId: tab.windowId,
-            lastKnownTitle: tab.title || profile.lastKnownTitle || '',
-            lastKnownUrl: tab.url || profile.lastKnownUrl || '',
-            status,
-            lastSeenAt: Date.now(),
-            updatedAt: Date.now()
-        };
-        changed = true;
-        affected.push(next);
-        return next;
-    });
-    if (changed) {
-        await saveTabProfiles(state);
-        await notifyTabProfiles(state);
-        for (const profile of affected) {
-            if (profile.inUseBySessionId && profile.status !== 'ok') {
-                await pauseDebateSession(`Profile "${profile.label}" is ${profile.status}.`, profile.provider);
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        let changed = false;
+        const affected = [];
+        state.profiles = state.profiles.map(profile => {
+            if (profile.tabId !== tab.id) return profile;
+            const urlCandidate = getTabUrlCandidate(tab);
+            const status = urlCandidate
+                ? (isExpectedHost(profile.provider, urlCandidate) ? 'ok' : 'wrong_host')
+                : 'unknown';
+            const next = {
+                ...profile,
+                windowId: tab.windowId,
+                lastKnownTitle: tab.title || profile.lastKnownTitle || '',
+                lastKnownUrl: urlCandidate || profile.lastKnownUrl || '',
+                status,
+                lastSeenAt: Date.now(),
+                updatedAt: Date.now()
+            };
+            changed = true;
+            affected.push(next);
+            return next;
+        });
+        if (changed) {
+            await saveTabProfiles(state);
+            await notifyTabProfiles(state);
+            for (const profile of affected) {
+                if (profile.inUseBySessionId && profile.status !== 'ok') {
+                    await pauseDebateSession(`Profile "${profile.label}" is ${profile.status}.`, profile.provider);
+                }
             }
         }
-    }
-    return affected;
+        return affected;
+    });
 }
 
 async function handleTabRemoved(tabId) {
-    const state = await loadTabProfiles();
-    let changed = false;
-    const affected = [];
-    state.profiles = state.profiles.map(profile => {
-        if (profile.tabId !== tabId) return profile;
-        const next = {
-            ...profile,
-            status: 'offline',
-            windowId: null,
-            updatedAt: Date.now()
-        };
-        changed = true;
-        affected.push(next);
-        return next;
-    });
-    if (changed) {
-        await saveTabProfiles(state);
-        await notifyTabProfiles(state);
-        for (const profile of affected) {
-            if (profile.inUseBySessionId) {
-                await pauseDebateSession(`Profile "${profile.label}" went offline.`, profile.provider);
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        let changed = false;
+        const affected = [];
+        state.profiles = state.profiles.map(profile => {
+            if (profile.tabId !== tabId) return profile;
+            const next = {
+                ...profile,
+                status: 'offline',
+                windowId: null,
+                updatedAt: Date.now()
+            };
+            changed = true;
+            affected.push(next);
+            return next;
+        });
+        if (changed) {
+            await saveTabProfiles(state);
+            await notifyTabProfiles(state);
+            for (const profile of affected) {
+                if (profile.inUseBySessionId) {
+                    await pauseDebateSession(`Profile "${profile.label}" went offline.`, profile.provider);
+                }
             }
         }
-    }
+    });
 }
 
 async function handleTabActivated(activeInfo) {
@@ -1568,6 +1898,8 @@ async function handleDebateResponse(message) {
 
     sendMessageToPopup({
         type: 'UI_MESSAGE_ADD',
+        chatId: session.chatId || null,
+        sessionId: session.sessionId,
         role: expectedLLM || message.sourceLLM,
         content: content,
         contentHtml: contentHtml || undefined,
@@ -1575,6 +1907,18 @@ async function handleDebateResponse(message) {
         turnIndex: turnIndex,
         roundIndex: roundIndex
     });
+
+    if (session.chatId) {
+        await appendChatMessage(session.chatId, {
+            role: expectedLLM || message.sourceLLM,
+            content,
+            contentHtml: contentHtml || undefined,
+            timestamp,
+            turnIndex,
+            roundIndex,
+            sessionId: session.sessionId
+        });
+    }
 
     if (turnIndex >= session.totalTurns) {
         await endDebateSession('Session completed.');
