@@ -59,6 +59,15 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Claiming does not depend on model detection.
 - Wizard is dismissed on claim or cancel; cancel does not close the tab.
 
+### Quick connect buttons (side panel)
+
+- Side panel includes "Connect ChatGPT", "Connect Gemini", and "Connect both" buttons.
+- These send `CONNECT_PROVIDER` to the background, which:
+  - opens the provider homepage tab, then
+  - immediately claims the tab into a Tab Profile and sets it as the default for that provider.
+- Connection “ready” is still determined by a successful `PING`/`PONG` to the content script (login/redirect pages may delay readiness).
+- Profile writes are serialized in the background to avoid connect-both lost-update races.
+
 ### Session gating and safety
 
 - "Start debate" is disabled until:

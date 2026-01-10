@@ -3,6 +3,12 @@
  * Handles communication with LLM websites and tab management
  */
 
+try {
+    importScripts('historyStore.js');
+} catch (error) {
+    console.error('[MLC History] Failed to import history store:', error);
+}
+
 // Extension installation
 chrome.runtime.onInstalled.addListener(() => {
     console.log('[MLC Background] Multi-LLM Coder extension installed/updated.');
@@ -79,176 +85,272 @@ function withTabProfilesLock(operation) {
     return next;
 }
 
-const defaultChatsState = {
-    schemaVersion: 1,
-    activeChatId: null,
-    chats: []
-};
+const HISTORY_PAGE_SIZE = 60;
 
 function generateChatId() {
     return 'chat_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 }
 
-function normalizeChatTitle(title) {
-    const value = String(title || '').replace(/\s+/g, ' ').trim();
-    return value;
-}
-
-function getChatTitleFromPrompt(prompt) {
-    const cleaned = normalizeInlineText(prompt);
-    if (!cleaned) return '';
-    return cleaned.length > 48 ? `${cleaned.slice(0, 48).trim()}…` : cleaned;
-}
-
 function toChatSummary(chat) {
+    if (!chat || typeof chat !== 'object') return null;
+    const chatId = chat.chatId || chat.threadId;
+    if (!chatId) return null;
     return {
-        chatId: chat.chatId,
-        title: chat.title,
-        createdAt: chat.createdAt,
-        updatedAt: chat.updatedAt,
-        messageCount: Array.isArray(chat.messages) ? chat.messages.length : 0
+        chatId,
+        title: chat.title || 'New chat',
+        createdAt: Number.isFinite(chat.createdAt) ? chat.createdAt : null,
+        updatedAt: Number.isFinite(chat.updatedAt) ? chat.updatedAt : null,
+        messageCount: Number.isFinite(chat.messageCount)
+            ? chat.messageCount
+            : (Array.isArray(chat.messages) ? chat.messages.length : 0),
+        lastPreview: typeof chat.lastPreview === 'string' ? chat.lastPreview : undefined
     };
+}
+
+async function ensureHistoryStoreReady() {
+    if (!self.mlcHistoryStore) {
+        const err = new Error('History store is unavailable.');
+        err.code = 'HISTORY_STORE_UNAVAILABLE';
+        throw err;
+    }
+    await self.mlcHistoryStore.openDb();
+    return self.mlcHistoryStore;
+}
+
+async function getHistoryStatus() {
+    const store = await ensureHistoryStoreReady();
+    return store.getStatus();
+}
+
+async function requireHistoryUnlocked() {
+    const store = await ensureHistoryStoreReady();
+    const status = await store.getStatus();
+    if (!status.configured) {
+        const err = new Error('History encryption is not configured.');
+        err.code = 'HISTORY_NOT_CONFIGURED';
+        throw err;
+    }
+    if (!status.unlocked) {
+        const err = new Error('History is locked.');
+        err.code = 'HISTORY_LOCKED';
+        throw err;
+    }
+    return store;
+}
+
+let historyMigrationChecked = false;
+let historyMigrationPromise = null;
+
+async function ensureLegacyChatsMigrated(store) {
+    if (historyMigrationChecked) return;
+    if (historyMigrationPromise) return historyMigrationPromise;
+
+    historyMigrationPromise = (async () => {
+        try {
+            const version = await store.getMeta('migrationVersion');
+            if (Number(version) >= 1) {
+                historyMigrationChecked = true;
+                return;
+            }
+
+            const stored = await chrome.storage.local.get(CHATS_KEY);
+            const raw = stored?.[CHATS_KEY];
+            const chats = raw && typeof raw === 'object' && Array.isArray(raw.chats) ? raw.chats : [];
+            const legacyActiveChatId = raw && typeof raw === 'object' && typeof raw.activeChatId === 'string'
+                ? raw.activeChatId
+                : null;
+
+            if (!chats.length) {
+                await store.setMeta('migrationVersion', 1);
+                historyMigrationChecked = true;
+                return;
+            }
+
+            let importedChats = 0;
+            let importedMessages = 0;
+
+            for (const legacyChat of chats) {
+                const chatId = typeof legacyChat?.chatId === 'string' && legacyChat.chatId
+                    ? legacyChat.chatId
+                    : generateChatId();
+
+                const existing = await store.getThreadSummary(chatId);
+                if (existing) continue;
+
+                const createdAt = Number.isFinite(legacyChat?.createdAt) ? legacyChat.createdAt : Date.now();
+                const updatedAt = Number.isFinite(legacyChat?.updatedAt) ? legacyChat.updatedAt : createdAt;
+                const titleRaw = typeof legacyChat?.title === 'string' ? legacyChat.title : 'New chat';
+                const title = titleRaw.trim() ? titleRaw : 'New chat';
+                const titleIsDefault = title === 'New chat';
+
+                try {
+                    await store.createThread({
+                        threadId: chatId,
+                        title,
+                        createdAt,
+                        updatedAt,
+                        titleIsDefault
+                    });
+                    importedChats += 1;
+                } catch (error) {
+                    console.warn('[MLC History] Failed to create thread during migration:', error);
+                    continue;
+                }
+
+                const messages = Array.isArray(legacyChat?.messages) ? legacyChat.messages : [];
+                for (const legacyMessage of messages) {
+                    const content = String(legacyMessage?.content || '');
+                    if (!content.trim()) continue;
+                    const role = legacyMessage?.role || 'assistant';
+                    const timestamp = Number.isFinite(legacyMessage?.timestamp) ? legacyMessage.timestamp : Date.now();
+                    const contentHtml = typeof legacyMessage?.contentHtml === 'string' ? legacyMessage.contentHtml : undefined;
+                    try {
+                        await store.appendMessage(chatId, {
+                            role,
+                            content,
+                            contentHtml,
+                            timestamp,
+                            sessionId: legacyMessage?.sessionId || undefined,
+                            turnIndex: Number.isFinite(legacyMessage?.turnIndex) ? legacyMessage.turnIndex : undefined,
+                            roundIndex: Number.isFinite(legacyMessage?.roundIndex) ? legacyMessage.roundIndex : undefined
+                        });
+                        importedMessages += 1;
+                    } catch (error) {
+                        console.warn('[MLC History] Failed to migrate message:', error);
+                    }
+                }
+            }
+
+            const currentActive = await store.getActiveThreadId();
+            if (!currentActive && legacyActiveChatId) {
+                const migratedActive = await store.getThreadSummary(legacyActiveChatId);
+                if (migratedActive) {
+                    await store.setActiveThreadId(legacyActiveChatId);
+                }
+            }
+
+            await store.setMeta('migrationVersion', 1);
+            historyMigrationChecked = true;
+            console.log('[MLC History] Migration complete.', { importedChats, importedMessages });
+        } catch (error) {
+            console.error('[MLC History] Migration failed:', error);
+        }
+    })().finally(() => {
+        historyMigrationPromise = null;
+    });
+
+    return historyMigrationPromise;
 }
 
 async function loadChatsState({ ensureActive = true } = {}) {
-    const stored = await chrome.storage.local.get(CHATS_KEY);
-    const raw = stored?.[CHATS_KEY];
-    const state = raw && typeof raw === 'object'
-        ? {
-            schemaVersion: 1,
-            activeChatId: typeof raw.activeChatId === 'string' ? raw.activeChatId : null,
-            chats: Array.isArray(raw.chats) ? raw.chats : []
-        }
-        : { ...defaultChatsState };
+    const store = await requireHistoryUnlocked();
+    await ensureLegacyChatsMigrated(store);
+    const { threads } = await store.listThreads({ limit: 250 });
+    let activeChatId = await store.getActiveThreadId();
+    const hasActive = activeChatId && threads.some(thread => thread.chatId === activeChatId);
 
-    if (!ensureActive) return state;
-
-    const hasActive = state.activeChatId && state.chats.some(chat => chat.chatId === state.activeChatId);
-    if (state.chats.length === 0 || !hasActive) {
-        const now = Date.now();
-        const chatId = generateChatId();
-        state.chats.unshift({
-            chatId,
-            title: 'New chat',
-            createdAt: now,
-            updatedAt: now,
-            messages: []
-        });
-        state.activeChatId = chatId;
-        await chrome.storage.local.set({ [CHATS_KEY]: state });
+    if (!ensureActive) {
+        return { activeChatId: hasActive ? activeChatId : null, chats: threads };
     }
 
-    return state;
-}
+    if (!threads.length) {
+        const chatId = generateChatId();
+        await store.createThread({ threadId: chatId, title: 'New chat', titleIsDefault: true });
+        await store.setActiveThreadId(chatId);
+        const refreshed = await store.listThreads({ limit: 250 });
+        return { activeChatId: chatId, chats: refreshed.threads };
+    }
 
-async function saveChatsState(state) {
-    await chrome.storage.local.set({ [CHATS_KEY]: state });
+    if (!hasActive) {
+        activeChatId = threads[0].chatId;
+        await store.setActiveThreadId(activeChatId);
+    }
+
+    return { activeChatId, chats: threads };
 }
 
 async function notifyChatsState(stateOverride = null) {
-    const state = stateOverride || await loadChatsState();
-    sendMessageToPopup({
-        type: 'CHATS_STATE',
-        activeChatId: state.activeChatId,
-        chats: state.chats.map(toChatSummary)
-    });
-}
-
-function findChatById(state, chatId) {
-    return state.chats.find(chat => chat.chatId === chatId) || null;
+    try {
+        const state = stateOverride || await loadChatsState();
+        sendMessageToPopup({
+            type: 'CHATS_STATE',
+            activeChatId: state.activeChatId,
+            chats: state.chats
+        });
+    } catch (error) {
+        const status = await getHistoryStatus().catch(() => ({ configured: false, unlocked: false }));
+        sendMessageToPopup({ type: 'HISTORY_STATUS', status, error: error?.message });
+    }
 }
 
 async function createChat({ makeActive = true } = {}) {
-    const state = await loadChatsState({ ensureActive: false });
-    const now = Date.now();
-    const chat = {
-        chatId: generateChatId(),
-        title: 'New chat',
-        createdAt: now,
-        updatedAt: now,
-        messages: []
-    };
-    state.chats.unshift(chat);
+    const store = await requireHistoryUnlocked();
+    const chatId = generateChatId();
+    await store.createThread({ threadId: chatId, title: 'New chat', titleIsDefault: true });
     if (makeActive) {
-        state.activeChatId = chat.chatId;
-    } else if (!state.activeChatId) {
-        state.activeChatId = chat.chatId;
+        await store.setActiveThreadId(chatId);
     }
-    await saveChatsState(state);
+    const chat = await store.getThreadSummary(chatId);
+    const state = await loadChatsState({ ensureActive: false });
     await notifyChatsState(state);
-    return { ok: true, chat: chat, state };
+    return {
+        ok: true,
+        chat: { ...chat, messages: [] },
+        state: { ...state, activeChatId: makeActive ? chatId : state.activeChatId }
+    };
 }
 
 async function setActiveChat(chatId) {
-    const state = await loadChatsState({ ensureActive: false });
-    const chat = chatId ? findChatById(state, chatId) : null;
+    const store = await requireHistoryUnlocked();
+    const chat = await store.getThreadSummary(chatId);
     if (!chat) {
-        return { ok: false, error: 'Chat not found.' };
+        return { ok: false, error: 'Chat not found.', code: 'CHAT_NOT_FOUND' };
     }
-    state.activeChatId = chat.chatId;
-    await saveChatsState(state);
+    await store.setActiveThreadId(chatId);
+    const state = await loadChatsState({ ensureActive: false });
     await notifyChatsState(state);
-    return { ok: true, chat, state };
+    return { ok: true, chat: { ...chat, messages: [] }, state };
 }
 
 async function renameChat(chatId, title) {
-    const state = await loadChatsState({ ensureActive: false });
-    const chat = findChatById(state, chatId);
-    if (!chat) return { ok: false, error: 'Chat not found.' };
-    const nextTitle = normalizeChatTitle(title);
-    if (!nextTitle) return { ok: false, error: 'Title is empty.' };
-    chat.title = nextTitle;
-    chat.updatedAt = Date.now();
-    await saveChatsState(state);
-    await notifyChatsState(state);
-    return { ok: true, chat };
+    const store = await requireHistoryUnlocked();
+    try {
+        const updated = await store.renameThread(chatId, title);
+        await notifyChatsState();
+        return { ok: true, chat: updated };
+    } catch (error) {
+        return { ok: false, error: error.message, code: error.code || 'RENAME_FAILED' };
+    }
 }
 
 async function deleteChat(chatId) {
-    const state = await loadChatsState({ ensureActive: false });
-    const exists = state.chats.some(chat => chat.chatId === chatId);
-    if (!exists) return { ok: false, error: 'Chat not found.' };
-    state.chats = state.chats.filter(chat => chat.chatId !== chatId);
-    if (state.activeChatId === chatId) {
-        state.activeChatId = state.chats[0]?.chatId || null;
+    const store = await requireHistoryUnlocked();
+    const chat = await store.getThreadSummary(chatId);
+    if (!chat) return { ok: false, error: 'Chat not found.', code: 'CHAT_NOT_FOUND' };
+
+    await store.deleteThread(chatId);
+    const activeChatId = await store.getActiveThreadId();
+    if (activeChatId === chatId) {
+        const { threads } = await store.listThreads({ limit: 1 });
+        await store.setActiveThreadId(threads[0]?.chatId || null);
     }
-    await saveChatsState(state);
+    const state = await loadChatsState({ ensureActive: true });
     await notifyChatsState(state);
     return { ok: true, state };
 }
 
 async function appendChatMessage(chatId, message) {
     if (!chatId || !message) return { ok: false, error: 'Missing chatId or message.' };
-    const state = await loadChatsState({ ensureActive: false });
-    const chat = findChatById(state, chatId);
-    if (!chat) return { ok: false, error: 'Chat not found.' };
-
-    const entry = {
-        role: message.role || 'assistant',
-        content: String(message.content || ''),
-        timestamp: Number.isFinite(message.timestamp) ? message.timestamp : Date.now(),
-        sessionId: message.sessionId || null,
-        turnIndex: Number.isFinite(message.turnIndex) ? message.turnIndex : null,
-        roundIndex: Number.isFinite(message.roundIndex) ? message.roundIndex : null
-    };
-    if (typeof message.contentHtml === 'string' && message.contentHtml.trim()) {
-        entry.contentHtml = message.contentHtml;
+    try {
+        const store = await requireHistoryUnlocked();
+        const provider = message.role === 'gemini' || message.role === 'chatgpt' ? message.role : null;
+        await store.appendMessage(chatId, { ...message, provider });
+        await notifyChatsState();
+        return { ok: true };
+    } catch (error) {
+        console.warn('[MLC Chats] Failed to persist message:', error);
+        return { ok: false, error: error.message, code: error.code || 'APPEND_MESSAGE_FAILED' };
     }
-    if (!entry.content.trim()) return { ok: false, error: 'Empty message content.' };
-
-    if (!Array.isArray(chat.messages)) chat.messages = [];
-    chat.messages.push(entry);
-    chat.updatedAt = Date.now();
-    if ((chat.title === 'New chat' || !chat.title) && entry.role === 'user') {
-        const derived = getChatTitleFromPrompt(entry.content);
-        if (derived) {
-            chat.title = derived;
-        }
-    }
-
-    await saveChatsState(state);
-    await notifyChatsState(state);
-    return { ok: true };
 }
 
 const defaultDebateState = {
@@ -1067,29 +1169,109 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
             sendResponse({ status: 'active_session_sent', type: message.type });
             break;
+        case 'HISTORY_STATUS':
+            getHistoryStatus().then((status) => {
+                sendResponse({ ok: true, status });
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_STATUS_FAILED' });
+            });
+            return true;
+        case 'HISTORY_CONFIGURE':
+            ensureHistoryStoreReady().then((store) => store.configureEncryption(message.passphrase)).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_CONFIGURE_FAILED' });
+            });
+            return true;
+        case 'HISTORY_UNLOCK':
+            ensureHistoryStoreReady().then((store) => store.unlock(message.passphrase)).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_UNLOCK_FAILED' });
+            });
+            return true;
+        case 'HISTORY_LOCK':
+            ensureHistoryStoreReady().then((store) => store.lock()).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_LOCK_FAILED' });
+            });
+            return true;
+        case 'HISTORY_RESET':
+            ensureHistoryStoreReady()
+                .then((store) => store.resetAllData())
+                .then(() => new Promise((resolve) => chrome.storage.local.remove(CHATS_KEY, resolve)))
+                .then(() => {
+                    historyMigrationChecked = false;
+                    historyMigrationPromise = null;
+                })
+                .then(() => getHistoryStatus())
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_RESET_FAILED' });
+                });
+            return true;
         case 'GET_CHATS_STATE':
             loadChatsState().then((state) => {
                 sendResponse({
                     ok: true,
                     activeChatId: state.activeChatId,
-                    chats: state.chats.map(toChatSummary)
+                    chats: state.chats
                 });
             }).catch((error) => {
                 console.error('[MLC Chats] Error loading chats:', error);
-                sendResponse({ ok: false, error: error.message });
+                getHistoryStatus().then((status) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'GET_CHATS_FAILED', status });
+                }).catch(() => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'GET_CHATS_FAILED' });
+                });
             });
             return true;
         case 'GET_CHAT':
-            loadChatsState().then((state) => {
-                const chat = message.chatId ? findChatById(state, message.chatId) : null;
-                if (!chat) {
-                    sendResponse({ ok: false, error: 'Chat not found.' });
-                    return;
-                }
-                sendResponse({ ok: true, chat });
+            requireHistoryUnlocked().then((store) => {
+                const chatId = message.chatId;
+                return store.getThreadWithMessages(chatId, { limit: HISTORY_PAGE_SIZE });
+            }).then(({ thread, page }) => {
+                sendResponse({
+                    ok: true,
+                    chat: {
+                        chatId: thread.chatId,
+                        title: thread.title,
+                        createdAt: thread.createdAt,
+                        updatedAt: thread.updatedAt,
+                        messageCount: thread.messageCount,
+                        lastPreview: thread.lastPreview,
+                        messages: page.messages,
+                        nextCursorSequence: page.nextCursorSequence,
+                        hasMore: page.hasMore
+                    }
+                });
             }).catch((error) => {
                 console.error('[MLC Chats] Error loading chat:', error);
-                sendResponse({ ok: false, error: error.message });
+                getHistoryStatus().then((status) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'GET_CHAT_FAILED', status });
+                }).catch(() => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'GET_CHAT_FAILED' });
+                });
+            });
+            return true;
+        case 'GET_MESSAGES_PAGE':
+            requireHistoryUnlocked().then((store) => {
+                const chatId = message.chatId;
+                const limit = Number.isFinite(message.limit) ? message.limit : HISTORY_PAGE_SIZE;
+                const beforeSequence = Number.isFinite(message.beforeSequence) ? message.beforeSequence : null;
+                return store.listMessages(chatId, { limit, beforeSequence });
+            }).then((page) => {
+                sendResponse({ ok: true, ...page });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error listing messages:', error);
+                sendResponse({ ok: false, error: error.message, code: error.code || 'GET_MESSAGES_FAILED' });
             });
             return true;
         case 'CREATE_CHAT':
@@ -1097,7 +1279,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 sendResponse({ ok: true, chat: result.chat, activeChatId: result.state.activeChatId });
             }).catch((error) => {
                 console.error('[MLC Chats] Error creating chat:', error);
-                sendResponse({ ok: false, error: error.message });
+                getHistoryStatus().then((status) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'CREATE_CHAT_FAILED', status });
+                }).catch(() => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'CREATE_CHAT_FAILED' });
+                });
             });
             return true;
         case 'SET_ACTIVE_CHAT':
@@ -1109,19 +1295,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 sendResponse({ ok: true, chat: result.chat, activeChatId: result.state.activeChatId });
             }).catch((error) => {
                 console.error('[MLC Chats] Error selecting chat:', error);
-                sendResponse({ ok: false, error: error.message });
+                getHistoryStatus().then((status) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'SET_ACTIVE_CHAT_FAILED', status });
+                }).catch(() => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'SET_ACTIVE_CHAT_FAILED' });
+                });
             });
             return true;
         case 'RENAME_CHAT':
             renameChat(message.chatId, message.title).then(sendResponse).catch((error) => {
                 console.error('[MLC Chats] Error renaming chat:', error);
-                sendResponse({ ok: false, error: error.message });
+                sendResponse({ ok: false, error: error.message, code: error.code || 'RENAME_CHAT_FAILED' });
             });
             return true;
         case 'DELETE_CHAT':
             deleteChat(message.chatId).then(sendResponse).catch((error) => {
                 console.error('[MLC Chats] Error deleting chat:', error);
-                sendResponse({ ok: false, error: error.message });
+                sendResponse({ ok: false, error: error.message, code: error.code || 'DELETE_CHAT_FAILED' });
             });
             return true;
         case 'START_DEBATE_SESSION':
@@ -1199,144 +1389,162 @@ async function handleGetActiveSession() {
 }
 
 async function handleStartDebateSession(message) {
-    const prompt = (message.prompt || '').trim();
-    const rounds = Math.max(1, parseInt(message.rounds, 10) || 1);
-    const firstLLM = message.firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
-    const secondLLM = firstLLM === 'chatgpt' ? 'gemini' : 'chatgpt';
-    const requestedTabs = message.tabIds || {};
-    const requestedProfiles = message.profileIds || null;
-    const requestedChatId = typeof message.chatId === 'string' ? message.chatId : null;
+    try {
+        const prompt = (message.prompt || '').trim();
+        const rounds = Math.max(1, parseInt(message.rounds, 10) || 1);
+        const firstLLM = message.firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
+        const secondLLM = firstLLM === 'chatgpt' ? 'gemini' : 'chatgpt';
+        const requestedTabs = message.tabIds || {};
+        const requestedProfiles = message.profileIds || null;
+        const requestedChatId = typeof message.chatId === 'string' ? message.chatId : null;
 
-    if (!prompt) {
-        sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: 'Prompt is empty.' });
-        return;
-    }
+        if (!prompt) {
+            sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: 'Prompt is empty.' });
+            return;
+        }
 
-    if (activeDebateState.isActive) {
-        await endDebateSession('Session replaced by a new request.');
-    }
+        try {
+            await requireHistoryUnlocked();
+        } catch (error) {
+            const hint = error?.code === 'HISTORY_NOT_CONFIGURED'
+                ? 'Set an encryption passphrase in Settings → Security to enable chat history.'
+                : 'Unlock history in Settings → Security to enable chat history.';
+            sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: hint });
+            sendMessageToPopup({ type: 'HISTORY_STATUS', status: await getHistoryStatus().catch(() => ({ configured: false, unlocked: false })) });
+            return;
+        }
 
-    let chatgptTab = null;
-    let geminiTab = null;
-    let profileIds = { chatgpt: null, gemini: null };
-    const chatsState = await loadChatsState();
-    const chatIdCandidate = requestedChatId || chatsState.activeChatId;
-    const chat = chatIdCandidate ? findChatById(chatsState, chatIdCandidate) : null;
-    const chatId = chat?.chatId || chatsState.activeChatId;
-    if (chatId && chatsState.activeChatId !== chatId) {
-        await setActiveChat(chatId);
-    }
+        if (activeDebateState.isActive) {
+            await endDebateSession('Session replaced by a new request.');
+        }
 
-    const profilesState = await loadTabProfiles();
-    const hasDefaultProfiles = Boolean(profilesState.defaults?.chatgpt && profilesState.defaults?.gemini);
-    const hasExplicitTabIds = Number.isFinite(requestedTabs.chatgpt) || Number.isFinite(requestedTabs.gemini);
-    const useProfiles = Boolean(requestedProfiles || (!hasExplicitTabIds && hasDefaultProfiles));
+        let chatgptTab = null;
+        let geminiTab = null;
+        let profileIds = { chatgpt: null, gemini: null };
+        const chatsState = await loadChatsState();
+        const chatIdCandidate = requestedChatId || chatsState.activeChatId;
+        const hasCandidate = chatIdCandidate && Array.isArray(chatsState.chats)
+            ? chatsState.chats.some((chat) => chat.chatId === chatIdCandidate)
+            : false;
+        const chatId = hasCandidate ? chatIdCandidate : chatsState.activeChatId;
+        if (chatId && chatsState.activeChatId !== chatId) {
+            await setActiveChat(chatId);
+        }
 
-    if (useProfiles) {
-        profileIds = {
-            chatgpt: resolveProfileSelection('chatgpt', requestedProfiles?.chatgpt, profilesState.defaults),
-            gemini: resolveProfileSelection('gemini', requestedProfiles?.gemini, profilesState.defaults)
+        const profilesState = await loadTabProfiles();
+        const hasDefaultProfiles = Boolean(profilesState.defaults?.chatgpt && profilesState.defaults?.gemini);
+        const hasExplicitTabIds = Number.isFinite(requestedTabs.chatgpt) || Number.isFinite(requestedTabs.gemini);
+        const useProfiles = Boolean(requestedProfiles || (!hasExplicitTabIds && hasDefaultProfiles));
+
+        if (useProfiles) {
+            profileIds = {
+                chatgpt: resolveProfileSelection('chatgpt', requestedProfiles?.chatgpt, profilesState.defaults),
+                gemini: resolveProfileSelection('gemini', requestedProfiles?.gemini, profilesState.defaults)
+            };
+
+            if (!profileIds.chatgpt || !profileIds.gemini) {
+                sendMessageToPopup({
+                    type: 'UI_SESSION_ERROR',
+                    error: 'Both ChatGPT and Gemini profiles are required to start a debate.'
+                });
+                return;
+            }
+
+            const chatgptValidation = await validateProfileForSession('chatgpt', profileIds.chatgpt, { requirePing: true });
+            if (!chatgptValidation.ok) {
+                sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: chatgptValidation.error });
+                return;
+            }
+            const geminiValidation = await validateProfileForSession('gemini', profileIds.gemini, { requirePing: true });
+            if (!geminiValidation.ok) {
+                sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: geminiValidation.error });
+                return;
+            }
+            chatgptTab = { id: chatgptValidation.profile.tabId };
+            geminiTab = { id: geminiValidation.profile.tabId };
+        } else {
+            if (Number.isFinite(requestedTabs.chatgpt) || Number.isFinite(requestedTabs.gemini)) {
+                await setPreferredTabs({
+                    chatgptTabId: requestedTabs.chatgpt,
+                    geminiTabId: requestedTabs.gemini
+                });
+            }
+
+            const preferred = await getPreferredTabs();
+            chatgptTab = await resolveTabForLLM('chatgpt', requestedTabs.chatgpt, preferred.chatgpt);
+            geminiTab = await resolveTabForLLM('gemini', requestedTabs.gemini, preferred.gemini);
+
+            if (!chatgptTab || !geminiTab) {
+                const missing = [];
+                if (!chatgptTab) missing.push('ChatGPT');
+                if (!geminiTab) missing.push('Gemini');
+                sendMessageToPopup({
+                    type: 'UI_SESSION_ERROR',
+                    error: `${missing.join(' and ')} tab not found. Please open the required LLM tabs.`
+                });
+                return;
+            }
+        }
+
+        const now = Date.now();
+        activeDebateState = {
+            ...defaultDebateState,
+            isActive: true,
+            chatId: chatId,
+            sessionId: generateSessionId(),
+            rounds: rounds,
+            totalTurns: rounds * 2,
+            turnIndex: 1,
+            firstLLM: firstLLM,
+            secondLLM: secondLLM,
+            profileIds: profileIds,
+            tabIds: {
+                chatgpt: chatgptTab.id,
+                gemini: geminiTab.id
+            },
+            userQuery: prompt,
+            messages: [{ role: 'user', content: prompt, timestamp: now, turnIndex: 0 }],
+            startedAt: now
         };
 
-        if (!profileIds.chatgpt || !profileIds.gemini) {
-            sendMessageToPopup({
-                type: 'UI_SESSION_ERROR',
-                error: 'Both ChatGPT and Gemini profiles are required to start a debate.'
-            });
-            return;
-        }
+        await persistDebateState();
 
-        const chatgptValidation = await validateProfileForSession('chatgpt', profileIds.chatgpt, { requirePing: true });
-        if (!chatgptValidation.ok) {
-            sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: chatgptValidation.error });
-            return;
-        }
-        const geminiValidation = await validateProfileForSession('gemini', profileIds.gemini, { requirePing: true });
-        if (!geminiValidation.ok) {
-            sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: geminiValidation.error });
-            return;
-        }
-        chatgptTab = { id: chatgptValidation.profile.tabId };
-        geminiTab = { id: geminiValidation.profile.tabId };
-    } else {
-        if (Number.isFinite(requestedTabs.chatgpt) || Number.isFinite(requestedTabs.gemini)) {
-            await setPreferredTabs({
-                chatgptTabId: requestedTabs.chatgpt,
-                geminiTabId: requestedTabs.gemini
-            });
-        }
+        sendMessageToPopup({
+            type: 'UI_SESSION_STARTED',
+            sessionId: activeDebateState.sessionId,
+            chatId: activeDebateState.chatId,
+            rounds: rounds,
+            firstLLM: firstLLM,
+            tabIds: activeDebateState.tabIds,
+            profileIds: activeDebateState.profileIds
+        });
 
-        const preferred = await getPreferredTabs();
-        chatgptTab = await resolveTabForLLM('chatgpt', requestedTabs.chatgpt, preferred.chatgpt);
-        geminiTab = await resolveTabForLLM('gemini', requestedTabs.gemini, preferred.gemini);
-
-        if (!chatgptTab || !geminiTab) {
-            const missing = [];
-            if (!chatgptTab) missing.push('ChatGPT');
-            if (!geminiTab) missing.push('Gemini');
-            sendMessageToPopup({
-                type: 'UI_SESSION_ERROR',
-                error: `${missing.join(' and ')} tab not found. Please open the required LLM tabs.`
-            });
-            return;
-        }
-    }
-
-    const now = Date.now();
-    activeDebateState = {
-        ...defaultDebateState,
-        isActive: true,
-        chatId: chatId,
-        sessionId: generateSessionId(),
-        rounds: rounds,
-        totalTurns: rounds * 2,
-        turnIndex: 1,
-        firstLLM: firstLLM,
-        secondLLM: secondLLM,
-        profileIds: profileIds,
-        tabIds: {
-            chatgpt: chatgptTab.id,
-            gemini: geminiTab.id
-        },
-        userQuery: prompt,
-        messages: [{ role: 'user', content: prompt, timestamp: now, turnIndex: 0 }],
-        startedAt: now
-    };
-
-    await persistDebateState();
-
-    sendMessageToPopup({
-        type: 'UI_SESSION_STARTED',
-        sessionId: activeDebateState.sessionId,
-        chatId: activeDebateState.chatId,
-        rounds: rounds,
-        firstLLM: firstLLM,
-        tabIds: activeDebateState.tabIds,
-        profileIds: activeDebateState.profileIds
-    });
-
-    sendMessageToPopup({
-        type: 'UI_MESSAGE_ADD',
-        chatId: activeDebateState.chatId,
-        role: 'user',
-        content: prompt,
-        timestamp: now,
-        turnIndex: 0,
-        sessionId: activeDebateState.sessionId
-    });
-
-    if (activeDebateState.chatId) {
-        await appendChatMessage(activeDebateState.chatId, {
+        sendMessageToPopup({
+            type: 'UI_MESSAGE_ADD',
+            chatId: activeDebateState.chatId,
             role: 'user',
             content: prompt,
             timestamp: now,
             turnIndex: 0,
             sessionId: activeDebateState.sessionId
         });
-    }
 
-    await lockProfilesForSession(activeDebateState.sessionId, activeDebateState.profileIds);
-    await sendDebateTurn(activeDebateState);
+        if (activeDebateState.chatId) {
+            await appendChatMessage(activeDebateState.chatId, {
+                role: 'user',
+                content: prompt,
+                timestamp: now,
+                turnIndex: 0,
+                sessionId: activeDebateState.sessionId
+            });
+        }
+
+        await lockProfilesForSession(activeDebateState.sessionId, activeDebateState.profileIds);
+        await sendDebateTurn(activeDebateState);
+    } catch (error) {
+        console.error('[MLC Debate] Error starting session:', error);
+        sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: error?.message || 'Failed to start session.' });
+    }
 }
 
 async function handleStopDebateSession(message) {

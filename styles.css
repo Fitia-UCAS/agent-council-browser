@@ -23,6 +23,10 @@
   --font-family-mono: "IBM Plex Mono", "SFMono-Regular", ui-monospace, monospace;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
@@ -634,6 +638,10 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.timeline-load-older {
+  align-self: center;
 }
 
 .empty-state {

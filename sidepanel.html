@@ -138,6 +138,30 @@
             </section>
 
             <section class="drawer-section">
+                <div class="drawer-section-title">Security</div>
+                <div class="prompt-note">
+                    Chat history is stored locally in an encrypted database. You will need your passphrase to unlock it after restarting Chrome.
+                </div>
+                <div class="settings-grid">
+                    <label class="field">
+                        <span class="field-label">Passphrase</span>
+                        <input id="history-passphrase" type="password" autocomplete="new-password" placeholder="Enter passphrase">
+                    </label>
+                    <label class="field" id="history-passphrase-confirm-field">
+                        <span class="field-label">Confirm</span>
+                        <input id="history-passphrase-confirm" type="password" autocomplete="new-password" placeholder="Confirm passphrase">
+                    </label>
+                </div>
+                <div class="settings-actions">
+                    <button class="ghost-button" id="history-configure" type="button">Enable encryption</button>
+                    <button class="ghost-button" id="history-unlock" type="button">Unlock</button>
+                    <button class="ghost-button" id="history-lock" type="button">Lock</button>
+                    <button class="ghost-button" id="history-reset" type="button">Reset history</button>
+                </div>
+                <div class="prompt-status" id="history-status">History: checking…</div>
+            </section>
+
+            <section class="drawer-section">
                 <div class="drawer-section-title">Debate</div>
                 <div class="settings-grid">
                     <label class="field">
