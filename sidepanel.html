@@ -54,9 +54,26 @@
             <label class="composer-label" for="prompt-input">Prompt</label>
             <textarea id="prompt-input" rows="3" maxlength="8000" placeholder="Send a message..."></textarea>
             <div class="composer-hint" id="composer-hint" hidden></div>
+            <div class="composer-run-settings" id="composer-run-settings">
+                <div class="composer-run-row">
+                    <label class="field">
+                        <span class="field-label">Send to</span>
+                        <select id="run-target">
+                            <option value="debate_chatgpt">Debate (ChatGPT → Gemini)</option>
+                            <option value="debate_gemini">Debate (Gemini → ChatGPT)</option>
+                            <option value="chatgpt">ChatGPT</option>
+                            <option value="gemini">Gemini</option>
+                            <option value="both">Both</option>
+                        </select>
+                    </label>
+                    <label class="field">
+                        <span class="field-label">Iterations</span>
+                        <input id="iterations" type="number" min="1" max="12" value="3">
+                    </label>
+                </div>
+            </div>
             <div class="composer-actions">
                 <div class="composer-meta">
-                    <button class="run-chip" id="run-config-button" type="button" aria-label="Run settings"></button>
                     <span id="char-count">0</span>/8000
                 </div>
                 <div class="composer-buttons">
@@ -65,85 +82,6 @@
             </div>
         </footer>
     </div>
-
-    <dialog class="run-dialog" id="run-config-dialog" aria-label="Run settings">
-        <form method="dialog" id="run-config-form" class="run-dialog-form">
-            <div class="run-dialog-header">
-                <div class="run-dialog-title">Run settings</div>
-                <button class="icon-button" id="run-dialog-close" type="button" aria-label="Close">
-                    <span class="material-symbols-rounded">close</span>
-                </button>
-            </div>
-
-            <div class="run-dialog-body">
-                <div class="run-dialog-grid">
-                    <label class="field">
-                        <span class="field-label">Mode</span>
-                        <select id="run-mode">
-                            <option value="debate">Debate</option>
-                            <option value="single">Single</option>
-                        </select>
-                    </label>
-
-                    <label class="field">
-                        <span class="field-label" id="run-llm-label">First LLM</span>
-                        <select id="first-llm">
-                            <option value="chatgpt">ChatGPT</option>
-                            <option value="gemini">Gemini</option>
-                        </select>
-                    </label>
-
-                    <label class="field">
-                        <span class="field-label">Iterations</span>
-                        <input id="iterations" type="number" min="1" max="12" value="3">
-                    </label>
-                </div>
-
-                <div class="run-dialog-help" id="run-dialog-help"></div>
-
-                <details class="run-dialog-details" id="run-dialog-prompts">
-                    <summary class="run-dialog-summary">
-                        <span>Prompts (optional)</span>
-                        <span class="material-symbols-rounded">expand_more</span>
-                    </summary>
-                    <div class="run-dialog-details-body">
-                        <div class="prompt-note">
-                            These prompts apply to this send only unless you click <em>Save as default</em>.
-                            Placeholders: <code>{llm}</code>, <code>{other_llm}</code>, <code>{round}</code>, <code>{rounds}</code>, <code>{other_answer}</code>.
-                        </div>
-
-                        <label class="field">
-                            <span class="field-label">Outer / header</span>
-                            <textarea id="run-prompt-header" rows="4" spellcheck="false"></textarea>
-                        </label>
-                        <label class="field">
-                            <span class="field-label">Intermediary</span>
-                            <textarea id="run-prompt-intermediary" rows="3" spellcheck="false"></textarea>
-                        </label>
-                        <label class="field">
-                            <span class="field-label">Final</span>
-                            <textarea id="run-prompt-final" rows="3" spellcheck="false"></textarea>
-                        </label>
-                        <label class="field">
-                            <span class="field-label">Follow-up wrapper</span>
-                            <textarea id="run-prompt-followup" rows="3" spellcheck="false"></textarea>
-                        </label>
-
-                        <div class="settings-actions">
-                            <button class="ghost-button" id="run-prompt-save-default" type="button">Save as default</button>
-                            <button class="ghost-button" id="run-prompt-reset-default" type="button">Reset defaults</button>
-                        </div>
-                        <div class="prompt-status" id="run-prompt-status" hidden></div>
-                    </div>
-                </details>
-            </div>
-
-            <div class="run-dialog-actions">
-                <button class="ghost-button" id="run-dialog-cancel" type="button">Cancel</button>
-                <button class="primary-button" id="run-dialog-send" type="submit" value="send">Send</button>
-            </div>
-        </form>
-    </dialog>
 
     <div class="drawer-backdrop" id="chats-backdrop" hidden></div>
     <aside class="drawer drawer-left" id="chats-drawer" aria-hidden="true">

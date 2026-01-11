@@ -6,7 +6,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 - Chrome extension that runs a **side panel chat UI** with either:
   - a multi‑iteration debate between ChatGPT and Gemini, or
-  - a single‑LLM run (ChatGPT or Gemini) with optional self‑refinement iterations.
+  - a direct send to ChatGPT, Gemini, or both (no debate scaffolding).
 - It can also **forward prompts between LLM pages** via injected toggle buttons (legacy flow, still present).
 - The side panel is the primary UI: clicking the extension icon opens the side panel (no popup).
 
@@ -14,13 +14,11 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 1. User creates **Tab Profiles** for ChatGPT and Gemini in the Provider Manager:
    - Use the current tab, or open a new provider tab and claim it after manual model selection.
-2. In the side panel, user writes a message and clicks **Send**.
-3. A small **Run settings** dialog opens (prefilled from the last run in the current chat):
-   - Mode: Debate or Single
-   - Iterations (rounds)
-   - Starting LLM (debate) or chosen LLM (single)
-   - Optional per-send prompt overrides (header/intermediary/final/follow-up wrapper), with “Save as default”.
-4. The extension runs a debate (when mode=Debate):
+2. In the side panel composer, user selects:
+   - **Send to**: Debate (ChatGPT→Gemini), Debate (Gemini→ChatGPT), ChatGPT, Gemini, or Both
+   - **Iterations** (enabled only for Debate; forced to 1 for direct sends)
+3. User writes a message and clicks **Send**.
+4. The extension runs a debate (when Send to = Debate):
    - **Round 1**: first LLM gets full context + user query.
    - **Round 1**: second LLM gets full context + user query + first LLM answer.
    - **Rounds 2..N**: each new prompt contains only the previous model’s latest answer (the tab thread holds history).
@@ -78,8 +76,8 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 - Send is disabled until:
   - Prompt is non-empty
-  - Iterations > 0
-  - Selected profiles are valid (status OK, tab exists) for the providers required by the run mode
+  - Iterations > 0 (Debate only)
+  - Selected profiles are valid (status OK, tab exists) for the providers required by the selected Send-to target
 - The background still validates profiles before every prompt injection.
 - If a profile goes offline or navigates away, the session pauses with a clear reason and fix actions.
 
@@ -104,7 +102,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Supports open/claim profile flows and focus tab actions.
 
 - `debate_prompts.json`
-  - User-editable prompt templates for both Debate and Single modes (header + intermediary/final messages + follow-up wrapper) used by `buildDebatePrompt(...)` / `buildSinglePrompt(...)`.
+  - User-editable prompt templates for Debate, Single (legacy), and Direct runs used by `buildDebatePrompt(...)` / `buildSinglePrompt(...)` / `buildDirectPrompt(...)`.
   - Loaded by `background.js` via `fetch(chrome.runtime.getURL(...))` with a safe inline fallback.
   - Side panel can override these templates via local storage (see prompt editor below).
 

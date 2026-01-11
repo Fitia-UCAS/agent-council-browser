@@ -405,7 +405,7 @@ async function loadActiveDebateState() {
         if (typeof activeDebateState.isPaused !== 'boolean') {
             activeDebateState.isPaused = false;
         }
-        if (activeDebateState.mode !== 'single') {
+        if (!['debate', 'single', 'direct'].includes(activeDebateState.mode)) {
             activeDebateState.mode = 'debate';
         }
         if (typeof activeDebateState.isFollowUp !== 'boolean') {
@@ -1439,12 +1439,24 @@ function sanitizeSessionPromptOverrides(input) {
 async function handleStartDebateSession(message) {
     try {
         const prompt = (message.prompt || '').trim();
-        const rounds = Math.min(12, Math.max(1, parseInt(message.rounds, 10) || 1));
-        const mode = message.mode === 'single' ? 'single' : 'debate';
+        const mode = message.mode === 'direct'
+            ? 'direct'
+            : (message.mode === 'single' ? 'single' : 'debate');
+        const directTarget = message.target === 'both'
+            ? 'both'
+            : (message.target === 'gemini' ? 'gemini' : 'chatgpt');
+        const rounds = mode === 'debate' || mode === 'single'
+            ? Math.min(12, Math.max(1, parseInt(message.rounds, 10) || 1))
+            : 1;
         const singleLLM = message.llm === 'gemini' ? 'gemini' : 'chatgpt';
         const debateFirstLLM = message.firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
-        const firstLLM = mode === 'single' ? singleLLM : debateFirstLLM;
-        const secondLLM = mode === 'single' ? null : (firstLLM === 'chatgpt' ? 'gemini' : 'chatgpt');
+        const [firstLLM, secondLLM] = mode === 'debate'
+            ? [debateFirstLLM, debateFirstLLM === 'chatgpt' ? 'gemini' : 'chatgpt']
+            : (mode === 'single'
+                ? [singleLLM, null]
+                : (directTarget === 'both'
+                    ? ['chatgpt', 'gemini']
+                    : [directTarget, null]));
         const requestedTabs = message.tabIds || {};
         const requestedProfiles = message.profileIds || null;
         const requestedChatId = typeof message.chatId === 'string' ? message.chatId : null;
@@ -1500,7 +1512,7 @@ async function handleStartDebateSession(message) {
         }
 
         const profilesState = await loadTabProfiles();
-        const requiredProviders = mode === 'single' ? [firstLLM] : ['chatgpt', 'gemini'];
+        const requiredProviders = secondLLM ? ['chatgpt', 'gemini'] : [firstLLM];
         const hasDefaultProfiles = requiredProviders.every((provider) => Boolean(profilesState.defaults?.[provider]));
         const hasExplicitTabIds = requiredProviders.some((provider) => Number.isFinite(requestedTabs[provider]));
         const hasRequestedProfiles = Boolean(requestedProfiles && requiredProviders.some((provider) => requestedProfiles?.[provider]));
@@ -1552,9 +1564,14 @@ async function handleStartDebateSession(message) {
         }
 
         const now = Date.now();
-        const runConfig = mode === 'single'
-            ? { mode: 'single', rounds, llm: firstLLM }
-            : { mode: 'debate', rounds, firstLLM };
+        const runConfig = mode === 'direct'
+            ? { runType: 'direct', target: directTarget }
+            : (mode === 'single'
+                ? { mode: 'single', rounds, llm: firstLLM }
+                : { runType: 'debate', rounds, firstLLM });
+        const totalTurns = mode === 'direct'
+            ? (secondLLM ? 2 : 1)
+            : (mode === 'single' ? rounds : rounds * 2);
         activeDebateState = {
             ...defaultDebateState,
             isActive: true,
@@ -1562,7 +1579,7 @@ async function handleStartDebateSession(message) {
             chatId: chatId,
             sessionId: generateSessionId(),
             rounds: rounds,
-            totalTurns: mode === 'single' ? rounds : rounds * 2,
+            totalTurns,
             turnIndex: 1,
             firstLLM: firstLLM,
             secondLLM: secondLLM,
@@ -1585,6 +1602,7 @@ async function handleStartDebateSession(message) {
             rounds: rounds,
             mode,
             firstLLM: firstLLM,
+            target: mode === 'direct' ? directTarget : undefined,
             tabIds: activeDebateState.tabIds,
             profileIds: activeDebateState.profileIds
         });
@@ -1628,6 +1646,9 @@ async function handleStopDebateSession(message) {
 }
 
 function getRoundIndex(turnIndex, session = null) {
+    if (session?.mode === 'direct') {
+        return 1;
+    }
     if (session?.mode === 'single') {
         return Math.max(1, turnIndex);
     }
@@ -1635,6 +1656,10 @@ function getRoundIndex(turnIndex, session = null) {
 }
 
 function getTurnLLM(session, turnIndex) {
+    if (session?.mode === 'direct') {
+        if (turnIndex === 1) return session.firstLLM || 'chatgpt';
+        return session.secondLLM || session.firstLLM || 'chatgpt';
+    }
     if (session?.mode === 'single') {
         return session.firstLLM || 'chatgpt';
     }
@@ -1760,6 +1785,21 @@ function getDefaultDebatePromptConfig() {
                 '',
                 '{intermediary_message}'
             ].join('\n')
+        },
+        direct: {
+            placeholders: {},
+            single_turn: [
+                "Here's a new message from the user:",
+                '{raw_user_msg}',
+                '',
+                'Please {llm} answer.'
+            ].join('\n'),
+            both_turn: [
+                "Here's a new message from the user:",
+                '{raw_user_msg}',
+                '',
+                'You are {llm}. Please answer independently.'
+            ].join('\n')
         }
     };
 }
@@ -1770,6 +1810,7 @@ function normalizeDebatePromptConfig(rawConfig) {
 
     const rawDebate = rawConfig.debate && typeof rawConfig.debate === 'object' ? rawConfig.debate : null;
     const rawSingle = rawConfig.single && typeof rawConfig.single === 'object' ? rawConfig.single : null;
+    const rawDirect = rawConfig.direct && typeof rawConfig.direct === 'object' ? rawConfig.direct : null;
 
     const pickString = (value, fallback) => (typeof value === 'string' ? value : fallback);
 
@@ -1802,7 +1843,15 @@ function normalizeDebatePromptConfig(rawConfig) {
             followup_user_msg_wrapper: pickString(rawSingle.followup_user_msg_wrapper, defaults.single.followup_user_msg_wrapper),
             turn1: pickString(rawSingle.turn1, defaults.single.turn1),
             turn2plus: pickString(rawSingle.turn2plus, defaults.single.turn2plus)
-        } : defaults.single
+        } : defaults.single,
+        direct: rawDirect ? {
+            placeholders:
+                rawDirect.placeholders && typeof rawDirect.placeholders === 'object'
+                    ? rawDirect.placeholders
+                    : defaults.direct.placeholders,
+            single_turn: pickString(rawDirect.single_turn, defaults.direct.single_turn),
+            both_turn: pickString(rawDirect.both_turn, defaults.direct.both_turn)
+        } : defaults.direct
     };
 }
 
@@ -1985,19 +2034,24 @@ async function buildDebatePrompt(session, turnIndex) {
     const userMsg = renderUserMessageForSession(session, templates, { ...baseVariables, header });
     const renderedIntermediary = renderPromptTemplate(templates.intermediary_message, { ...baseVariables, header });
     const renderedFinal = renderPromptTemplate(templates.final_message, { ...baseVariables, header });
-    const renderedFirstTurnInstruction = session.rounds <= 1
-        ? renderedFinal
-        : renderPromptTemplate(
-            typeof templates.first_turn_instruction === 'string' ? templates.first_turn_instruction : 'Provide your best answer.',
-            { ...baseVariables, header }
-        );
     const isFinalTurn = turnIndex === totalTurns;
+    const renderedInitialInstruction = renderPromptTemplate(
+        typeof templates.first_turn_instruction === 'string' ? templates.first_turn_instruction : 'Provide your best answer.',
+        { ...baseVariables, header }
+    );
+    const turnInstruction = turnIndex === 1
+        ? renderedInitialInstruction
+        : (isFinalTurn
+            ? (session.rounds === 1
+                ? `${renderedInitialInstruction}\n\n${renderedFinal}`
+                : renderedFinal)
+            : (session.rounds >= 3 ? renderedIntermediary : renderedInitialInstruction));
     const variables = {
         ...baseVariables,
         header,
         user_msg: userMsg,
-        first_turn_instruction: renderedFirstTurnInstruction,
-        intermediary_message: isFinalTurn ? renderedFinal : renderedIntermediary,
+        first_turn_instruction: renderedInitialInstruction,
+        intermediary_message: turnInstruction,
         final_message: renderedFinal
     };
 
@@ -2052,20 +2106,25 @@ async function buildSinglePrompt(session, turnIndex) {
     const userMsg = renderUserMessageForSession(session, templates, { ...baseVariables, header });
     const renderedIntermediary = renderPromptTemplate(templates.intermediary_message, { ...baseVariables, header });
     const renderedFinal = renderPromptTemplate(templates.final_message, { ...baseVariables, header });
-    const renderedFirstTurnInstruction = session.rounds <= 1
-        ? renderedFinal
-        : renderPromptTemplate(
-            typeof templates.first_turn_instruction === 'string' ? templates.first_turn_instruction : 'Provide your best answer.',
-            { ...baseVariables, header }
-        );
     const isFinalTurn = turnIndex === totalTurns;
+    const renderedInitialInstruction = renderPromptTemplate(
+        typeof templates.first_turn_instruction === 'string' ? templates.first_turn_instruction : 'Provide your best answer.',
+        { ...baseVariables, header }
+    );
+    const turnInstruction = turnIndex === 1
+        ? renderedInitialInstruction
+        : (isFinalTurn
+            ? (session.rounds === 1
+                ? `${renderedInitialInstruction}\n\n${renderedFinal}`
+                : renderedFinal)
+            : renderedIntermediary);
 
     const variables = {
         ...baseVariables,
         header,
         user_msg: userMsg,
-        first_turn_instruction: renderedFirstTurnInstruction,
-        intermediary_message: isFinalTurn ? renderedFinal : renderedIntermediary,
+        first_turn_instruction: renderedInitialInstruction,
+        intermediary_message: turnInstruction,
         final_message: renderedFinal
     };
 
@@ -2076,7 +2135,40 @@ async function buildSinglePrompt(session, turnIndex) {
     return renderPromptTemplate(templates.turn2plus, variables).trim();
 }
 
+async function buildDirectPrompt(session, turnIndex) {
+    const promptConfig = await loadDebatePromptConfig();
+    const defaults = getDefaultDebatePromptConfig();
+    const templates = promptConfig?.direct || defaults.direct;
+
+    const expectedLLM = getTurnLLM(session, turnIndex);
+    const expectedLabel = formatLLMLabel(expectedLLM);
+    const rawUserMsg = String(session?.userQuery || '').trim();
+    const baseVariables = {
+        llm: expectedLabel,
+        expected_llm: expectedLabel,
+        raw_user_msg: rawUserMsg,
+        user_msg: rawUserMsg,
+        conversation_context: session?.conversationContext || ''
+    };
+
+    const isBoth = Boolean(session?.secondLLM);
+    const template = isBoth && typeof templates?.both_turn === 'string'
+        ? templates.both_turn
+        : templates?.single_turn;
+    const rendered = renderPromptTemplate(template, baseVariables).trim();
+    if (rendered) return rendered;
+
+    const header = "Here's a new message from the user:";
+    if (isBoth) {
+        return `${header}\n${rawUserMsg}\n\nYou are ${expectedLabel}. Please answer independently.`.trim();
+    }
+    return `${header}\n${rawUserMsg}\n\nPlease ${expectedLabel} answer.`.trim();
+}
+
 async function buildSessionPrompt(session, turnIndex) {
+    if (session?.mode === 'direct') {
+        return buildDirectPrompt(session, turnIndex);
+    }
     if (session?.mode === 'single') {
         return buildSinglePrompt(session, turnIndex);
     }

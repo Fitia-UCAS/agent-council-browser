@@ -3,7 +3,7 @@
   "debate": {
     "placeholders": {
       "header": "Rendered from debate.header (string).",
-      "first_turn_instruction": "Rendered from debate.first_turn_instruction (string). Used on the first turn unless rounds==1 (then final_message is used).",
+      "first_turn_instruction": "Rendered from debate.first_turn_instruction (string). Used on initial-style turns (see background rules for rounds=1/2/3+).",
       "intermediary_message": "Rendered from debate.intermediary_message (string). Used for turns 2..N-1 by default.",
       "final_message": "Rendered from debate.final_message (string). Used only on the final turn (turn == total_turns) by default.",
       "rounds": "Total number of iterations.",
@@ -34,7 +34,7 @@
   "single": {
     "placeholders": {
       "header": "Rendered from single.header (string).",
-      "first_turn_instruction": "Rendered from single.first_turn_instruction (string). Used on the first turn unless rounds==1 (then final_message is used).",
+      "first_turn_instruction": "Rendered from single.first_turn_instruction (string). Used on initial-style turns (see background rules for rounds=1/2/3+).",
       "intermediary_message": "Rendered from single.intermediary_message (string). Used for turns 2..N-1 by default.",
       "final_message": "Rendered from single.final_message (string). Used only on the final turn (turn == total_turns) by default.",
       "rounds": "Total number of iterations.",
@@ -56,5 +56,14 @@
     "followup_user_msg_wrapper": "Here's a new message from the user:\n{raw_user_msg}\n\nThis is a continuation of the same chat. Please {llm} answer.\nIf refining: you are on iteration {round}/{rounds}.",
     "turn1": "{header}\n\nIteration {round}/{rounds}\n\nUser message:\n{user_msg}\n\n{first_turn_instruction}",
     "turn2plus": "Iteration {round}/{rounds}\n\nYour previous answer (iteration {prev_round}/{rounds}):\n{prev_answer}\n\nUser message:\n{user_msg}\n\n{intermediary_message}"
+  },
+  "direct": {
+    "placeholders": {
+      "llm": "The LLM that should respond for this turn (ChatGPT|Gemini).",
+      "raw_user_msg": "The raw user message.",
+      "conversation_context": "Optional chat context (best effort)."
+    },
+    "single_turn": "Here's a new message from the user:\n{raw_user_msg}\n\nPlease {llm} answer.",
+    "both_turn": "Here's a new message from the user:\n{raw_user_msg}\n\nYou are {llm}. Please answer independently."
   }
 }

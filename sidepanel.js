@@ -31,23 +31,8 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.promptInput = document.getElementById('prompt-input');
     elements.sendButton = document.getElementById('send-button');
     elements.charCount = document.getElementById('char-count');
-    elements.runConfigButton = document.getElementById('run-config-button');
-    elements.runConfigDialog = document.getElementById('run-config-dialog');
-    elements.runConfigForm = document.getElementById('run-config-form');
-    elements.runDialogClose = document.getElementById('run-dialog-close');
-    elements.runDialogCancel = document.getElementById('run-dialog-cancel');
-    elements.runDialogHelp = document.getElementById('run-dialog-help');
-    elements.firstLLM = document.getElementById('first-llm');
+    elements.runTarget = document.getElementById('run-target');
     elements.iterations = document.getElementById('iterations');
-    elements.runMode = document.getElementById('run-mode');
-    elements.runLlmLabel = document.getElementById('run-llm-label');
-    elements.runPromptHeader = document.getElementById('run-prompt-header');
-    elements.runPromptIntermediary = document.getElementById('run-prompt-intermediary');
-    elements.runPromptFinal = document.getElementById('run-prompt-final');
-    elements.runPromptFollowup = document.getElementById('run-prompt-followup');
-    elements.runPromptSaveDefault = document.getElementById('run-prompt-save-default');
-    elements.runPromptResetDefault = document.getElementById('run-prompt-reset-default');
-    elements.runPromptStatus = document.getElementById('run-prompt-status');
     elements.refreshProfiles = document.getElementById('refresh-profiles');
     elements.autoScroll = document.getElementById('auto-scroll');
     elements.timeline = document.getElementById('timeline');
@@ -139,73 +124,16 @@ function bindEvents() {
         elements.sendButton.addEventListener('click', handlePrimaryAction);
     }
 
-    if (elements.runConfigButton) {
-        elements.runConfigButton.addEventListener('click', () => {
-            if (state.running || state.paused) return;
-            openRunDialog();
-        });
-    }
-
-    if (elements.runDialogClose) {
-        elements.runDialogClose.addEventListener('click', () => closeRunDialog());
-    }
-
-    if (elements.runDialogCancel) {
-        elements.runDialogCancel.addEventListener('click', () => closeRunDialog());
-    }
-
-    if (elements.runConfigForm) {
-        elements.runConfigForm.addEventListener('submit', (event) => {
-            event.preventDefault();
-            if (!elements.runConfigDialog) return;
-            const validation = validateRunInputs();
-            if (!validation.ok) {
-                setRunDialogStatus(validation.error || 'Fix run settings to continue.', true);
-                return;
-            }
-            setRunDialogStatus('', false);
-            elements.runConfigDialog.close('send');
-        });
-    }
-
-    if (elements.runConfigDialog) {
-        elements.runConfigDialog.addEventListener('close', () => {
-            if (elements.runConfigDialog?.returnValue !== 'send') return;
-            startSession();
-        });
-    }
-
     if (elements.refreshProfiles) {
         elements.refreshProfiles.addEventListener('click', requestProfiles);
     }
 
+    if (elements.runTarget) {
+        elements.runTarget.addEventListener('change', updateSendState);
+    }
+
     if (elements.iterations) {
         elements.iterations.addEventListener('change', updateSendState);
-    }
-
-    if (elements.firstLLM) {
-        elements.firstLLM.addEventListener('change', () => {
-            updateRunUi();
-            updateSendState();
-        });
-    }
-
-    if (elements.runMode) {
-        elements.runMode.addEventListener('change', () => {
-            const modeKey = getModeKey();
-            const lastOverrides = findLastUserPromptOverrides(state.activeChat);
-            applyRunPromptDefaultsForMode(modeKey, lastOverrides);
-            updateRunUi();
-            updateSendState();
-        });
-    }
-
-    if (elements.runPromptSaveDefault) {
-        elements.runPromptSaveDefault.addEventListener('click', saveRunDialogPromptsAsDefault);
-    }
-
-    if (elements.runPromptResetDefault) {
-        elements.runPromptResetDefault.addEventListener('click', resetPromptTemplates);
     }
 
     if (elements.autoScroll) {
@@ -582,12 +510,6 @@ function loadPromptTemplates() {
             : 'Editing defaults (no override saved).';
         const warning = getIntermediaryPlaceholderWarning(state.promptConfig);
         setPromptStatus(warning ? `${sourceLabel}\n${warning}` : sourceLabel);
-
-        if (elements.runConfigDialog?.open) {
-            const lastOverrides = findLastUserPromptOverrides(state.activeChat);
-            applyRunPromptDefaultsForMode(getModeKey(), lastOverrides);
-            updateRunUi();
-        }
     });
 }
 
@@ -675,55 +597,56 @@ function updateCharCount() {
     elements.charCount.textContent = String(elements.promptInput.value.length);
 }
 
-function getRunMode() {
-    return elements.runMode?.value === 'single' ? 'single' : 'debate';
+function getRunTarget() {
+    const value = String(elements.runTarget?.value || '').trim();
+    switch (value) {
+        case 'debate_chatgpt':
+        case 'debate_gemini':
+        case 'chatgpt':
+        case 'gemini':
+        case 'both':
+            return value;
+        default:
+            return 'debate_chatgpt';
+    }
 }
 
-function getSelectedRunLLM() {
-    return elements.firstLLM?.value === 'gemini' ? 'gemini' : 'chatgpt';
+function isDebateTarget(runTarget) {
+    return runTarget === 'debate_chatgpt' || runTarget === 'debate_gemini';
+}
+
+function getDebateFirstLLM(runTarget) {
+    return runTarget === 'debate_gemini' ? 'gemini' : 'chatgpt';
+}
+
+function getDirectTarget(runTarget) {
+    if (runTarget === 'both') return 'both';
+    if (runTarget === 'gemini') return 'gemini';
+    return 'chatgpt';
+}
+
+function getRequiredProvidersForRun(runTarget) {
+    if (isDebateTarget(runTarget) || runTarget === 'both') return ['chatgpt', 'gemini'];
+    return [getDirectTarget(runTarget)];
 }
 
 function isRunConnected() {
-    if (getRunMode() === 'single') {
-        const provider = getSelectedRunLLM();
-        return Boolean(state.connectionStatus?.[provider]);
-    }
-    return isFullyConnected();
-}
-
-function getRunChipLabel() {
-    const mode = getRunMode();
-    const provider = getSelectedRunLLM();
-    const providerLabel = formatProviderLabel(provider);
-    const iterations = parseInt(elements.iterations?.value, 10) || 0;
-    const rounds = iterations > 0 ? iterations : 1;
-    if (mode === 'single') {
-        if (rounds <= 1) return providerLabel;
-        return `${providerLabel} · refine ${rounds}×`;
-    }
-    const other = provider === 'chatgpt' ? 'Gemini' : 'ChatGPT';
-    return `Debate · ${rounds} · ${providerLabel}→${other}`;
+    const runTarget = getRunTarget();
+    return getRequiredProvidersForRun(runTarget).every((provider) => Boolean(state.connectionStatus?.[provider]));
 }
 
 function updateRunUi() {
-    const mode = getRunMode();
-    const provider = getSelectedRunLLM();
-    if (elements.runLlmLabel) {
-        elements.runLlmLabel.textContent = mode === 'single' ? 'LLM' : 'First LLM';
+    const runTarget = getRunTarget();
+    const locked = state.running || state.paused;
+    const debate = isDebateTarget(runTarget);
+    if (elements.iterations) {
+        if (!debate) {
+            elements.iterations.value = '1';
+        }
+        elements.iterations.disabled = locked || !debate;
     }
-    if (elements.runConfigButton) {
-        elements.runConfigButton.textContent = getRunChipLabel();
-    }
-    if (elements.runDialogHelp) {
-        const iterations = parseInt(elements.iterations?.value, 10) || 0;
-        const rounds = iterations > 0 ? iterations : 1;
-        const providerLabel = formatProviderLabel(provider);
-        elements.runDialogHelp.textContent = mode === 'single'
-            ? (rounds <= 1
-                ? `Single: ${providerLabel} answers.`
-                : `Single: ${providerLabel} refines for ${rounds} iterations.`)
-            : `Debate: ${rounds} iteration${rounds === 1 ? '' : 's'} between ChatGPT and Gemini (starting with ${providerLabel}).`;
-        elements.runDialogHelp.dataset.error = 'false';
+    if (elements.runTarget) {
+        elements.runTarget.disabled = locked;
     }
 }
 
@@ -731,10 +654,6 @@ function clampInt(value, min, max) {
     const num = parseInt(value, 10);
     if (!Number.isFinite(num)) return min;
     return Math.min(max, Math.max(min, num));
-}
-
-function getModeKey() {
-    return getRunMode() === 'single' ? 'single' : 'debate';
 }
 
 function findLastUserRunConfig(chat) {
@@ -749,171 +668,37 @@ function findLastUserRunConfig(chat) {
     return null;
 }
 
-function findLastUserPromptOverrides(chat) {
-    const messages = Array.isArray(chat?.messages) ? chat.messages : [];
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-        const message = messages[i];
-        if (!message || message.role !== 'user') continue;
-        const meta = message.meta && typeof message.meta === 'object' ? message.meta : null;
-        const promptOverrides = meta?.promptOverrides && typeof meta.promptOverrides === 'object' ? meta.promptOverrides : null;
-        if (promptOverrides) return promptOverrides;
-    }
-    return null;
-}
-
 function applyRunConfigDefaults(runConfig) {
     if (!runConfig || typeof runConfig !== 'object') return;
-    const mode = runConfig.mode === 'single' ? 'single' : 'debate';
-    if (elements.runMode) {
-        elements.runMode.value = mode;
-    }
-    if (elements.iterations && runConfig.rounds) {
-        elements.iterations.value = String(clampInt(runConfig.rounds, 1, 12));
-    }
-    if (elements.firstLLM) {
-        const llm = mode === 'single' ? runConfig.llm : runConfig.firstLLM;
-        if (llm === 'gemini' || llm === 'chatgpt') {
-            elements.firstLLM.value = llm;
+    const runType = runConfig.runType || runConfig.mode || null;
+    if (runType === 'debate') {
+        const firstLLM = runConfig.firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
+        if (elements.runTarget) {
+            elements.runTarget.value = firstLLM === 'gemini' ? 'debate_gemini' : 'debate_chatgpt';
+        }
+        if (elements.iterations && runConfig.rounds) {
+            elements.iterations.value = String(clampInt(runConfig.rounds, 1, 12));
+        }
+    } else if (runType === 'direct') {
+        const target = runConfig.target;
+        if (elements.runTarget) {
+            if (target === 'both') elements.runTarget.value = 'both';
+            else if (target === 'gemini') elements.runTarget.value = 'gemini';
+            else elements.runTarget.value = 'chatgpt';
+        }
+        if (elements.iterations) {
+            elements.iterations.value = '1';
+        }
+    } else if (runType === 'single') {
+        const llm = runConfig.llm === 'gemini' ? 'gemini' : 'chatgpt';
+        if (elements.runTarget) {
+            elements.runTarget.value = llm;
+        }
+        if (elements.iterations) {
+            elements.iterations.value = '1';
         }
     }
     updateRunUi();
-}
-
-function getDefaultPromptsForMode(modeKey) {
-    const config = state.promptConfig && typeof state.promptConfig === 'object' ? state.promptConfig : null;
-    const section = config?.[modeKey] && typeof config[modeKey] === 'object' ? config[modeKey] : null;
-    return section || {};
-}
-
-function applyRunPromptDefaultsForMode(modeKey, promptOverrides) {
-    if (!elements.runPromptHeader || !elements.runPromptIntermediary || !elements.runPromptFinal || !elements.runPromptFollowup) return;
-    const defaults = getDefaultPromptsForMode(modeKey);
-    const overrides = promptOverrides && typeof promptOverrides === 'object'
-        ? (promptOverrides?.[modeKey] && typeof promptOverrides[modeKey] === 'object' ? promptOverrides[modeKey] : {})
-        : {};
-
-    elements.runPromptHeader.value = String(overrides.header ?? defaults.header ?? '');
-    elements.runPromptIntermediary.value = String(overrides.intermediary_message ?? defaults.intermediary_message ?? '');
-    elements.runPromptFinal.value = String(overrides.final_message ?? defaults.final_message ?? '');
-    elements.runPromptFollowup.value = String(overrides.followup_user_msg_wrapper ?? defaults.followup_user_msg_wrapper ?? '');
-}
-
-function setRunDialogStatus(text, isError) {
-    if (elements.runDialogHelp) {
-        if (text) {
-            elements.runDialogHelp.textContent = text;
-        } else {
-            updateRunUi();
-        }
-        elements.runDialogHelp.dataset.error = isError ? 'true' : 'false';
-    }
-}
-
-function openRunDialog() {
-    if (!elements.runConfigDialog) return;
-    if (!state.promptConfig) {
-        loadPromptTemplates();
-    }
-    updateRunUi();
-    applyRunDefaultsFromActiveChat();
-    const modeKey = getModeKey();
-    const lastOverrides = findLastUserPromptOverrides(state.activeChat);
-    applyRunPromptDefaultsForMode(modeKey, lastOverrides);
-    setRunDialogStatus('', false);
-    try {
-        elements.runConfigDialog.showModal();
-    } catch (error) {
-        elements.runConfigDialog.open = true;
-    }
-}
-
-function closeRunDialog() {
-    if (!elements.runConfigDialog) return;
-    try {
-        elements.runConfigDialog.close('cancel');
-    } catch (error) {
-        elements.runConfigDialog.open = false;
-    }
-}
-
-function validateRunInputs() {
-    if (state.running || state.paused) return { ok: false, error: 'A run is already in progress.' };
-    if (!elements.promptInput) return { ok: false, error: 'Prompt input not found.' };
-    if (!isHistoryReady()) {
-        return {
-            ok: false,
-            error: state.historyStatus?.configured
-                ? 'History is locked. Unlock it in Settings → Security.'
-                : 'Set an encryption passphrase in Settings → Security to enable chat history.'
-        };
-    }
-    const prompt = elements.promptInput.value.trim();
-    if (!prompt) return { ok: false, error: 'Enter a message to send.' };
-
-    const rounds = parseInt(elements.iterations?.value, 10) || 0;
-    if (rounds <= 0) return { ok: false, error: 'Iterations must be at least 1.' };
-
-    if (!isRunConnected()) {
-        const mode = getRunMode();
-        const providerLabel = formatProviderLabel(getSelectedRunLLM());
-        return {
-            ok: false,
-            error: mode === 'single'
-                ? `Connect ${providerLabel} to start.`
-                : 'Connect ChatGPT and Gemini to start.'
-        };
-    }
-    return { ok: true };
-}
-
-function collectRunPromptOverrides(modeKey) {
-    if (!elements.runPromptHeader || !elements.runPromptIntermediary || !elements.runPromptFinal || !elements.runPromptFollowup) return null;
-    const defaults = getDefaultPromptsForMode(modeKey);
-    const header = elements.runPromptHeader.value;
-    const intermediary = elements.runPromptIntermediary.value;
-    const finalPrompt = elements.runPromptFinal.value;
-    const followup = elements.runPromptFollowup.value;
-
-    const overrides = {};
-    if (String(header ?? '') !== String(defaults.header ?? '')) overrides.header = header;
-    if (String(intermediary ?? '') !== String(defaults.intermediary_message ?? '')) overrides.intermediary_message = intermediary;
-    if (String(finalPrompt ?? '') !== String(defaults.final_message ?? '')) overrides.final_message = finalPrompt;
-    if (String(followup ?? '') !== String(defaults.followup_user_msg_wrapper ?? '')) overrides.followup_user_msg_wrapper = followup;
-
-    if (Object.keys(overrides).length === 0) return null;
-    return { [modeKey]: overrides };
-}
-
-function saveRunDialogPromptsAsDefault() {
-    const modeKey = getModeKey();
-    const config = state.promptConfig && typeof state.promptConfig === 'object'
-        ? state.promptConfig
-        : { schemaVersion: 1, debate: {}, single: {} };
-    if (!config.schemaVersion) config.schemaVersion = 1;
-    if (!config.debate || typeof config.debate !== 'object') config.debate = {};
-    if (!config.single || typeof config.single !== 'object') config.single = {};
-
-    const section = config[modeKey];
-    section.header = elements.runPromptHeader?.value ?? section.header ?? '';
-    section.intermediary_message = elements.runPromptIntermediary?.value ?? section.intermediary_message ?? '';
-    section.final_message = elements.runPromptFinal?.value ?? section.final_message ?? '';
-    section.followup_user_msg_wrapper = elements.runPromptFollowup?.value ?? section.followup_user_msg_wrapper ?? '';
-
-    sendMessage({ type: 'SET_DEBATE_PROMPTS', config }, (response) => {
-        if (!response || response.ok === false) {
-            if (elements.runPromptStatus) {
-                elements.runPromptStatus.hidden = false;
-                elements.runPromptStatus.textContent = `Error: ${response?.error || 'Failed to save prompts.'}`;
-            }
-            return;
-        }
-        state.promptConfig = response.config || config;
-        state.promptConfigSource = response.source || 'override';
-        if (elements.runPromptStatus) {
-            elements.runPromptStatus.hidden = false;
-            elements.runPromptStatus.textContent = 'Saved default prompts.';
-        }
-    });
 }
 
 function applyRunDefaultsFromActiveChat() {
@@ -932,16 +717,16 @@ function updateSendState() {
     if (locked) {
         elements.sendButton.textContent = 'Stop';
         elements.sendButton.disabled = !isHistoryReady();
-        if (elements.runConfigButton) elements.runConfigButton.disabled = true;
         updateComposerHint();
         return;
     }
     const hasPrompt = elements.promptInput.value.trim().length > 0;
-    const iterations = parseInt(elements.iterations.value, 10) || 0;
+    const runTarget = getRunTarget();
+    const debate = isDebateTarget(runTarget);
+    const iterations = debate ? (parseInt(elements.iterations.value, 10) || 0) : 1;
     const connected = isRunConnected();
     elements.sendButton.textContent = 'Send';
     elements.sendButton.disabled = !hasPrompt || iterations <= 0 || !connected || !isHistoryReady();
-    if (elements.runConfigButton) elements.runConfigButton.disabled = false;
     updateComposerHint();
     updateEmptyState();
 }
@@ -951,13 +736,12 @@ function setSessionState({ running, paused }) {
     state.paused = paused;
     const locked = running || paused;
 
-    if (elements.runMode) elements.runMode.disabled = locked;
-    if (elements.firstLLM) elements.firstLLM.disabled = locked;
-    if (elements.iterations) elements.iterations.disabled = locked;
-    if (elements.runConfigButton) elements.runConfigButton.disabled = locked;
+    if (elements.runTarget) elements.runTarget.disabled = locked;
+    if (elements.iterations) elements.iterations.disabled = locked || !isDebateTarget(getRunTarget());
     if (elements.refreshProfiles) elements.refreshProfiles.disabled = locked;
     if (elements.newChatButton) elements.newChatButton.disabled = locked;
     if (elements.drawerNewChatButton) elements.drawerNewChatButton.disabled = locked;
+    updateRunUi();
     updatePausedActions();
     updateSendState();
 }
@@ -1328,43 +1112,38 @@ function updateComposerHint() {
         return;
     }
 
-    const mode = getRunMode();
-    const provider = getSelectedRunLLM();
-    const providerLabel = formatProviderLabel(provider);
+    const runTarget = getRunTarget();
+    const requiredProviders = getRequiredProvidersForRun(runTarget);
+    const requiredLabel = requiredProviders.length === 2
+        ? 'ChatGPT + Gemini'
+        : formatProviderLabel(requiredProviders[0]);
     const connected = isRunConnected();
     const historyReady = isHistoryReady();
     const hasPrompt = elements.promptInput.value.trim().length > 0;
-    const iterations = parseInt(elements.iterations?.value, 10) || 0;
+    const debate = isDebateTarget(runTarget);
+    const iterations = debate ? (parseInt(elements.iterations?.value, 10) || 0) : 1;
 
     let hint = '';
     if (!connected && !historyReady) {
-        if (mode === 'single') {
-            hint = state.historyStatus?.configured
-                ? `Connect ${providerLabel}, then unlock history in Settings → Security.`
-                : `Connect ${providerLabel}, then set a passphrase in Settings → Security.`;
-        } else {
-            hint = state.historyStatus?.configured
-                ? 'Connect ChatGPT + Gemini, then unlock history in Settings → Security.'
-                : 'Connect ChatGPT + Gemini, then set a passphrase in Settings → Security.';
-        }
+        hint = state.historyStatus?.configured
+            ? `Connect ${requiredLabel}, then unlock history in Settings → Security.`
+            : `Connect ${requiredLabel}, then set a passphrase in Settings → Security.`;
     } else if (!connected) {
-        hint = mode === 'single'
-            ? `Connect ${providerLabel} to start.`
-            : 'Connect ChatGPT and Gemini to start.';
+        hint = `Connect ${requiredLabel} to start.`;
     } else if (!historyReady) {
         hint = state.historyStatus?.configured
             ? 'Unlock history in Settings → Security.'
             : 'Set an encryption passphrase in Settings → Security to enable chat history.';
     } else if (!hasPrompt) {
         hint = '';
-    } else if (iterations <= 0) {
+    } else if (debate && iterations <= 0) {
         hint = 'Iterations must be at least 1.';
     }
 
     elements.composerHint.textContent = hint;
     elements.composerHint.hidden = !hint;
     elements.promptInput.placeholder = !connected
-        ? (mode === 'single' ? `Connect ${providerLabel} to start...` : 'Connect ChatGPT + Gemini to start...')
+        ? `Connect ${requiredLabel} to start...`
         : (historyReady ? 'Send a message...' : 'Unlock history in Settings → Security...');
 }
 
@@ -1414,7 +1193,7 @@ function handlePrimaryAction() {
         stopSession();
         return;
     }
-    openRunDialog();
+    startSession();
 }
 
 function startSession() {
@@ -1432,21 +1211,20 @@ function startSession() {
     const prompt = elements.promptInput.value.trim();
     if (!prompt) return;
 
-    const rounds = parseInt(elements.iterations?.value, 10) || 0;
+    const runTarget = getRunTarget();
+    const debate = isDebateTarget(runTarget);
+    const rounds = debate ? (parseInt(elements.iterations?.value, 10) || 0) : 1;
     if (rounds <= 0) return;
 
     if (!isRunConnected()) {
-        const mode = getRunMode();
-        const providerLabel = formatProviderLabel(getSelectedRunLLM());
-        setSessionStatus(mode === 'single'
-            ? `Connect ${providerLabel} to start.`
-            : 'Connect ChatGPT and Gemini to start.');
+        const required = getRequiredProvidersForRun(runTarget);
+        if (required.length === 2) {
+            setSessionStatus('Connect ChatGPT and Gemini to start.');
+        } else {
+            setSessionStatus(`Connect ${formatProviderLabel(required[0])} to start.`);
+        }
         return;
     }
-
-    const mode = getRunMode();
-    const llm = getSelectedRunLLM();
-    const modeKey = mode === 'single' ? 'single' : 'debate';
 
     state.stopRequested = false;
     setSessionState({ running: true, paused: false });
@@ -1456,18 +1234,15 @@ function startSession() {
         type: 'START_RUN',
         prompt,
         rounds,
-        chatId: state.activeChatId,
-        mode
+        chatId: state.activeChatId
     };
-    if (mode === 'single') {
-        payload.llm = llm;
-    } else {
-        payload.firstLLM = llm;
-    }
 
-    const promptOverrides = collectRunPromptOverrides(modeKey);
-    if (promptOverrides) {
-        payload.promptOverrides = promptOverrides;
+    if (debate) {
+        payload.mode = 'debate';
+        payload.firstLLM = getDebateFirstLLM(runTarget);
+    } else {
+        payload.mode = 'direct';
+        payload.target = getDirectTarget(runTarget);
     }
     sendMessage(payload);
 
