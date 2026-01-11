@@ -344,9 +344,9 @@ async function appendChatMessage(chatId, message) {
     try {
         const store = await requireHistoryUnlocked();
         const provider = message.role === 'gemini' || message.role === 'chatgpt' ? message.role : null;
-        await store.appendMessage(chatId, { ...message, provider });
+        const saved = await store.appendMessage(chatId, { ...message, provider });
         await notifyChatsState();
-        return { ok: true };
+        return { ok: true, message: saved };
     } catch (error) {
         console.warn('[MLC Chats] Failed to persist message:', error);
         return { ok: false, error: error.message, code: error.code || 'APPEND_MESSAGE_FAILED' };
@@ -373,6 +373,7 @@ const defaultDebateState = {
     isFollowUp: false,
     conversationContext: '',
     promptOverrides: null,
+    userMessageSequence: null,
     messages: [],
     waitingFor: null,
     lastPromptId: null,
@@ -413,6 +414,9 @@ async function loadActiveDebateState() {
         }
         if (typeof activeDebateState.conversationContext !== 'string') {
             activeDebateState.conversationContext = '';
+        }
+        if (!Number.isFinite(activeDebateState.userMessageSequence)) {
+            activeDebateState.userMessageSequence = null;
         }
         if (!activeDebateState.promptOverrides || typeof activeDebateState.promptOverrides !== 'object') {
             activeDebateState.promptOverrides = null;
@@ -1619,7 +1623,7 @@ async function handleStartDebateSession(message) {
         });
 
         if (activeDebateState.chatId) {
-            await appendChatMessage(activeDebateState.chatId, {
+            const appendResult = await appendChatMessage(activeDebateState.chatId, {
                 role: 'user',
                 content: prompt,
                 timestamp: now,
@@ -1627,6 +1631,10 @@ async function handleStartDebateSession(message) {
                 sessionId: activeDebateState.sessionId,
                 meta: { runConfig, isFollowUp, promptOverrides }
             });
+            if (appendResult?.ok && Number.isFinite(appendResult?.message?.sequence)) {
+                activeDebateState.userMessageSequence = appendResult.message.sequence;
+                await persistDebateState();
+            }
         }
 
         await lockProfilesForSession(activeDebateState.sessionId, activeDebateState.profileIds);
@@ -1794,7 +1802,25 @@ function getDefaultDebatePromptConfig() {
                 '',
                 'Please {llm} answer.'
             ].join('\n'),
+            single_turn_with_history: [
+                'Conversation so far:',
+                '{conversation_history}',
+                '',
+                "Here's a new message from the user:",
+                '{raw_user_msg}',
+                '',
+                'Please {llm} answer.'
+            ].join('\n'),
             both_turn: [
+                "Here's a new message from the user:",
+                '{raw_user_msg}',
+                '',
+                'You are {llm}. Please answer independently.'
+            ].join('\n'),
+            both_turn_with_history: [
+                'Conversation so far:',
+                '{conversation_history}',
+                '',
                 "Here's a new message from the user:",
                 '{raw_user_msg}',
                 '',
@@ -1850,7 +1876,9 @@ function normalizeDebatePromptConfig(rawConfig) {
                     ? rawDirect.placeholders
                     : defaults.direct.placeholders,
             single_turn: pickString(rawDirect.single_turn, defaults.direct.single_turn),
-            both_turn: pickString(rawDirect.both_turn, defaults.direct.both_turn)
+            single_turn_with_history: pickString(rawDirect.single_turn_with_history, defaults.direct.single_turn_with_history),
+            both_turn: pickString(rawDirect.both_turn, defaults.direct.both_turn),
+            both_turn_with_history: pickString(rawDirect.both_turn_with_history, defaults.direct.both_turn_with_history)
         } : defaults.direct
     };
 }
@@ -1970,6 +1998,65 @@ function buildConversationContext(messages, { maxChars = 4000, maxMessages = 10 
         text = text.slice(text.length - maxChars);
     }
     return text;
+}
+
+function formatTranscriptForPrompt(messages, { maxChars = 48000 } = {}) {
+    if (!Array.isArray(messages) || messages.length === 0) return '';
+    const blocks = [];
+    for (const message of messages) {
+        if (!message) continue;
+        const role = describeMessageRoleForContext(message.role);
+        const content = String(message.content || '').trim();
+        if (!content) continue;
+        blocks.push(`${role}:\n${content}`);
+    }
+    if (blocks.length === 0) return '';
+    let text = blocks.join('\n\n');
+    if (Number.isFinite(maxChars) && maxChars > 0 && text.length > maxChars) {
+        text = `…(earlier messages omitted)\n\n${text.slice(text.length - maxChars)}`;
+    }
+    return text;
+}
+
+async function buildDirectHistoryForProvider(store, chatId, provider, { cutoffSequence, maxMessages = 400, maxChars = 48000 } = {}) {
+    if (!store || !chatId) return '';
+    if (!Number.isFinite(cutoffSequence) || cutoffSequence <= 1) return '';
+    if (provider !== 'chatgpt' && provider !== 'gemini') return '';
+
+    const collectedReversed = [];
+    let beforeSequence = cutoffSequence; // excludes the new user message (sequence == cutoffSequence) and anything after
+    let reachedBoundary = false;
+
+    while (!reachedBoundary) {
+        const page = await store.listMessages(chatId, { limit: 80, beforeSequence });
+        const messages = Array.isArray(page?.messages) ? page.messages : [];
+        if (messages.length === 0) break;
+
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+            const msg = messages[i];
+            if (!msg) continue;
+            const role = msg.role;
+            if (role === provider) {
+                reachedBoundary = true;
+                break;
+            }
+            if (role !== 'user' && role !== 'chatgpt' && role !== 'gemini') continue;
+            collectedReversed.push(msg);
+            if (collectedReversed.length >= maxMessages) {
+                reachedBoundary = true;
+                break;
+            }
+        }
+
+        if (reachedBoundary) break;
+        if (!page?.hasMore || !Number.isFinite(page?.nextCursorSequence)) break;
+        beforeSequence = page.nextCursorSequence;
+        if (!Number.isFinite(beforeSequence) || beforeSequence <= 0) break;
+    }
+
+    if (collectedReversed.length === 0) return '';
+    const ordered = collectedReversed.reverse();
+    return formatTranscriptForPrompt(ordered, { maxChars });
 }
 
 function renderUserMessageForSession(session, templates, baseVariables) {
@@ -2143,18 +2230,37 @@ async function buildDirectPrompt(session, turnIndex) {
     const expectedLLM = getTurnLLM(session, turnIndex);
     const expectedLabel = formatLLMLabel(expectedLLM);
     const rawUserMsg = String(session?.userQuery || '').trim();
+
+    let conversationHistory = '';
+    try {
+        const store = await requireHistoryUnlocked();
+        conversationHistory = await buildDirectHistoryForProvider(store, session?.chatId, expectedLLM, {
+            cutoffSequence: session?.userMessageSequence,
+            maxMessages: 400,
+            maxChars: 48000
+        });
+    } catch (error) {
+        conversationHistory = '';
+    }
+
     const baseVariables = {
         llm: expectedLabel,
         expected_llm: expectedLabel,
         raw_user_msg: rawUserMsg,
         user_msg: rawUserMsg,
+        conversation_history: conversationHistory,
         conversation_context: session?.conversationContext || ''
     };
 
     const isBoth = Boolean(session?.secondLLM);
-    const template = isBoth && typeof templates?.both_turn === 'string'
-        ? templates.both_turn
-        : templates?.single_turn;
+    const useHistory = Boolean(conversationHistory && conversationHistory.trim().length > 0);
+    const template = isBoth
+        ? (useHistory && typeof templates?.both_turn_with_history === 'string'
+            ? templates.both_turn_with_history
+            : templates?.both_turn)
+        : (useHistory && typeof templates?.single_turn_with_history === 'string'
+            ? templates.single_turn_with_history
+            : templates?.single_turn);
     const rendered = renderPromptTemplate(template, baseVariables).trim();
     if (rendered) return rendered;
 

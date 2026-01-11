@@ -60,10 +60,13 @@
   "direct": {
     "placeholders": {
       "llm": "The LLM that should respond for this turn (ChatGPT|Gemini).",
+      "conversation_history": "Conversation history from the shared Multi-LLM transcript (best effort, may be truncated).",
       "raw_user_msg": "The raw user message.",
       "conversation_context": "Optional chat context (best effort)."
     },
     "single_turn": "Here's a new message from the user:\n{raw_user_msg}\n\nPlease {llm} answer.",
-    "both_turn": "Here's a new message from the user:\n{raw_user_msg}\n\nYou are {llm}. Please answer independently."
+    "single_turn_with_history": "Conversation so far:\n{conversation_history}\n\nHere's a new message from the user:\n{raw_user_msg}\n\nPlease {llm} answer.",
+    "both_turn": "Here's a new message from the user:\n{raw_user_msg}\n\nYou are {llm}. Please answer independently.",
+    "both_turn_with_history": "Conversation so far:\n{conversation_history}\n\nHere's a new message from the user:\n{raw_user_msg}\n\nYou are {llm}. Please answer independently."
   }
 }
