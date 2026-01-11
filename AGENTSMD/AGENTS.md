@@ -4,20 +4,23 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 ## 1) What this extension does (current behavior)
 
-- Chrome extension that runs a **side panel chat UI** with a multi‑iteration debate between ChatGPT and Gemini.
+- Chrome extension that runs a **side panel chat UI** with either:
+  - a multi‑iteration debate between ChatGPT and Gemini, or
+  - a single‑LLM run (ChatGPT or Gemini) with optional self‑refinement iterations.
 - It can also **forward prompts between LLM pages** via injected toggle buttons (legacy flow, still present).
 - The side panel is the primary UI: clicking the extension icon opens the side panel (no popup).
 
-### Main user flow (debate sessions)
+### Main user flow (runs)
 
 1. User creates **Tab Profiles** for ChatGPT and Gemini in the Provider Manager:
    - Use the current tab, or open a new provider tab and claim it after manual model selection.
-2. In the side panel, user selects:
-   - First LLM (ChatGPT or Gemini)
-   - Number of iterations (rounds)
-   - Which ChatGPT and Gemini profile to use (or Default)
-3. User submits a prompt (start is blocked until both selected profiles are valid).
-4. The extension runs a debate:
+2. In the side panel, user writes a message and clicks **Send**.
+3. A small **Run settings** dialog opens (prefilled from the last run in the current chat):
+   - Mode: Debate or Single
+   - Iterations (rounds)
+   - Starting LLM (debate) or chosen LLM (single)
+   - Optional per-send prompt overrides (header/intermediary/final/follow-up wrapper), with “Save as default”.
+4. The extension runs a debate (when mode=Debate):
    - **Round 1**: first LLM gets full context + user query.
    - **Round 1**: second LLM gets full context + user query + first LLM answer.
    - **Rounds 2..N**: each new prompt contains only the previous model’s latest answer (the tab thread holds history).
@@ -28,6 +31,9 @@ This file is the durable memory for the repo. It is the canonical reference for 
    - GPT answer 2
    - Gemini answer 2
    - ...
+6. Sending again in the same chat is treated as a **continuation**:
+   - Run settings are prefilled from the previous user message’s stored `meta`.
+   - The first turns can wrap the new user message with a follow-up template to avoid “resetting” the context.
 
 ### Provider Manager (Tab Profiles) UX
 
@@ -70,10 +76,10 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 ### Session gating and safety
 
-- "Start debate" is disabled until:
+- Send is disabled until:
   - Prompt is non-empty
   - Iterations > 0
-  - Selected ChatGPT + Gemini profiles are valid (status OK, tab exists)
+  - Selected profiles are valid (status OK, tab exists) for the providers required by the run mode
 - The background still validates profiles before every prompt injection.
 - If a profile goes offline or navigates away, the session pauses with a clear reason and fix actions.
 
@@ -98,7 +104,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Supports open/claim profile flows and focus tab actions.
 
 - `debate_prompts.json`
-  - User-editable debate prompt templates (initial/header + per-turn scaffolding + intermediary/final messages) used by `buildDebatePrompt(...)`.
+  - User-editable prompt templates for both Debate and Single modes (header + intermediary/final messages + follow-up wrapper) used by `buildDebatePrompt(...)` / `buildSinglePrompt(...)`.
   - Loaded by `background.js` via `fetch(chrome.runtime.getURL(...))` with a safe inline fallback.
   - Side panel can override these templates via local storage (see prompt editor below).
 

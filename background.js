@@ -359,6 +359,7 @@ const defaultDebateState = {
     pausedReason: null,
     pausedProvider: null,
     pausedAt: 0,
+    mode: 'debate',
     chatId: null,
     sessionId: null,
     rounds: 0,
@@ -369,6 +370,9 @@ const defaultDebateState = {
     profileIds: { chatgpt: null, gemini: null },
     tabIds: { chatgpt: null, gemini: null },
     userQuery: '',
+    isFollowUp: false,
+    conversationContext: '',
+    promptOverrides: null,
     messages: [],
     waitingFor: null,
     lastPromptId: null,
@@ -400,6 +404,18 @@ async function loadActiveDebateState() {
         }
         if (typeof activeDebateState.isPaused !== 'boolean') {
             activeDebateState.isPaused = false;
+        }
+        if (activeDebateState.mode !== 'single') {
+            activeDebateState.mode = 'debate';
+        }
+        if (typeof activeDebateState.isFollowUp !== 'boolean') {
+            activeDebateState.isFollowUp = false;
+        }
+        if (typeof activeDebateState.conversationContext !== 'string') {
+            activeDebateState.conversationContext = '';
+        }
+        if (!activeDebateState.promptOverrides || typeof activeDebateState.promptOverrides !== 'object') {
+            activeDebateState.promptOverrides = null;
         }
     }
     return activeDebateState;
@@ -1320,6 +1336,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
             sendResponse({ status: 'debate_session_started', type: message.type });
             break;
+        case 'START_RUN':
+            handleStartDebateSession(message).catch(error => {
+                console.error('[MLC Session] Error starting run:', error);
+            });
+            sendResponse({ status: 'run_started', type: message.type });
+            break;
         case 'RESUME_SESSION':
             resumeDebateSession().then(sendResponse).catch(error => {
                 console.error('[MLC Debate] Error resuming session:', error);
@@ -1388,23 +1410,54 @@ async function handleGetActiveSession() {
     sendMessageToPopup({ type: 'ACTIVE_SESSION', session: session });
 }
 
+function sanitizeSessionPromptOverrides(input) {
+    if (!input || typeof input !== 'object') return null;
+    const allowedKeys = new Set([
+        'header',
+        'first_turn_instruction',
+        'intermediary_message',
+        'final_message',
+        'followup_user_msg_wrapper'
+    ]);
+    const output = {};
+    for (const modeKey of ['debate', 'single']) {
+        const section = input[modeKey];
+        if (!section || typeof section !== 'object') continue;
+        const sanitized = {};
+        for (const [key, value] of Object.entries(section)) {
+            if (!allowedKeys.has(key)) continue;
+            if (typeof value !== 'string') continue;
+            sanitized[key] = value;
+        }
+        if (Object.keys(sanitized).length > 0) {
+            output[modeKey] = sanitized;
+        }
+    }
+    return Object.keys(output).length > 0 ? output : null;
+}
+
 async function handleStartDebateSession(message) {
     try {
         const prompt = (message.prompt || '').trim();
-        const rounds = Math.max(1, parseInt(message.rounds, 10) || 1);
-        const firstLLM = message.firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
-        const secondLLM = firstLLM === 'chatgpt' ? 'gemini' : 'chatgpt';
+        const rounds = Math.min(12, Math.max(1, parseInt(message.rounds, 10) || 1));
+        const mode = message.mode === 'single' ? 'single' : 'debate';
+        const singleLLM = message.llm === 'gemini' ? 'gemini' : 'chatgpt';
+        const debateFirstLLM = message.firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
+        const firstLLM = mode === 'single' ? singleLLM : debateFirstLLM;
+        const secondLLM = mode === 'single' ? null : (firstLLM === 'chatgpt' ? 'gemini' : 'chatgpt');
         const requestedTabs = message.tabIds || {};
         const requestedProfiles = message.profileIds || null;
         const requestedChatId = typeof message.chatId === 'string' ? message.chatId : null;
+        const promptOverrides = sanitizeSessionPromptOverrides(message.promptOverrides);
 
         if (!prompt) {
             sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: 'Prompt is empty.' });
             return;
         }
 
+        let historyStore = null;
         try {
-            await requireHistoryUnlocked();
+            historyStore = await requireHistoryUnlocked();
         } catch (error) {
             const hint = error?.code === 'HISTORY_NOT_CONFIGURED'
                 ? 'Set an encryption passphrase in Settings → Security to enable chat history.'
@@ -1418,9 +1471,8 @@ async function handleStartDebateSession(message) {
             await endDebateSession('Session replaced by a new request.');
         }
 
-        let chatgptTab = null;
-        let geminiTab = null;
         let profileIds = { chatgpt: null, gemini: null };
+        const tabIds = { chatgpt: null, gemini: null };
         const chatsState = await loadChatsState();
         const chatIdCandidate = requestedChatId || chatsState.activeChatId;
         const hasCandidate = chatIdCandidate && Array.isArray(chatsState.chats)
@@ -1431,39 +1483,54 @@ async function handleStartDebateSession(message) {
             await setActiveChat(chatId);
         }
 
+        let isFollowUp = false;
+        let conversationContext = '';
+        if (historyStore && chatId) {
+            try {
+                const summary = await historyStore.getThreadSummary(chatId);
+                const priorCount = Number.isFinite(summary?.messageCount) ? summary.messageCount : 0;
+                isFollowUp = priorCount > 0;
+                if (isFollowUp) {
+                    const page = await historyStore.listMessages(chatId, { limit: 12 });
+                    conversationContext = buildConversationContext(page.messages, { maxChars: 4000, maxMessages: 10 });
+                }
+            } catch (error) {
+                console.warn('[MLC Debate] Failed to build conversation context:', error);
+            }
+        }
+
         const profilesState = await loadTabProfiles();
-        const hasDefaultProfiles = Boolean(profilesState.defaults?.chatgpt && profilesState.defaults?.gemini);
-        const hasExplicitTabIds = Number.isFinite(requestedTabs.chatgpt) || Number.isFinite(requestedTabs.gemini);
-        const useProfiles = Boolean(requestedProfiles || (!hasExplicitTabIds && hasDefaultProfiles));
+        const requiredProviders = mode === 'single' ? [firstLLM] : ['chatgpt', 'gemini'];
+        const hasDefaultProfiles = requiredProviders.every((provider) => Boolean(profilesState.defaults?.[provider]));
+        const hasExplicitTabIds = requiredProviders.some((provider) => Number.isFinite(requestedTabs[provider]));
+        const hasRequestedProfiles = Boolean(requestedProfiles && requiredProviders.some((provider) => requestedProfiles?.[provider]));
+        const useProfiles = Boolean(hasRequestedProfiles || (!hasExplicitTabIds && hasDefaultProfiles));
 
         if (useProfiles) {
-            profileIds = {
-                chatgpt: resolveProfileSelection('chatgpt', requestedProfiles?.chatgpt, profilesState.defaults),
-                gemini: resolveProfileSelection('gemini', requestedProfiles?.gemini, profilesState.defaults)
-            };
-
-            if (!profileIds.chatgpt || !profileIds.gemini) {
-                sendMessageToPopup({
-                    type: 'UI_SESSION_ERROR',
-                    error: 'Both ChatGPT and Gemini profiles are required to start a debate.'
-                });
-                return;
+            for (const provider of requiredProviders) {
+                profileIds[provider] = resolveProfileSelection(provider, requestedProfiles?.[provider], profilesState.defaults);
+                if (!profileIds[provider]) {
+                    sendMessageToPopup({
+                        type: 'UI_SESSION_ERROR',
+                        error: `${formatLLMLabel(provider)} profile is required to start.`
+                    });
+                    return;
+                }
+                const validation = await validateProfileForSession(provider, profileIds[provider], { requirePing: true });
+                if (!validation.ok) {
+                    sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: validation.error });
+                    return;
+                }
+                tabIds[provider] = validation.profile.tabId;
             }
-
-            const chatgptValidation = await validateProfileForSession('chatgpt', profileIds.chatgpt, { requirePing: true });
-            if (!chatgptValidation.ok) {
-                sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: chatgptValidation.error });
-                return;
-            }
-            const geminiValidation = await validateProfileForSession('gemini', profileIds.gemini, { requirePing: true });
-            if (!geminiValidation.ok) {
-                sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: geminiValidation.error });
-                return;
-            }
-            chatgptTab = { id: chatgptValidation.profile.tabId };
-            geminiTab = { id: geminiValidation.profile.tabId };
         } else {
-            if (Number.isFinite(requestedTabs.chatgpt) || Number.isFinite(requestedTabs.gemini)) {
+            if (mode === 'single') {
+                if (firstLLM === 'chatgpt' && Number.isFinite(requestedTabs.chatgpt)) {
+                    await setPreferredTabs({ chatgptTabId: requestedTabs.chatgpt });
+                } else if (firstLLM === 'gemini' && Number.isFinite(requestedTabs.gemini)) {
+                    await setPreferredTabs({ geminiTabId: requestedTabs.gemini });
+                }
+            } else if (Number.isFinite(requestedTabs.chatgpt) || Number.isFinite(requestedTabs.gemini)) {
                 await setPreferredTabs({
                     chatgptTabId: requestedTabs.chatgpt,
                     geminiTabId: requestedTabs.gemini
@@ -1471,38 +1538,40 @@ async function handleStartDebateSession(message) {
             }
 
             const preferred = await getPreferredTabs();
-            chatgptTab = await resolveTabForLLM('chatgpt', requestedTabs.chatgpt, preferred.chatgpt);
-            geminiTab = await resolveTabForLLM('gemini', requestedTabs.gemini, preferred.gemini);
-
-            if (!chatgptTab || !geminiTab) {
-                const missing = [];
-                if (!chatgptTab) missing.push('ChatGPT');
-                if (!geminiTab) missing.push('Gemini');
-                sendMessageToPopup({
-                    type: 'UI_SESSION_ERROR',
-                    error: `${missing.join(' and ')} tab not found. Please open the required LLM tabs.`
-                });
-                return;
+            for (const provider of requiredProviders) {
+                const resolved = await resolveTabForLLM(provider, requestedTabs[provider], preferred[provider]);
+                if (!resolved) {
+                    sendMessageToPopup({
+                        type: 'UI_SESSION_ERROR',
+                        error: `${formatLLMLabel(provider)} tab not found. Please open it and try again.`
+                    });
+                    return;
+                }
+                tabIds[provider] = resolved.id;
             }
         }
 
         const now = Date.now();
+        const runConfig = mode === 'single'
+            ? { mode: 'single', rounds, llm: firstLLM }
+            : { mode: 'debate', rounds, firstLLM };
         activeDebateState = {
             ...defaultDebateState,
             isActive: true,
+            mode,
             chatId: chatId,
             sessionId: generateSessionId(),
             rounds: rounds,
-            totalTurns: rounds * 2,
+            totalTurns: mode === 'single' ? rounds : rounds * 2,
             turnIndex: 1,
             firstLLM: firstLLM,
             secondLLM: secondLLM,
             profileIds: profileIds,
-            tabIds: {
-                chatgpt: chatgptTab.id,
-                gemini: geminiTab.id
-            },
+            tabIds,
             userQuery: prompt,
+            isFollowUp,
+            conversationContext,
+            promptOverrides,
             messages: [{ role: 'user', content: prompt, timestamp: now, turnIndex: 0 }],
             startedAt: now
         };
@@ -1514,6 +1583,7 @@ async function handleStartDebateSession(message) {
             sessionId: activeDebateState.sessionId,
             chatId: activeDebateState.chatId,
             rounds: rounds,
+            mode,
             firstLLM: firstLLM,
             tabIds: activeDebateState.tabIds,
             profileIds: activeDebateState.profileIds
@@ -1526,7 +1596,8 @@ async function handleStartDebateSession(message) {
             content: prompt,
             timestamp: now,
             turnIndex: 0,
-            sessionId: activeDebateState.sessionId
+            sessionId: activeDebateState.sessionId,
+            meta: { runConfig, isFollowUp, promptOverrides }
         });
 
         if (activeDebateState.chatId) {
@@ -1535,7 +1606,8 @@ async function handleStartDebateSession(message) {
                 content: prompt,
                 timestamp: now,
                 turnIndex: 0,
-                sessionId: activeDebateState.sessionId
+                sessionId: activeDebateState.sessionId,
+                meta: { runConfig, isFollowUp, promptOverrides }
             });
         }
 
@@ -1555,11 +1627,17 @@ async function handleStopDebateSession(message) {
     await endDebateSession(reason);
 }
 
-function getRoundIndex(turnIndex) {
+function getRoundIndex(turnIndex, session = null) {
+    if (session?.mode === 'single') {
+        return Math.max(1, turnIndex);
+    }
     return Math.ceil(turnIndex / 2);
 }
 
 function getTurnLLM(session, turnIndex) {
+    if (session?.mode === 'single') {
+        return session.firstLLM || 'chatgpt';
+    }
     return turnIndex % 2 === 1 ? session.firstLLM : session.secondLLM;
 }
 
@@ -1574,6 +1652,21 @@ let cachedDebatePromptSource = null;
 let debatePromptConfigLoadPromise = null;
 
 function getDefaultDebatePromptConfig() {
+    const followupDebateWrapper = [
+        "Here's a new message from the user:",
+        '{raw_user_msg}',
+        '',
+        'This is a continuation of the same chat.',
+        'Run: a debate between {first_llm} and {second_llm} over {rounds} iterations (starting with {first_llm}).',
+        'You are {llm} on iteration {round}/{rounds}.'
+    ].join('\n');
+    const followupSingleWrapper = [
+        "Here's a new message from the user:",
+        '{raw_user_msg}',
+        '',
+        'This is a continuation of the same chat. Please {llm} answer.',
+        'If refining: you are on iteration {round}/{rounds}.'
+    ].join('\n');
     return {
         schemaVersion: 1,
         debate: {
@@ -1586,12 +1679,14 @@ function getDefaultDebatePromptConfig() {
                 '- Be constructive: critique to make progress and improve the answer.',
                 '- If unsure, say so briefly and propose a way to verify.'
             ].join('\n'),
+            first_turn_instruction: 'Provide your best answer.',
             intermediary_message: [
                 'Provide a constructive improvement for iteration {round}/{rounds}:',
                 '- Critique key issues (short bullets)',
                 '- Revised answer'
             ].join('\n'),
             final_message: 'Provide your final best answer for the user. Output only the final answer (no critique section).',
+            followup_user_msg_wrapper: followupDebateWrapper,
             turn1: [
                 '{header}',
                 '',
@@ -1600,7 +1695,7 @@ function getDefaultDebatePromptConfig() {
                 'User question:',
                 '{user_msg}',
                 '',
-                'Provide your best answer.'
+                '{first_turn_instruction}'
             ].join('\n'),
             turn2: [
                 '{header}',
@@ -1631,6 +1726,40 @@ function getDefaultDebatePromptConfig() {
                 '',
                 '{intermediary_message}'
             ].join('\n')
+        },
+        single: {
+            placeholders: {},
+            header: 'You are a single LLM agent. Provide the best possible answer to the user.',
+            first_turn_instruction: 'Provide your best answer.',
+            intermediary_message: [
+                'Improve your answer for iteration {round}/{rounds}:',
+                '- Fix errors',
+                '- Add missing details',
+                '- Keep it concise'
+            ].join('\n'),
+            final_message: 'Provide your final best answer for the user. Output only the final answer.',
+            followup_user_msg_wrapper: followupSingleWrapper,
+            turn1: [
+                '{header}',
+                '',
+                'Iteration {round}/{rounds}',
+                '',
+                'User message:',
+                '{user_msg}',
+                '',
+                '{first_turn_instruction}'
+            ].join('\n'),
+            turn2plus: [
+                'Iteration {round}/{rounds}',
+                '',
+                'Your previous answer (iteration {prev_round}/{rounds}):',
+                '{prev_answer}',
+                '',
+                'User message:',
+                '{user_msg}',
+                '',
+                '{intermediary_message}'
+            ].join('\n')
         }
     };
 }
@@ -1640,25 +1769,40 @@ function normalizeDebatePromptConfig(rawConfig) {
     if (!rawConfig || typeof rawConfig !== 'object') return defaults;
 
     const rawDebate = rawConfig.debate && typeof rawConfig.debate === 'object' ? rawConfig.debate : null;
-    if (!rawDebate) return defaults;
+    const rawSingle = rawConfig.single && typeof rawConfig.single === 'object' ? rawConfig.single : null;
 
     const pickString = (value, fallback) => (typeof value === 'string' ? value : fallback);
 
     return {
         schemaVersion: 1,
-        debate: {
+        debate: rawDebate ? {
             placeholders:
                 rawDebate.placeholders && typeof rawDebate.placeholders === 'object'
                     ? rawDebate.placeholders
                     : defaults.debate.placeholders,
             header: pickString(rawDebate.header, defaults.debate.header),
+            first_turn_instruction: pickString(rawDebate.first_turn_instruction, defaults.debate.first_turn_instruction),
             intermediary_message: pickString(rawDebate.intermediary_message, defaults.debate.intermediary_message),
             final_message: pickString(rawDebate.final_message, defaults.debate.final_message),
+            followup_user_msg_wrapper: pickString(rawDebate.followup_user_msg_wrapper, defaults.debate.followup_user_msg_wrapper),
             turn1: pickString(rawDebate.turn1, defaults.debate.turn1),
             turn2: pickString(rawDebate.turn2, defaults.debate.turn2),
             turn3plus_first: pickString(rawDebate.turn3plus_first, defaults.debate.turn3plus_first),
             turn3plus_second: pickString(rawDebate.turn3plus_second, defaults.debate.turn3plus_second)
-        }
+        } : defaults.debate,
+        single: rawSingle ? {
+            placeholders:
+                rawSingle.placeholders && typeof rawSingle.placeholders === 'object'
+                    ? rawSingle.placeholders
+                    : defaults.single.placeholders,
+            header: pickString(rawSingle.header, defaults.single.header),
+            first_turn_instruction: pickString(rawSingle.first_turn_instruction, defaults.single.first_turn_instruction),
+            intermediary_message: pickString(rawSingle.intermediary_message, defaults.single.intermediary_message),
+            final_message: pickString(rawSingle.final_message, defaults.single.final_message),
+            followup_user_msg_wrapper: pickString(rawSingle.followup_user_msg_wrapper, defaults.single.followup_user_msg_wrapper),
+            turn1: pickString(rawSingle.turn1, defaults.single.turn1),
+            turn2plus: pickString(rawSingle.turn2plus, defaults.single.turn2plus)
+        } : defaults.single
     };
 }
 
@@ -1752,11 +1896,57 @@ function getLastResponse(session, llmType) {
     return '';
 }
 
+function describeMessageRoleForContext(role) {
+    if (!role) return 'Assistant';
+    if (role === 'user') return 'User';
+    if (role === 'chatgpt') return 'ChatGPT';
+    if (role === 'gemini') return 'Gemini';
+    return String(role);
+}
+
+function buildConversationContext(messages, { maxChars = 4000, maxMessages = 10 } = {}) {
+    if (!Array.isArray(messages) || messages.length === 0) return '';
+    const recent = messages.slice(Math.max(0, messages.length - maxMessages));
+    const blocks = [];
+    for (const message of recent) {
+        if (!message) continue;
+        const role = describeMessageRoleForContext(message.role);
+        const content = String(message.content || '').trim();
+        if (!content) continue;
+        blocks.push(`${role}:\n${content}`);
+    }
+    if (blocks.length === 0) return '';
+    let text = blocks.join('\n\n');
+    if (Number.isFinite(maxChars) && maxChars > 0 && text.length > maxChars) {
+        text = text.slice(text.length - maxChars);
+    }
+    return text;
+}
+
+function renderUserMessageForSession(session, templates, baseVariables) {
+    const rawUserMsg = String(session?.userQuery || '').trim();
+    if (!rawUserMsg) return '';
+    if (!session?.isFollowUp) return rawUserMsg;
+    const wrapper = typeof templates?.followup_user_msg_wrapper === 'string'
+        ? templates.followup_user_msg_wrapper.trim()
+        : '';
+    if (!wrapper) return rawUserMsg;
+    return renderPromptTemplate(wrapper, {
+        ...(baseVariables && typeof baseVariables === 'object' ? baseVariables : {}),
+        raw_user_msg: rawUserMsg,
+        conversation_context: session?.conversationContext || ''
+    }).trim();
+}
+
 async function buildDebatePrompt(session, turnIndex) {
     const promptConfig = await loadDebatePromptConfig();
-    const templates = promptConfig?.debate || getDefaultDebatePromptConfig().debate;
+    const baseTemplates = promptConfig?.debate || getDefaultDebatePromptConfig().debate;
+    const overrides = session?.promptOverrides?.debate && typeof session.promptOverrides.debate === 'object'
+        ? session.promptOverrides.debate
+        : null;
+    const templates = overrides ? { ...baseTemplates, ...overrides } : baseTemplates;
 
-    const roundIndex = getRoundIndex(turnIndex);
+    const roundIndex = getRoundIndex(turnIndex, session);
     const expectedLLM = getTurnLLM(session, turnIndex);
     const expectedLabel = formatLLMLabel(expectedLLM);
     const otherLLM = expectedLLM === session.firstLLM ? session.secondLLM : session.firstLLM;
@@ -1783,6 +1973,8 @@ async function buildDebatePrompt(session, turnIndex) {
         fisrt_llm: firstLabel,
         second_llm: secondLabel,
         user_msg: session.userQuery,
+        raw_user_msg: session.userQuery,
+        conversation_context: session.conversationContext || '',
         user_query: session.userQuery,
         first_answer: safeFirstResponse,
         other_answer: safeOtherResponse,
@@ -1790,12 +1982,21 @@ async function buildDebatePrompt(session, turnIndex) {
     };
 
     const header = renderPromptTemplate(templates.header, baseVariables);
+    const userMsg = renderUserMessageForSession(session, templates, { ...baseVariables, header });
     const renderedIntermediary = renderPromptTemplate(templates.intermediary_message, { ...baseVariables, header });
     const renderedFinal = renderPromptTemplate(templates.final_message, { ...baseVariables, header });
+    const renderedFirstTurnInstruction = session.rounds <= 1
+        ? renderedFinal
+        : renderPromptTemplate(
+            typeof templates.first_turn_instruction === 'string' ? templates.first_turn_instruction : 'Provide your best answer.',
+            { ...baseVariables, header }
+        );
     const isFinalTurn = turnIndex === totalTurns;
     const variables = {
         ...baseVariables,
         header,
+        user_msg: userMsg,
+        first_turn_instruction: renderedFirstTurnInstruction,
         intermediary_message: isFinalTurn ? renderedFinal : renderedIntermediary,
         final_message: renderedFinal
     };
@@ -1813,6 +2014,73 @@ async function buildDebatePrompt(session, turnIndex) {
     }
 
     return renderPromptTemplate(templates.turn3plus_second, variables).trim();
+}
+
+async function buildSinglePrompt(session, turnIndex) {
+    const promptConfig = await loadDebatePromptConfig();
+    const baseTemplates = promptConfig?.single || getDefaultDebatePromptConfig().single;
+    const overrides = session?.promptOverrides?.single && typeof session.promptOverrides.single === 'object'
+        ? session.promptOverrides.single
+        : null;
+    const templates = overrides ? { ...baseTemplates, ...overrides } : baseTemplates;
+
+    const roundIndex = Math.max(1, turnIndex);
+    const expectedLLM = getTurnLLM(session, turnIndex);
+    const expectedLabel = formatLLMLabel(expectedLLM);
+    const safePrevAnswer = getLastResponse(session, expectedLLM) || '[No prior response captured yet]';
+
+    const totalTurns = Number.isFinite(session.totalTurns) ? session.totalTurns : session.rounds;
+    const baseVariables = {
+        rounds: session.rounds,
+        iterations: session.rounds,
+        round: roundIndex,
+        iteration: roundIndex,
+        prev_round: Math.max(0, roundIndex - 1),
+        turn: turnIndex,
+        turn_index: turnIndex,
+        total_turns: totalTurns,
+        expected_llm: expectedLabel,
+        llm: expectedLabel,
+        user_msg: session.userQuery,
+        raw_user_msg: session.userQuery,
+        conversation_context: session.conversationContext || '',
+        user_query: session.userQuery,
+        prev_answer: safePrevAnswer
+    };
+
+    const header = renderPromptTemplate(templates.header, baseVariables);
+    const userMsg = renderUserMessageForSession(session, templates, { ...baseVariables, header });
+    const renderedIntermediary = renderPromptTemplate(templates.intermediary_message, { ...baseVariables, header });
+    const renderedFinal = renderPromptTemplate(templates.final_message, { ...baseVariables, header });
+    const renderedFirstTurnInstruction = session.rounds <= 1
+        ? renderedFinal
+        : renderPromptTemplate(
+            typeof templates.first_turn_instruction === 'string' ? templates.first_turn_instruction : 'Provide your best answer.',
+            { ...baseVariables, header }
+        );
+    const isFinalTurn = turnIndex === totalTurns;
+
+    const variables = {
+        ...baseVariables,
+        header,
+        user_msg: userMsg,
+        first_turn_instruction: renderedFirstTurnInstruction,
+        intermediary_message: isFinalTurn ? renderedFinal : renderedIntermediary,
+        final_message: renderedFinal
+    };
+
+    if (turnIndex === 1) {
+        return renderPromptTemplate(templates.turn1, variables).trim();
+    }
+
+    return renderPromptTemplate(templates.turn2plus, variables).trim();
+}
+
+async function buildSessionPrompt(session, turnIndex) {
+    if (session?.mode === 'single') {
+        return buildSinglePrompt(session, turnIndex);
+    }
+    return buildDebatePrompt(session, turnIndex);
 }
 
 async function validateTabForProvider(tabId, provider) {
@@ -2011,7 +2279,7 @@ async function sendDebateTurn(session) {
         return;
     }
 
-    const promptText = await buildDebatePrompt(session, turnIndex);
+    const promptText = await buildSessionPrompt(session, turnIndex);
     const promptId = `${session.sessionId}:turn:${turnIndex}`;
 
     activeDebateState.waitingFor = expectedLLM;
@@ -2024,7 +2292,7 @@ async function sendDebateTurn(session) {
         type: 'UI_SESSION_PROGRESS',
         sessionId: session.sessionId,
         waitingFor: expectedLLM,
-        roundIndex: getRoundIndex(turnIndex),
+        roundIndex: getRoundIndex(turnIndex, session),
         totalRounds: session.rounds
     });
 
@@ -2085,7 +2353,7 @@ async function handleDebateResponse(message) {
         : '';
 
     const turnIndex = session.turnIndex;
-    const roundIndex = getRoundIndex(turnIndex);
+    const roundIndex = getRoundIndex(turnIndex, session);
     const timestamp = Date.now();
 
     const entry = {
