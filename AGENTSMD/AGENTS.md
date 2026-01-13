@@ -32,7 +32,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
 6. Sending again in the same chat is treated as a **continuation**:
    - Run settings are prefilled from the previous user message’s stored `meta`.
    - The first turns can wrap the new user message with a follow-up template to avoid “resetting” the context.
-   - Direct sends (ChatGPT/Gemini/Both) backfill the target model with the missing transcript since it last participated, so switching providers retains continuity.
+  - Direct sends (ChatGPT/Gemini/Both) backfill the target model with the missing transcript it has not been shown yet (tracked per chat via per-provider delivery cursors), so switching providers retains continuity in both directions.
 
 ### Provider Manager (Tab Profiles) UX
 

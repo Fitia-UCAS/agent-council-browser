@@ -329,6 +329,12 @@ async function deleteChat(chatId) {
     if (!chat) return { ok: false, error: 'Chat not found.', code: 'CHAT_NOT_FOUND' };
 
     await store.deleteThread(chatId);
+    try {
+        await store.deleteMeta(getChatDeliveryStateKey(chatId));
+    } catch (error) {
+        // ignore
+    }
+    deliveryStateCache.delete(chatId);
     const activeChatId = await store.getActiveThreadId();
     if (activeChatId === chatId) {
         const { threads } = await store.listThreads({ limit: 1 });
@@ -1227,6 +1233,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 .then(() => {
                     historyMigrationChecked = false;
                     historyMigrationPromise = null;
+                    deliveryStateCache.clear();
                 })
                 .then(() => getHistoryStatus())
                 .then((status) => {
@@ -2018,13 +2025,141 @@ function formatTranscriptForPrompt(messages, { maxChars = 48000 } = {}) {
     return text;
 }
 
-async function buildDirectHistoryForProvider(store, chatId, provider, { cutoffSequence, maxMessages = 400, maxChars = 48000 } = {}) {
+const CHAT_DELIVERY_STATE_META_PREFIX = 'mlc_chat_delivery_state_v1:';
+
+function getChatDeliveryStateKey(chatId) {
+    return `${CHAT_DELIVERY_STATE_META_PREFIX}${chatId}`;
+}
+
+function createEmptyDeliveryState() {
+    return {
+        schemaVersion: 1,
+        updatedAt: 0,
+        providers: {
+            chatgpt: { deliveredUpTo: 0, contextKey: null },
+            gemini: { deliveredUpTo: 0, contextKey: null }
+        }
+    };
+}
+
+function normalizeDeliveryProviderState(value) {
+    const out = { deliveredUpTo: 0, contextKey: null };
+    if (!value || typeof value !== 'object') return out;
+    if (Number.isFinite(value.deliveredUpTo) && value.deliveredUpTo > 0) {
+        out.deliveredUpTo = Math.floor(value.deliveredUpTo);
+    }
+    if (typeof value.contextKey === 'string' && value.contextKey.trim()) {
+        out.contextKey = value.contextKey.trim();
+    }
+    return out;
+}
+
+function normalizeChatDeliveryState(value) {
+    const base = createEmptyDeliveryState();
+    if (!value || typeof value !== 'object') return base;
+
+    if (value.schemaVersion === 1 && value.providers && typeof value.providers === 'object') {
+        const out = createEmptyDeliveryState();
+        out.updatedAt = Number.isFinite(value.updatedAt) ? Math.floor(value.updatedAt) : 0;
+        out.providers.chatgpt = normalizeDeliveryProviderState(value.providers.chatgpt);
+        out.providers.gemini = normalizeDeliveryProviderState(value.providers.gemini);
+        return out;
+    }
+
+    // Legacy shape: { chatgpt: number, gemini: number }
+    const out = createEmptyDeliveryState();
+    if (Number.isFinite(value.chatgpt) && value.chatgpt > 0) out.providers.chatgpt.deliveredUpTo = Math.floor(value.chatgpt);
+    if (Number.isFinite(value.gemini) && value.gemini > 0) out.providers.gemini.deliveredUpTo = Math.floor(value.gemini);
+    return out;
+}
+
+const deliveryStateCache = new Map();
+
+async function getChatDeliveryState(store, chatId) {
+    if (!store || !chatId) return createEmptyDeliveryState();
+    const cached = deliveryStateCache.get(chatId);
+    if (cached) return cached;
+    try {
+        const raw = await store.getMeta(getChatDeliveryStateKey(chatId));
+        const normalized = normalizeChatDeliveryState(raw);
+        deliveryStateCache.set(chatId, normalized);
+        return normalized;
+    } catch (error) {
+        const fallback = createEmptyDeliveryState();
+        deliveryStateCache.set(chatId, fallback);
+        return fallback;
+    }
+}
+
+async function saveChatDeliveryState(store, chatId, state) {
+    if (!store || !chatId) return { ok: false, error: 'Missing store/chatId.' };
+    const normalized = normalizeChatDeliveryState(state);
+    normalized.updatedAt = Date.now();
+    deliveryStateCache.set(chatId, normalized);
+    try {
+        await store.setMeta(getChatDeliveryStateKey(chatId), normalized);
+        return { ok: true, state: normalized };
+    } catch (error) {
+        return { ok: false, error: error?.message || 'Failed to save delivery state.' };
+    }
+}
+
+function getProviderContextKey(session, provider) {
+    const profileId = session?.profileIds?.[provider];
+    if (typeof profileId === 'string' && profileId.trim()) {
+        return `profile:${profileId.trim()}`;
+    }
+    const tabId = session?.tabIds?.[provider];
+    if (Number.isFinite(tabId)) {
+        return `tab:${Math.floor(tabId)}`;
+    }
+    return null;
+}
+
+function getEffectiveDeliveredUpTo(state, provider, contextKey) {
+    if (!state || typeof state !== 'object') return 0;
+    const providers = state.providers && typeof state.providers === 'object' ? state.providers : null;
+    const entry = providers?.[provider] && typeof providers[provider] === 'object'
+        ? providers[provider]
+        : null;
+    const deliveredUpTo = Number.isFinite(entry?.deliveredUpTo) ? Math.max(0, Math.floor(entry.deliveredUpTo)) : 0;
+    const storedContextKey = typeof entry?.contextKey === 'string' && entry.contextKey.trim()
+        ? entry.contextKey.trim()
+        : null;
+    if (contextKey && storedContextKey && contextKey !== storedContextKey) {
+        return 0;
+    }
+    return deliveredUpTo;
+}
+
+async function bumpProviderDeliveredUpTo(store, chatId, provider, sequence, contextKey) {
+    if (!store || !chatId) return { ok: false, error: 'Missing store/chatId.' };
+    if (provider !== 'chatgpt' && provider !== 'gemini') return { ok: false, error: 'Invalid provider.' };
+    if (!Number.isFinite(sequence) || sequence <= 0) return { ok: false, error: 'Invalid sequence.' };
+
+    const state = await getChatDeliveryState(store, chatId);
+    const normalized = normalizeChatDeliveryState(state);
+    const entry = normalized.providers[provider];
+    const safeContextKey = typeof contextKey === 'string' && contextKey.trim() ? contextKey.trim() : null;
+
+    if (safeContextKey && entry.contextKey && entry.contextKey !== safeContextKey) {
+        entry.deliveredUpTo = 0;
+    }
+    if (safeContextKey) entry.contextKey = safeContextKey;
+
+    entry.deliveredUpTo = Math.max(entry.deliveredUpTo, Math.floor(sequence));
+    return saveChatDeliveryState(store, chatId, normalized);
+}
+
+async function buildDirectHistoryDelta(store, chatId, { afterSequence = 0, cutoffSequence, maxMessages = 400, maxChars = 48000 } = {}) {
     if (!store || !chatId) return '';
     if (!Number.isFinite(cutoffSequence) || cutoffSequence <= 1) return '';
-    if (provider !== 'chatgpt' && provider !== 'gemini') return '';
+    const after = Number.isFinite(afterSequence) ? Math.max(0, Math.floor(afterSequence)) : 0;
+    const cutoff = Math.max(1, Math.floor(cutoffSequence));
+    if (cutoff <= after + 1) return '';
 
     const collectedReversed = [];
-    let beforeSequence = cutoffSequence; // excludes the new user message (sequence == cutoffSequence) and anything after
+    let beforeSequence = cutoff; // excludes the new user message (sequence == cutoff) and anything after
     let reachedBoundary = false;
 
     while (!reachedBoundary) {
@@ -2034,12 +2169,12 @@ async function buildDirectHistoryForProvider(store, chatId, provider, { cutoffSe
 
         for (let i = messages.length - 1; i >= 0; i -= 1) {
             const msg = messages[i];
-            if (!msg) continue;
-            const role = msg.role;
-            if (role === provider) {
+            if (!msg || !Number.isFinite(msg.sequence)) continue;
+            if (msg.sequence <= after) {
                 reachedBoundary = true;
                 break;
             }
+            const role = msg.role;
             if (role !== 'user' && role !== 'chatgpt' && role !== 'gemini') continue;
             collectedReversed.push(msg);
             if (collectedReversed.length >= maxMessages) {
@@ -2234,7 +2369,11 @@ async function buildDirectPrompt(session, turnIndex) {
     let conversationHistory = '';
     try {
         const store = await requireHistoryUnlocked();
-        conversationHistory = await buildDirectHistoryForProvider(store, session?.chatId, expectedLLM, {
+        const deliveryState = await getChatDeliveryState(store, session?.chatId);
+        const contextKey = getProviderContextKey(session, expectedLLM);
+        const deliveredUpTo = getEffectiveDeliveredUpTo(deliveryState, expectedLLM, contextKey);
+        conversationHistory = await buildDirectHistoryDelta(store, session?.chatId, {
+            afterSequence: deliveredUpTo,
             cutoffSequence: session?.userMessageSequence,
             maxMessages: 400,
             maxChars: 48000
@@ -2500,6 +2639,21 @@ async function sendDebateTurn(session) {
             promptId: promptId,
             turnIndex: turnIndex
         });
+
+        if (session.mode === 'direct' && session.chatId && Number.isFinite(session.userMessageSequence)) {
+            try {
+                const store = await requireHistoryUnlocked();
+                await bumpProviderDeliveredUpTo(
+                    store,
+                    session.chatId,
+                    expectedLLM,
+                    session.userMessageSequence,
+                    getProviderContextKey(session, expectedLLM)
+                );
+            } catch (error) {
+                // ignore delivery tracking failures
+            }
+        }
     } catch (error) {
         await pauseDebateSession(error.message || 'Failed to send prompt.', expectedLLM);
     }
@@ -2583,7 +2737,7 @@ async function handleDebateResponse(message) {
     });
 
     if (session.chatId) {
-        await appendChatMessage(session.chatId, {
+        const persisted = await appendChatMessage(session.chatId, {
             role: expectedLLM || message.sourceLLM,
             content,
             contentHtml: contentHtml || undefined,
@@ -2592,6 +2746,23 @@ async function handleDebateResponse(message) {
             roundIndex,
             sessionId: session.sessionId
         });
+        if (persisted?.ok && Number.isFinite(persisted?.message?.sequence)) {
+            const provider = expectedLLM || message.sourceLLM;
+            if (provider === 'chatgpt' || provider === 'gemini') {
+                try {
+                    const store = await requireHistoryUnlocked();
+                    await bumpProviderDeliveredUpTo(
+                        store,
+                        session.chatId,
+                        provider,
+                        persisted.message.sequence,
+                        getProviderContextKey(session, provider)
+                    );
+                } catch (error) {
+                    // ignore delivery tracking failures
+                }
+            }
+        }
     }
 
     if (turnIndex >= session.totalTurns) {
