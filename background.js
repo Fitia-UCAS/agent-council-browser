@@ -3,6 +3,12 @@
  * Handles communication with LLM websites and tab management
  */
 
+try {
+    importScripts('historyStore.js');
+} catch (error) {
+    console.error('[MLC History] Failed to import history store:', error);
+}
+
 // Extension installation
 chrome.runtime.onInstalled.addListener(() => {
     console.log('[MLC Background] Multi-LLM Coder extension installed/updated.');
@@ -68,6 +74,290 @@ function generatePromptId() {
 const ACTIVE_SESSION_KEY = 'mlc_active_session_v2';
 const PREFERRED_TABS_KEY = 'mlc_preferred_tabs';
 const TAB_PROFILES_KEY = 'mlc_tab_profiles_v1';
+const CHATS_KEY = 'mlc_chats_v1';
+
+let tabProfilesOpChain = Promise.resolve();
+
+function withTabProfilesLock(operation) {
+    const run = async () => operation();
+    const next = tabProfilesOpChain.then(run, run);
+    tabProfilesOpChain = next.catch(() => {});
+    return next;
+}
+
+const HISTORY_PAGE_SIZE = 60;
+
+function generateChatId() {
+    return 'chat_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+function toChatSummary(chat) {
+    if (!chat || typeof chat !== 'object') return null;
+    const chatId = chat.chatId || chat.threadId;
+    if (!chatId) return null;
+    return {
+        chatId,
+        title: chat.title || 'New chat',
+        createdAt: Number.isFinite(chat.createdAt) ? chat.createdAt : null,
+        updatedAt: Number.isFinite(chat.updatedAt) ? chat.updatedAt : null,
+        messageCount: Number.isFinite(chat.messageCount)
+            ? chat.messageCount
+            : (Array.isArray(chat.messages) ? chat.messages.length : 0),
+        lastPreview: typeof chat.lastPreview === 'string' ? chat.lastPreview : undefined
+    };
+}
+
+async function ensureHistoryStoreReady() {
+    if (!self.mlcHistoryStore) {
+        const err = new Error('History store is unavailable.');
+        err.code = 'HISTORY_STORE_UNAVAILABLE';
+        throw err;
+    }
+    await self.mlcHistoryStore.openDb();
+    return self.mlcHistoryStore;
+}
+
+async function getHistoryStatus() {
+    const store = await ensureHistoryStoreReady();
+    return store.getStatus();
+}
+
+async function requireHistoryUnlocked() {
+    const store = await ensureHistoryStoreReady();
+    const status = await store.getStatus();
+    if (!status.configured) {
+        const err = new Error('History encryption is not configured.');
+        err.code = 'HISTORY_NOT_CONFIGURED';
+        throw err;
+    }
+    if (!status.unlocked) {
+        const err = new Error('History is locked.');
+        err.code = 'HISTORY_LOCKED';
+        throw err;
+    }
+    return store;
+}
+
+let historyMigrationChecked = false;
+let historyMigrationPromise = null;
+
+async function ensureLegacyChatsMigrated(store) {
+    if (historyMigrationChecked) return;
+    if (historyMigrationPromise) return historyMigrationPromise;
+
+    historyMigrationPromise = (async () => {
+        try {
+            const version = await store.getMeta('migrationVersion');
+            if (Number(version) >= 1) {
+                historyMigrationChecked = true;
+                return;
+            }
+
+            const stored = await chrome.storage.local.get(CHATS_KEY);
+            const raw = stored?.[CHATS_KEY];
+            const chats = raw && typeof raw === 'object' && Array.isArray(raw.chats) ? raw.chats : [];
+            const legacyActiveChatId = raw && typeof raw === 'object' && typeof raw.activeChatId === 'string'
+                ? raw.activeChatId
+                : null;
+
+            if (!chats.length) {
+                await store.setMeta('migrationVersion', 1);
+                historyMigrationChecked = true;
+                return;
+            }
+
+            let importedChats = 0;
+            let importedMessages = 0;
+
+            for (const legacyChat of chats) {
+                const chatId = typeof legacyChat?.chatId === 'string' && legacyChat.chatId
+                    ? legacyChat.chatId
+                    : generateChatId();
+
+                const existing = await store.getThreadSummary(chatId);
+                if (existing) continue;
+
+                const createdAt = Number.isFinite(legacyChat?.createdAt) ? legacyChat.createdAt : Date.now();
+                const updatedAt = Number.isFinite(legacyChat?.updatedAt) ? legacyChat.updatedAt : createdAt;
+                const titleRaw = typeof legacyChat?.title === 'string' ? legacyChat.title : 'New chat';
+                const title = titleRaw.trim() ? titleRaw : 'New chat';
+                const titleIsDefault = title === 'New chat';
+
+                try {
+                    await store.createThread({
+                        threadId: chatId,
+                        title,
+                        createdAt,
+                        updatedAt,
+                        titleIsDefault
+                    });
+                    importedChats += 1;
+                } catch (error) {
+                    console.warn('[MLC History] Failed to create thread during migration:', error);
+                    continue;
+                }
+
+                const messages = Array.isArray(legacyChat?.messages) ? legacyChat.messages : [];
+                for (const legacyMessage of messages) {
+                    const content = String(legacyMessage?.content || '');
+                    if (!content.trim()) continue;
+                    const role = legacyMessage?.role || 'assistant';
+                    const timestamp = Number.isFinite(legacyMessage?.timestamp) ? legacyMessage.timestamp : Date.now();
+                    const contentHtml = typeof legacyMessage?.contentHtml === 'string' ? legacyMessage.contentHtml : undefined;
+                    try {
+                        await store.appendMessage(chatId, {
+                            role,
+                            content,
+                            contentHtml,
+                            timestamp,
+                            sessionId: legacyMessage?.sessionId || undefined,
+                            turnIndex: Number.isFinite(legacyMessage?.turnIndex) ? legacyMessage.turnIndex : undefined,
+                            roundIndex: Number.isFinite(legacyMessage?.roundIndex) ? legacyMessage.roundIndex : undefined
+                        });
+                        importedMessages += 1;
+                    } catch (error) {
+                        console.warn('[MLC History] Failed to migrate message:', error);
+                    }
+                }
+            }
+
+            const currentActive = await store.getActiveThreadId();
+            if (!currentActive && legacyActiveChatId) {
+                const migratedActive = await store.getThreadSummary(legacyActiveChatId);
+                if (migratedActive) {
+                    await store.setActiveThreadId(legacyActiveChatId);
+                }
+            }
+
+            await store.setMeta('migrationVersion', 1);
+            historyMigrationChecked = true;
+            console.log('[MLC History] Migration complete.', { importedChats, importedMessages });
+        } catch (error) {
+            console.error('[MLC History] Migration failed:', error);
+        }
+    })().finally(() => {
+        historyMigrationPromise = null;
+    });
+
+    return historyMigrationPromise;
+}
+
+async function loadChatsState({ ensureActive = true } = {}) {
+    const store = await requireHistoryUnlocked();
+    await ensureLegacyChatsMigrated(store);
+    const { threads } = await store.listThreads({ limit: 250 });
+    let activeChatId = await store.getActiveThreadId();
+    const hasActive = activeChatId && threads.some(thread => thread.chatId === activeChatId);
+
+    if (!ensureActive) {
+        return { activeChatId: hasActive ? activeChatId : null, chats: threads };
+    }
+
+    if (!threads.length) {
+        const chatId = generateChatId();
+        await store.createThread({ threadId: chatId, title: 'New chat', titleIsDefault: true });
+        await store.setActiveThreadId(chatId);
+        const refreshed = await store.listThreads({ limit: 250 });
+        return { activeChatId: chatId, chats: refreshed.threads };
+    }
+
+    if (!hasActive) {
+        activeChatId = threads[0].chatId;
+        await store.setActiveThreadId(activeChatId);
+    }
+
+    return { activeChatId, chats: threads };
+}
+
+async function notifyChatsState(stateOverride = null) {
+    try {
+        const state = stateOverride || await loadChatsState();
+        sendMessageToPopup({
+            type: 'CHATS_STATE',
+            activeChatId: state.activeChatId,
+            chats: state.chats
+        });
+    } catch (error) {
+        const status = await getHistoryStatus().catch(() => ({ configured: false, unlocked: false }));
+        sendMessageToPopup({ type: 'HISTORY_STATUS', status, error: error?.message });
+    }
+}
+
+async function createChat({ makeActive = true } = {}) {
+    const store = await requireHistoryUnlocked();
+    const chatId = generateChatId();
+    await store.createThread({ threadId: chatId, title: 'New chat', titleIsDefault: true });
+    if (makeActive) {
+        await store.setActiveThreadId(chatId);
+    }
+    const chat = await store.getThreadSummary(chatId);
+    const state = await loadChatsState({ ensureActive: false });
+    await notifyChatsState(state);
+    return {
+        ok: true,
+        chat: { ...chat, messages: [] },
+        state: { ...state, activeChatId: makeActive ? chatId : state.activeChatId }
+    };
+}
+
+async function setActiveChat(chatId) {
+    const store = await requireHistoryUnlocked();
+    const chat = await store.getThreadSummary(chatId);
+    if (!chat) {
+        return { ok: false, error: 'Chat not found.', code: 'CHAT_NOT_FOUND' };
+    }
+    await store.setActiveThreadId(chatId);
+    const state = await loadChatsState({ ensureActive: false });
+    await notifyChatsState(state);
+    return { ok: true, chat: { ...chat, messages: [] }, state };
+}
+
+async function renameChat(chatId, title) {
+    const store = await requireHistoryUnlocked();
+    try {
+        const updated = await store.renameThread(chatId, title);
+        await notifyChatsState();
+        return { ok: true, chat: updated };
+    } catch (error) {
+        return { ok: false, error: error.message, code: error.code || 'RENAME_FAILED' };
+    }
+}
+
+async function deleteChat(chatId) {
+    const store = await requireHistoryUnlocked();
+    const chat = await store.getThreadSummary(chatId);
+    if (!chat) return { ok: false, error: 'Chat not found.', code: 'CHAT_NOT_FOUND' };
+
+    await store.deleteThread(chatId);
+    try {
+        await store.deleteMeta(getChatDeliveryStateKey(chatId));
+    } catch (error) {
+        // ignore
+    }
+    deliveryStateCache.delete(chatId);
+    const activeChatId = await store.getActiveThreadId();
+    if (activeChatId === chatId) {
+        const { threads } = await store.listThreads({ limit: 1 });
+        await store.setActiveThreadId(threads[0]?.chatId || null);
+    }
+    const state = await loadChatsState({ ensureActive: true });
+    await notifyChatsState(state);
+    return { ok: true, state };
+}
+
+async function appendChatMessage(chatId, message) {
+    if (!chatId || !message) return { ok: false, error: 'Missing chatId or message.' };
+    try {
+        const store = await requireHistoryUnlocked();
+        const provider = message.role === 'gemini' || message.role === 'chatgpt' ? message.role : null;
+        const saved = await store.appendMessage(chatId, { ...message, provider });
+        await notifyChatsState();
+        return { ok: true, message: saved };
+    } catch (error) {
+        console.warn('[MLC Chats] Failed to persist message:', error);
+        return { ok: false, error: error.message, code: error.code || 'APPEND_MESSAGE_FAILED' };
+    }
+}
 
 const defaultDebateState = {
     isActive: false,
@@ -75,6 +365,8 @@ const defaultDebateState = {
     pausedReason: null,
     pausedProvider: null,
     pausedAt: 0,
+    mode: 'debate',
+    chatId: null,
     sessionId: null,
     rounds: 0,
     totalTurns: 0,
@@ -84,6 +376,10 @@ const defaultDebateState = {
     profileIds: { chatgpt: null, gemini: null },
     tabIds: { chatgpt: null, gemini: null },
     userQuery: '',
+    isFollowUp: false,
+    conversationContext: '',
+    promptOverrides: null,
+    userMessageSequence: null,
     messages: [],
     waitingFor: null,
     lastPromptId: null,
@@ -116,6 +412,21 @@ async function loadActiveDebateState() {
         if (typeof activeDebateState.isPaused !== 'boolean') {
             activeDebateState.isPaused = false;
         }
+        if (!['debate', 'single', 'direct'].includes(activeDebateState.mode)) {
+            activeDebateState.mode = 'debate';
+        }
+        if (typeof activeDebateState.isFollowUp !== 'boolean') {
+            activeDebateState.isFollowUp = false;
+        }
+        if (typeof activeDebateState.conversationContext !== 'string') {
+            activeDebateState.conversationContext = '';
+        }
+        if (!Number.isFinite(activeDebateState.userMessageSequence)) {
+            activeDebateState.userMessageSequence = null;
+        }
+        if (!activeDebateState.promptOverrides || typeof activeDebateState.promptOverrides !== 'object') {
+            activeDebateState.promptOverrides = null;
+        }
     }
     return activeDebateState;
 }
@@ -147,6 +458,13 @@ async function setPreferredTabs(payload = {}) {
 
 function normalizeProvider(provider) {
     return provider === 'gemini' ? 'gemini' : 'chatgpt';
+}
+
+function getTabUrlCandidate(tab) {
+    if (!tab) return '';
+    if (typeof tab.url === 'string' && tab.url) return tab.url;
+    if (typeof tab.pendingUrl === 'string' && tab.pendingUrl) return tab.pendingUrl;
+    return '';
 }
 
 function getEmptyProfilesState() {
@@ -246,11 +564,7 @@ async function loadTabProfiles() {
                     gemini: next.defaults.gemini || null
                 }
             };
-            const sanitized = sanitizeProfilesState(state);
-            if (sanitized.changed) {
-                await chrome.storage.local.set({ [TAB_PROFILES_KEY]: sanitized.state });
-            }
-            return sanitized.state;
+            return sanitizeProfilesState(state).state;
         }
     }
     return getEmptyProfilesState();
@@ -308,13 +622,13 @@ async function validateProfile(profile) {
     if (!profile || !profile.tabId) {
         return { ...profile, status: 'offline', updatedAt };
     }
-    try {
-        const tab = await chrome.tabs.get(profile.tabId);
-        const url = tab?.url || '';
-        const status = url
-            ? (isExpectedHost(profile.provider, url) ? 'ok' : 'wrong_host')
-            : 'unknown';
-        return {
+	try {
+	    const tab = await chrome.tabs.get(profile.tabId);
+	    const url = getTabUrlCandidate(tab);
+	    const status = url
+	        ? (isExpectedHost(profile.provider, url) ? 'ok' : 'wrong_host')
+	        : 'unknown';
+	    return {
             ...profile,
             tabId: tab.id,
             windowId: tab.windowId,
@@ -335,13 +649,19 @@ async function validateProfile(profile) {
 }
 
 async function refreshAllProfiles({ persist = true } = {}) {
-    const state = await loadTabProfiles();
-    const updatedProfiles = await Promise.all(state.profiles.map(profile => validateProfile(profile)));
-    const next = sanitizeProfilesState({ ...state, profiles: updatedProfiles }).state;
-    if (persist) {
-        await saveTabProfiles(next);
+    if (!persist) {
+        const state = await loadTabProfiles();
+        const updatedProfiles = await Promise.all(state.profiles.map(profile => validateProfile(profile)));
+        return sanitizeProfilesState({ ...state, profiles: updatedProfiles }).state;
     }
-    return next;
+
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        const updatedProfiles = await Promise.all(state.profiles.map(profile => validateProfile(profile)));
+        const next = sanitizeProfilesState({ ...state, profiles: updatedProfiles }).state;
+        await saveTabProfiles(next);
+        return next;
+    });
 }
 
 async function notifyTabProfiles(stateOverride = null) {
@@ -368,104 +688,113 @@ async function pingTab(tabId, provider) {
 }
 
 async function migratePreferredTabsToProfiles() {
-    const existing = await chrome.storage.local.get(TAB_PROFILES_KEY);
-    if (existing && existing[TAB_PROFILES_KEY]) return;
-    const preferred = await getPreferredTabs();
-    if (!preferred.chatgpt && !preferred.gemini) return;
+    return withTabProfilesLock(async () => {
+        const existing = await chrome.storage.local.get(TAB_PROFILES_KEY);
+        if (existing && existing[TAB_PROFILES_KEY]) return;
+        const preferred = await getPreferredTabs();
+        if (!preferred.chatgpt && !preferred.gemini) return;
 
-    const state = getEmptyProfilesState();
-    for (const provider of ['chatgpt', 'gemini']) {
-        const tabId = preferred[provider];
-        if (!Number.isFinite(tabId)) continue;
-        const profileId = generateProfileId();
-        let profile = {
-            profileId,
-            provider,
-            tabId,
-            windowId: null,
-            label: provider === 'gemini' ? 'Gemini profile' : 'ChatGPT profile',
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            lastSeenAt: 0,
-            status: 'unknown',
-            modelHint: '',
-            lastKnownTitle: '',
-            lastKnownUrl: '',
-            inUseBySessionId: null
-        };
-        profile = await validateProfile(profile);
-        state.profiles.push(profile);
-        state.defaults[provider] = profileId;
-    }
+        const state = getEmptyProfilesState();
+        for (const provider of ['chatgpt', 'gemini']) {
+            const tabId = preferred[provider];
+            if (!Number.isFinite(tabId)) continue;
+            const profileId = generateProfileId();
+            let profile = {
+                profileId,
+                provider,
+                tabId,
+                windowId: null,
+                label: provider === 'gemini' ? 'Gemini profile' : 'ChatGPT profile',
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+                lastSeenAt: 0,
+                status: 'unknown',
+                modelHint: '',
+                lastKnownTitle: '',
+                lastKnownUrl: '',
+                inUseBySessionId: null
+            };
+            profile = await validateProfile(profile);
+            state.profiles.push(profile);
+            state.defaults[provider] = profileId;
+        }
 
-    await saveTabProfiles(state);
-    await notifyTabProfiles(state);
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+    });
 }
 
-async function claimTabAsProfile({ provider, tabId, label, profileId }) {
-    const normalizedProvider = normalizeProvider(provider);
-    if (!Number.isFinite(tabId)) {
-        return { ok: false, error: 'Tab ID is invalid.' };
-    }
-    let tab;
-    try {
-        tab = await chrome.tabs.get(tabId);
-    } catch (error) {
-        return { ok: false, error: 'Tab not found.' };
-    }
-    if (!isExpectedHost(normalizedProvider, tab.url || '')) {
-        return { ok: false, error: `Selected tab is not a valid ${normalizedProvider === 'gemini' ? 'Gemini' : 'ChatGPT'} tab.` };
-    }
+async function claimTabAsProfile({ provider, tabId, label, profileId, setDefault = false, skipHostCheck = false }) {
+    return withTabProfilesLock(async () => {
+        const normalizedProvider = normalizeProvider(provider);
+        if (!Number.isFinite(tabId)) {
+            return { ok: false, error: 'Tab ID is invalid.' };
+        }
+        let tab;
+        try {
+            tab = await chrome.tabs.get(tabId);
+        } catch (error) {
+            return { ok: false, error: 'Tab not found.' };
+        }
+        const tabUrl = getTabUrlCandidate(tab);
+        const status = tabUrl
+            ? (isExpectedHost(normalizedProvider, tabUrl) ? 'ok' : 'wrong_host')
+            : 'unknown';
 
-    const state = await loadTabProfiles();
-    let profile = profileId ? findProfileById(state, profileId) : null;
-    if (!profile) {
-        profile = findProfileByTabId(state, normalizedProvider, tabId);
-    }
+        if (!skipHostCheck && status !== 'ok') {
+            return { ok: false, error: `Selected tab is not a valid ${normalizedProvider === 'gemini' ? 'Gemini' : 'ChatGPT'} tab.` };
+        }
 
-    if (!profile) {
-        profile = {
-            profileId: generateProfileId(),
-            provider: normalizedProvider,
-            tabId: tabId,
-            windowId: tab.windowId || null,
-            label: label ? String(label).trim() : formatDefaultProfileLabel(normalizedProvider, tab),
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            lastSeenAt: Date.now(),
-            status: 'ok',
-            modelHint: '',
-            lastKnownTitle: tab.title || '',
-            lastKnownUrl: tab.url || '',
-            inUseBySessionId: null
-        };
-        state.profiles.push(profile);
-    } else {
-        profile = applyProfilePatch(profile, {
-            tabId: tabId,
-            windowId: tab.windowId,
-            label: label ? String(label).trim() : profile.label,
-            lastKnownTitle: tab.title || profile.lastKnownTitle,
-            lastKnownUrl: tab.url || profile.lastKnownUrl
-        });
-        profile.updatedAt = Date.now();
-        profile.lastSeenAt = Date.now();
-        profile.status = 'ok';
+        const state = await loadTabProfiles();
+        let profile = profileId ? findProfileById(state, profileId) : null;
+        if (!profile) {
+            profile = findProfileByTabId(state, normalizedProvider, tabId);
+        }
+
+        if (!profile) {
+            profile = {
+                profileId: generateProfileId(),
+                provider: normalizedProvider,
+                tabId: tabId,
+                windowId: tab.windowId || null,
+                label: label ? String(label).trim() : formatDefaultProfileLabel(normalizedProvider, tab),
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+                lastSeenAt: Date.now(),
+                status,
+                modelHint: '',
+                lastKnownTitle: tab.title || '',
+                lastKnownUrl: tabUrl || '',
+                inUseBySessionId: null
+            };
+            state.profiles.push(profile);
+        } else {
+            profile = applyProfilePatch(profile, {
+                tabId: tabId,
+                windowId: tab.windowId,
+                label: label ? String(label).trim() : profile.label,
+                lastKnownTitle: tab.title || profile.lastKnownTitle,
+                lastKnownUrl: tabUrl || profile.lastKnownUrl
+            });
+            profile.updatedAt = Date.now();
+            profile.lastSeenAt = Date.now();
+            profile.status = status;
+            const index = state.profiles.findIndex(item => item.profileId === profile.profileId);
+            if (index >= 0) state.profiles[index] = profile;
+        }
+
+        if (setDefault || !state.defaults[normalizedProvider]) {
+            state.defaults[normalizedProvider] = profile.profileId;
+        }
+
+        profile = await validateProfile(profile);
         const index = state.profiles.findIndex(item => item.profileId === profile.profileId);
         if (index >= 0) state.profiles[index] = profile;
-    }
-
-    if (!state.defaults[normalizedProvider]) {
-        state.defaults[normalizedProvider] = profile.profileId;
-    }
-
-    profile = await validateProfile(profile);
-    const index = state.profiles.findIndex(item => item.profileId === profile.profileId);
-    if (index >= 0) state.profiles[index] = profile;
-    await saveTabProfiles(state);
-    await syncSessionProfileBinding(profile);
-    await notifyTabProfiles(state);
-    return { ok: true, profile };
+        await saveTabProfiles(state);
+        await syncSessionProfileBinding(profile);
+        await notifyTabProfiles(state);
+        return { ok: true, profile };
+    });
 }
 
 async function createProfileFromActiveTab(provider, label, profileId) {
@@ -482,72 +811,79 @@ async function createProfileFromActiveTab(provider, label, profileId) {
 }
 
 async function updateTabProfile(profileId, patch) {
-    const state = await loadTabProfiles();
-    const profile = findProfileById(state, profileId);
-    if (!profile) return { ok: false, error: 'Profile not found.' };
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        const profile = findProfileById(state, profileId);
+        if (!profile) return { ok: false, error: 'Profile not found.' };
 
-    let next = applyProfilePatch(profile, patch);
-    if (Number.isFinite(patch?.tabId)) {
-        try {
-            const tab = await chrome.tabs.get(patch.tabId);
-            if (!isExpectedHost(profile.provider, tab.url || '')) {
-                return { ok: false, error: 'Selected tab is not valid for this provider.' };
+        let next = applyProfilePatch(profile, patch);
+        if (Number.isFinite(patch?.tabId)) {
+            try {
+                const tab = await chrome.tabs.get(patch.tabId);
+                const tabUrl = getTabUrlCandidate(tab);
+                if (!isExpectedHost(profile.provider, tabUrl)) {
+                    return { ok: false, error: 'Selected tab is not valid for this provider.' };
+                }
+                next = applyProfilePatch(next, {
+                    windowId: tab.windowId,
+                    lastKnownTitle: tab.title || next.lastKnownTitle,
+                    lastKnownUrl: tabUrl || next.lastKnownUrl
+                });
+                next.status = 'ok';
+                next.lastSeenAt = Date.now();
+            } catch (error) {
+                return { ok: false, error: 'Tab not found.' };
             }
-            next = applyProfilePatch(next, {
-                windowId: tab.windowId,
-                lastKnownTitle: tab.title || next.lastKnownTitle,
-                lastKnownUrl: tab.url || next.lastKnownUrl
-            });
-            next.status = 'ok';
-            next.lastSeenAt = Date.now();
-        } catch (error) {
-            return { ok: false, error: 'Tab not found.' };
         }
-    }
 
-    next.updatedAt = Date.now();
-    const updated = await validateProfile(next);
-    const index = state.profiles.findIndex(item => item.profileId === profileId);
-    if (index >= 0) state.profiles[index] = updated;
-    await saveTabProfiles(state);
-    await syncSessionProfileBinding(updated);
-    await notifyTabProfiles(state);
-    return { ok: true, profile: updated };
+        next.updatedAt = Date.now();
+        const updated = await validateProfile(next);
+        const index = state.profiles.findIndex(item => item.profileId === profileId);
+        if (index >= 0) state.profiles[index] = updated;
+        await saveTabProfiles(state);
+        await syncSessionProfileBinding(updated);
+        await notifyTabProfiles(state);
+        return { ok: true, profile: updated };
+    });
 }
 
 async function deleteTabProfile(profileId) {
-    const state = await loadTabProfiles();
-    const profile = findProfileById(state, profileId);
-    if (!profile) return { ok: false, error: 'Profile not found.' };
-    state.profiles = state.profiles.filter(item => item.profileId !== profileId);
-    for (const provider of ['chatgpt', 'gemini']) {
-        if (state.defaults[provider] === profileId) {
-            state.defaults[provider] = null;
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        const profile = findProfileById(state, profileId);
+        if (!profile) return { ok: false, error: 'Profile not found.' };
+        state.profiles = state.profiles.filter(item => item.profileId !== profileId);
+        for (const provider of ['chatgpt', 'gemini']) {
+            if (state.defaults[provider] === profileId) {
+                state.defaults[provider] = null;
+            }
         }
-    }
-    await saveTabProfiles(state);
-    if (profile.inUseBySessionId) {
-        await pauseDebateSession(`Profile "${profile.label}" was removed.`, profile.provider);
-    }
-    await notifyTabProfiles(state);
-    return { ok: true };
+        await saveTabProfiles(state);
+        if (profile.inUseBySessionId) {
+            await pauseDebateSession(`Profile "${profile.label}" was removed.`, profile.provider);
+        }
+        await notifyTabProfiles(state);
+        return { ok: true };
+    });
 }
 
 async function setDefaultProfile(provider, profileId) {
-    const normalizedProvider = normalizeProvider(provider);
-    const state = await loadTabProfiles();
-    if (profileId) {
-        const profile = findProfileById(state, profileId);
-        if (!profile || profile.provider !== normalizedProvider) {
-            return { ok: false, error: 'Profile not found for provider.' };
+    return withTabProfilesLock(async () => {
+        const normalizedProvider = normalizeProvider(provider);
+        const state = await loadTabProfiles();
+        if (profileId) {
+            const profile = findProfileById(state, profileId);
+            if (!profile || profile.provider !== normalizedProvider) {
+                return { ok: false, error: 'Profile not found for provider.' };
+            }
+            state.defaults[normalizedProvider] = profileId;
+        } else {
+            state.defaults[normalizedProvider] = null;
         }
-        state.defaults[normalizedProvider] = profileId;
-    } else {
-        state.defaults[normalizedProvider] = null;
-    }
-    await saveTabProfiles(state);
-    await notifyTabProfiles(state);
-    return { ok: true };
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+        return { ok: true };
+    });
 }
 
 async function focusTab(tabId) {
@@ -576,6 +912,30 @@ async function openProviderTab(provider, options = {}) {
     return { ok: true, provider: normalizedProvider, tabId: tab.id, windowId: tab.windowId };
 }
 
+async function connectProvider(provider, options = {}) {
+    const normalizedProvider = normalizeProvider(provider);
+    const opened = await openProviderTab(normalizedProvider, options);
+    if (!opened?.ok) return opened || { ok: false, error: 'Failed to open provider tab.' };
+    const label = normalizedProvider === 'gemini' ? 'Gemini' : 'ChatGPT';
+    let claimed = await claimTabAsProfile({
+        provider: normalizedProvider,
+        tabId: opened.tabId,
+        label,
+        setDefault: true
+    });
+    if (!claimed?.ok) {
+        claimed = await claimTabAsProfile({
+            provider: normalizedProvider,
+            tabId: opened.tabId,
+            label,
+            setDefault: true,
+            skipHostCheck: true
+        });
+    }
+    if (!claimed?.ok) return claimed || { ok: false, error: 'Failed to bind provider tab.' };
+    return { ok: true, provider: normalizedProvider, tabId: opened.tabId, profile: claimed.profile };
+}
+
 async function syncSessionProfileBinding(profile) {
     const session = await loadActiveDebateState();
     if (!session.sessionId || !profile) return;
@@ -587,16 +947,18 @@ async function syncSessionProfileBinding(profile) {
 
 async function updateProfileModelHint(tabId, provider, modelHint) {
     if (!Number.isFinite(tabId)) return;
-    const normalizedProvider = normalizeProvider(provider);
-    const state = await loadTabProfiles();
-    const profile = state.profiles.find(item => item.provider === normalizedProvider && item.tabId === tabId);
-    if (!profile) return;
-    const next = applyProfilePatch(profile, { modelHint: sanitizeModelHint(normalizedProvider, modelHint) });
-    next.updatedAt = Date.now();
-    const index = state.profiles.findIndex(item => item.profileId === profile.profileId);
-    if (index >= 0) state.profiles[index] = next;
-    await saveTabProfiles(state);
-    await notifyTabProfiles(state);
+    return withTabProfilesLock(async () => {
+        const normalizedProvider = normalizeProvider(provider);
+        const state = await loadTabProfiles();
+        const profile = state.profiles.find(item => item.provider === normalizedProvider && item.tabId === tabId);
+        if (!profile) return;
+        const next = applyProfilePatch(profile, { modelHint: sanitizeModelHint(normalizedProvider, modelHint) });
+        next.updatedAt = Date.now();
+        const index = state.profiles.findIndex(item => item.profileId === profile.profileId);
+        if (index >= 0) state.profiles[index] = next;
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+    });
 }
 
 function resolveProfileSelection(provider, selection, defaults) {
@@ -607,67 +969,73 @@ function resolveProfileSelection(provider, selection, defaults) {
 }
 
 async function validateProfileForSession(provider, profileId, { requirePing = false } = {}) {
-    const state = await loadTabProfiles();
-    const profile = findProfileById(state, profileId);
-    if (!profile) {
-        return { ok: false, error: 'Profile not found.' };
-    }
-    const validated = await validateProfile(profile);
-    const index = state.profiles.findIndex(item => item.profileId === profileId);
-    if (index >= 0) state.profiles[index] = validated;
-    await saveTabProfiles(state);
-    await notifyTabProfiles(state);
-    if (validated.status !== 'ok') {
-        const statusLabel = validated.status === 'offline'
-            ? 'offline'
-            : (validated.status === 'wrong_host' ? 'not on the right host' : 'unavailable');
-        return { ok: false, error: `${validated.label} is ${statusLabel}.` };
-    }
-    if (requirePing) {
-        const pingOk = await pingTab(validated.tabId, provider);
-        if (!pingOk) {
-            return { ok: false, error: `${validated.label} is not responding. Refresh the tab and try again.` };
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        const profile = findProfileById(state, profileId);
+        if (!profile) {
+            return { ok: false, error: 'Profile not found.' };
         }
-    }
-    return { ok: true, profile: validated };
+        const validated = await validateProfile(profile);
+        const index = state.profiles.findIndex(item => item.profileId === profileId);
+        if (index >= 0) state.profiles[index] = validated;
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+        if (validated.status !== 'ok') {
+            const statusLabel = validated.status === 'offline'
+                ? 'offline'
+                : (validated.status === 'wrong_host' ? 'not on the right host' : 'unavailable');
+            return { ok: false, error: `${validated.label} is ${statusLabel}.` };
+        }
+        if (requirePing) {
+            const pingOk = await pingTab(validated.tabId, provider);
+            if (!pingOk) {
+                return { ok: false, error: `${validated.label} is not responding. Refresh the tab and try again.` };
+            }
+        }
+        return { ok: true, profile: validated };
+    });
 }
 
 async function lockProfilesForSession(sessionId, profileIds) {
     if (!sessionId || !profileIds) return;
-    const state = await loadTabProfiles();
-    let changed = false;
-    for (const provider of ['chatgpt', 'gemini']) {
-        const profileId = profileIds[provider];
-        if (!profileId) continue;
-        const profile = findProfileById(state, profileId);
-        if (!profile) continue;
-        if (profile.inUseBySessionId !== sessionId) {
-            profile.inUseBySessionId = sessionId;
-            profile.updatedAt = Date.now();
-            changed = true;
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        let changed = false;
+        for (const provider of ['chatgpt', 'gemini']) {
+            const profileId = profileIds[provider];
+            if (!profileId) continue;
+            const profile = findProfileById(state, profileId);
+            if (!profile) continue;
+            if (profile.inUseBySessionId !== sessionId) {
+                profile.inUseBySessionId = sessionId;
+                profile.updatedAt = Date.now();
+                changed = true;
+            }
         }
-    }
-    if (changed) {
-        await saveTabProfiles(state);
-        await notifyTabProfiles(state);
-    }
+        if (changed) {
+            await saveTabProfiles(state);
+            await notifyTabProfiles(state);
+        }
+    });
 }
 
 async function releaseProfilesForSession(sessionId) {
     if (!sessionId) return;
-    const state = await loadTabProfiles();
-    let changed = false;
-    state.profiles.forEach(profile => {
-        if (profile.inUseBySessionId === sessionId) {
-            profile.inUseBySessionId = null;
-            profile.updatedAt = Date.now();
-            changed = true;
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        let changed = false;
+        state.profiles.forEach(profile => {
+            if (profile.inUseBySessionId === sessionId) {
+                profile.inUseBySessionId = null;
+                profile.updatedAt = Date.now();
+                changed = true;
+            }
+        });
+        if (changed) {
+            await saveTabProfiles(state);
+            await notifyTabProfiles(state);
         }
     });
-    if (changed) {
-        await saveTabProfiles(state);
-        await notifyTabProfiles(state);
-    }
 }
 
 // Message handling
@@ -742,6 +1110,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'OPEN_PROVIDER_TAB':
             openProviderTab(message.provider, message).then(sendResponse).catch(error => {
                 console.error('[MLC Profiles] Error opening provider tab:', error);
+                sendResponse({ ok: false, error: error.message });
+            });
+            return true;
+        case 'CONNECT_PROVIDER':
+            connectProvider(message.provider, { focus: true }).then(sendResponse).catch((error) => {
+                console.error('[MLC Profiles] Error connecting provider:', error);
                 sendResponse({ ok: false, error: error.message });
             });
             return true;
@@ -821,11 +1195,163 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
             sendResponse({ status: 'active_session_sent', type: message.type });
             break;
+        case 'HISTORY_STATUS':
+            getHistoryStatus().then((status) => {
+                sendResponse({ ok: true, status });
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_STATUS_FAILED' });
+            });
+            return true;
+        case 'HISTORY_CONFIGURE':
+            ensureHistoryStoreReady().then((store) => store.configureEncryption(message.passphrase)).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_CONFIGURE_FAILED' });
+            });
+            return true;
+        case 'HISTORY_UNLOCK':
+            ensureHistoryStoreReady().then((store) => store.unlock(message.passphrase)).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_UNLOCK_FAILED' });
+            });
+            return true;
+        case 'HISTORY_LOCK':
+            ensureHistoryStoreReady().then((store) => store.lock()).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_LOCK_FAILED' });
+            });
+            return true;
+        case 'HISTORY_RESET':
+            ensureHistoryStoreReady()
+                .then((store) => store.resetAllData())
+                .then(() => new Promise((resolve) => chrome.storage.local.remove(CHATS_KEY, resolve)))
+                .then(() => {
+                    historyMigrationChecked = false;
+                    historyMigrationPromise = null;
+                    deliveryStateCache.clear();
+                })
+                .then(() => getHistoryStatus())
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_RESET_FAILED' });
+                });
+            return true;
+        case 'GET_CHATS_STATE':
+            loadChatsState().then((state) => {
+                sendResponse({
+                    ok: true,
+                    activeChatId: state.activeChatId,
+                    chats: state.chats
+                });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error loading chats:', error);
+                getHistoryStatus().then((status) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'GET_CHATS_FAILED', status });
+                }).catch(() => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'GET_CHATS_FAILED' });
+                });
+            });
+            return true;
+        case 'GET_CHAT':
+            requireHistoryUnlocked().then((store) => {
+                const chatId = message.chatId;
+                return store.getThreadWithMessages(chatId, { limit: HISTORY_PAGE_SIZE });
+            }).then(({ thread, page }) => {
+                sendResponse({
+                    ok: true,
+                    chat: {
+                        chatId: thread.chatId,
+                        title: thread.title,
+                        createdAt: thread.createdAt,
+                        updatedAt: thread.updatedAt,
+                        messageCount: thread.messageCount,
+                        lastPreview: thread.lastPreview,
+                        messages: page.messages,
+                        nextCursorSequence: page.nextCursorSequence,
+                        hasMore: page.hasMore
+                    }
+                });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error loading chat:', error);
+                getHistoryStatus().then((status) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'GET_CHAT_FAILED', status });
+                }).catch(() => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'GET_CHAT_FAILED' });
+                });
+            });
+            return true;
+        case 'GET_MESSAGES_PAGE':
+            requireHistoryUnlocked().then((store) => {
+                const chatId = message.chatId;
+                const limit = Number.isFinite(message.limit) ? message.limit : HISTORY_PAGE_SIZE;
+                const beforeSequence = Number.isFinite(message.beforeSequence) ? message.beforeSequence : null;
+                return store.listMessages(chatId, { limit, beforeSequence });
+            }).then((page) => {
+                sendResponse({ ok: true, ...page });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error listing messages:', error);
+                sendResponse({ ok: false, error: error.message, code: error.code || 'GET_MESSAGES_FAILED' });
+            });
+            return true;
+        case 'CREATE_CHAT':
+            createChat({ makeActive: true }).then((result) => {
+                sendResponse({ ok: true, chat: result.chat, activeChatId: result.state.activeChatId });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error creating chat:', error);
+                getHistoryStatus().then((status) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'CREATE_CHAT_FAILED', status });
+                }).catch(() => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'CREATE_CHAT_FAILED' });
+                });
+            });
+            return true;
+        case 'SET_ACTIVE_CHAT':
+            setActiveChat(message.chatId).then((result) => {
+                if (!result.ok) {
+                    sendResponse(result);
+                    return;
+                }
+                sendResponse({ ok: true, chat: result.chat, activeChatId: result.state.activeChatId });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error selecting chat:', error);
+                getHistoryStatus().then((status) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'SET_ACTIVE_CHAT_FAILED', status });
+                }).catch(() => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'SET_ACTIVE_CHAT_FAILED' });
+                });
+            });
+            return true;
+        case 'RENAME_CHAT':
+            renameChat(message.chatId, message.title).then(sendResponse).catch((error) => {
+                console.error('[MLC Chats] Error renaming chat:', error);
+                sendResponse({ ok: false, error: error.message, code: error.code || 'RENAME_CHAT_FAILED' });
+            });
+            return true;
+        case 'DELETE_CHAT':
+            deleteChat(message.chatId).then(sendResponse).catch((error) => {
+                console.error('[MLC Chats] Error deleting chat:', error);
+                sendResponse({ ok: false, error: error.message, code: error.code || 'DELETE_CHAT_FAILED' });
+            });
+            return true;
         case 'START_DEBATE_SESSION':
             handleStartDebateSession(message).catch(error => {
                 console.error('[MLC Debate] Error starting session:', error);
             });
             sendResponse({ status: 'debate_session_started', type: message.type });
+            break;
+        case 'START_RUN':
+            handleStartDebateSession(message).catch(error => {
+                console.error('[MLC Session] Error starting run:', error);
+            });
+            sendResponse({ status: 'run_started', type: message.type });
             break;
         case 'RESUME_SESSION':
             resumeDebateSession().then(sendResponse).catch(error => {
@@ -895,123 +1421,235 @@ async function handleGetActiveSession() {
     sendMessageToPopup({ type: 'ACTIVE_SESSION', session: session });
 }
 
+function sanitizeSessionPromptOverrides(input) {
+    if (!input || typeof input !== 'object') return null;
+    const allowedKeys = new Set([
+        'header',
+        'first_turn_instruction',
+        'intermediary_message',
+        'final_message',
+        'followup_user_msg_wrapper'
+    ]);
+    const output = {};
+    for (const modeKey of ['debate', 'single']) {
+        const section = input[modeKey];
+        if (!section || typeof section !== 'object') continue;
+        const sanitized = {};
+        for (const [key, value] of Object.entries(section)) {
+            if (!allowedKeys.has(key)) continue;
+            if (typeof value !== 'string') continue;
+            sanitized[key] = value;
+        }
+        if (Object.keys(sanitized).length > 0) {
+            output[modeKey] = sanitized;
+        }
+    }
+    return Object.keys(output).length > 0 ? output : null;
+}
+
 async function handleStartDebateSession(message) {
-    const prompt = (message.prompt || '').trim();
-    const rounds = Math.max(1, parseInt(message.rounds, 10) || 1);
-    const firstLLM = message.firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
-    const secondLLM = firstLLM === 'chatgpt' ? 'gemini' : 'chatgpt';
-    const requestedTabs = message.tabIds || {};
-    const requestedProfiles = message.profileIds || null;
+    try {
+        const prompt = (message.prompt || '').trim();
+        const mode = message.mode === 'direct'
+            ? 'direct'
+            : (message.mode === 'single' ? 'single' : 'debate');
+        const directTarget = message.target === 'both'
+            ? 'both'
+            : (message.target === 'gemini' ? 'gemini' : 'chatgpt');
+        const rounds = mode === 'debate' || mode === 'single'
+            ? Math.min(12, Math.max(1, parseInt(message.rounds, 10) || 1))
+            : 1;
+        const singleLLM = message.llm === 'gemini' ? 'gemini' : 'chatgpt';
+        const debateFirstLLM = message.firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
+        const [firstLLM, secondLLM] = mode === 'debate'
+            ? [debateFirstLLM, debateFirstLLM === 'chatgpt' ? 'gemini' : 'chatgpt']
+            : (mode === 'single'
+                ? [singleLLM, null]
+                : (directTarget === 'both'
+                    ? ['chatgpt', 'gemini']
+                    : [directTarget, null]));
+        const requestedTabs = message.tabIds || {};
+        const requestedProfiles = message.profileIds || null;
+        const requestedChatId = typeof message.chatId === 'string' ? message.chatId : null;
+        const promptOverrides = sanitizeSessionPromptOverrides(message.promptOverrides);
 
-    if (!prompt) {
-        sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: 'Prompt is empty.' });
-        return;
-    }
+        if (!prompt) {
+            sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: 'Prompt is empty.' });
+            return;
+        }
 
-    if (activeDebateState.isActive) {
-        await endDebateSession('Session replaced by a new request.');
-    }
+        let historyStore = null;
+        try {
+            historyStore = await requireHistoryUnlocked();
+        } catch (error) {
+            const hint = error?.code === 'HISTORY_NOT_CONFIGURED'
+                ? 'Set an encryption passphrase in Settings → Security to enable chat history.'
+                : 'Unlock history in Settings → Security to enable chat history.';
+            sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: hint });
+            sendMessageToPopup({ type: 'HISTORY_STATUS', status: await getHistoryStatus().catch(() => ({ configured: false, unlocked: false })) });
+            return;
+        }
 
-    let chatgptTab = null;
-    let geminiTab = null;
-    let profileIds = { chatgpt: null, gemini: null };
+        if (activeDebateState.isActive) {
+            await endDebateSession('Session replaced by a new request.');
+        }
 
-    const profilesState = await loadTabProfiles();
-    const hasDefaultProfiles = Boolean(profilesState.defaults?.chatgpt && profilesState.defaults?.gemini);
-    const hasExplicitTabIds = Number.isFinite(requestedTabs.chatgpt) || Number.isFinite(requestedTabs.gemini);
-    const useProfiles = Boolean(requestedProfiles || (!hasExplicitTabIds && hasDefaultProfiles));
+        let profileIds = { chatgpt: null, gemini: null };
+        const tabIds = { chatgpt: null, gemini: null };
+        const chatsState = await loadChatsState();
+        const chatIdCandidate = requestedChatId || chatsState.activeChatId;
+        const hasCandidate = chatIdCandidate && Array.isArray(chatsState.chats)
+            ? chatsState.chats.some((chat) => chat.chatId === chatIdCandidate)
+            : false;
+        const chatId = hasCandidate ? chatIdCandidate : chatsState.activeChatId;
+        if (chatId && chatsState.activeChatId !== chatId) {
+            await setActiveChat(chatId);
+        }
 
-    if (useProfiles) {
-        profileIds = {
-            chatgpt: resolveProfileSelection('chatgpt', requestedProfiles?.chatgpt, profilesState.defaults),
-            gemini: resolveProfileSelection('gemini', requestedProfiles?.gemini, profilesState.defaults)
+        let isFollowUp = false;
+        let conversationContext = '';
+        if (historyStore && chatId) {
+            try {
+                const summary = await historyStore.getThreadSummary(chatId);
+                const priorCount = Number.isFinite(summary?.messageCount) ? summary.messageCount : 0;
+                isFollowUp = priorCount > 0;
+                if (isFollowUp) {
+                    const page = await historyStore.listMessages(chatId, { limit: 12 });
+                    conversationContext = buildConversationContext(page.messages, { maxChars: 4000, maxMessages: 10 });
+                }
+            } catch (error) {
+                console.warn('[MLC Debate] Failed to build conversation context:', error);
+            }
+        }
+
+        const profilesState = await loadTabProfiles();
+        const requiredProviders = secondLLM ? ['chatgpt', 'gemini'] : [firstLLM];
+        const hasDefaultProfiles = requiredProviders.every((provider) => Boolean(profilesState.defaults?.[provider]));
+        const hasExplicitTabIds = requiredProviders.some((provider) => Number.isFinite(requestedTabs[provider]));
+        const hasRequestedProfiles = Boolean(requestedProfiles && requiredProviders.some((provider) => requestedProfiles?.[provider]));
+        const useProfiles = Boolean(hasRequestedProfiles || (!hasExplicitTabIds && hasDefaultProfiles));
+
+        if (useProfiles) {
+            for (const provider of requiredProviders) {
+                profileIds[provider] = resolveProfileSelection(provider, requestedProfiles?.[provider], profilesState.defaults);
+                if (!profileIds[provider]) {
+                    sendMessageToPopup({
+                        type: 'UI_SESSION_ERROR',
+                        error: `${formatLLMLabel(provider)} profile is required to start.`
+                    });
+                    return;
+                }
+                const validation = await validateProfileForSession(provider, profileIds[provider], { requirePing: true });
+                if (!validation.ok) {
+                    sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: validation.error });
+                    return;
+                }
+                tabIds[provider] = validation.profile.tabId;
+            }
+        } else {
+            if (mode === 'single') {
+                if (firstLLM === 'chatgpt' && Number.isFinite(requestedTabs.chatgpt)) {
+                    await setPreferredTabs({ chatgptTabId: requestedTabs.chatgpt });
+                } else if (firstLLM === 'gemini' && Number.isFinite(requestedTabs.gemini)) {
+                    await setPreferredTabs({ geminiTabId: requestedTabs.gemini });
+                }
+            } else if (Number.isFinite(requestedTabs.chatgpt) || Number.isFinite(requestedTabs.gemini)) {
+                await setPreferredTabs({
+                    chatgptTabId: requestedTabs.chatgpt,
+                    geminiTabId: requestedTabs.gemini
+                });
+            }
+
+            const preferred = await getPreferredTabs();
+            for (const provider of requiredProviders) {
+                const resolved = await resolveTabForLLM(provider, requestedTabs[provider], preferred[provider]);
+                if (!resolved) {
+                    sendMessageToPopup({
+                        type: 'UI_SESSION_ERROR',
+                        error: `${formatLLMLabel(provider)} tab not found. Please open it and try again.`
+                    });
+                    return;
+                }
+                tabIds[provider] = resolved.id;
+            }
+        }
+
+        const now = Date.now();
+        const runConfig = mode === 'direct'
+            ? { runType: 'direct', target: directTarget }
+            : (mode === 'single'
+                ? { mode: 'single', rounds, llm: firstLLM }
+                : { runType: 'debate', rounds, firstLLM });
+        const totalTurns = mode === 'direct'
+            ? (secondLLM ? 2 : 1)
+            : (mode === 'single' ? rounds : rounds * 2);
+        activeDebateState = {
+            ...defaultDebateState,
+            isActive: true,
+            mode,
+            chatId: chatId,
+            sessionId: generateSessionId(),
+            rounds: rounds,
+            totalTurns,
+            turnIndex: 1,
+            firstLLM: firstLLM,
+            secondLLM: secondLLM,
+            profileIds: profileIds,
+            tabIds,
+            userQuery: prompt,
+            isFollowUp,
+            conversationContext,
+            promptOverrides,
+            messages: [{ role: 'user', content: prompt, timestamp: now, turnIndex: 0 }],
+            startedAt: now
         };
 
-        if (!profileIds.chatgpt || !profileIds.gemini) {
-            sendMessageToPopup({
-                type: 'UI_SESSION_ERROR',
-                error: 'Both ChatGPT and Gemini profiles are required to start a debate.'
+        await persistDebateState();
+
+        sendMessageToPopup({
+            type: 'UI_SESSION_STARTED',
+            sessionId: activeDebateState.sessionId,
+            chatId: activeDebateState.chatId,
+            rounds: rounds,
+            mode,
+            firstLLM: firstLLM,
+            target: mode === 'direct' ? directTarget : undefined,
+            tabIds: activeDebateState.tabIds,
+            profileIds: activeDebateState.profileIds
+        });
+
+        sendMessageToPopup({
+            type: 'UI_MESSAGE_ADD',
+            chatId: activeDebateState.chatId,
+            role: 'user',
+            content: prompt,
+            timestamp: now,
+            turnIndex: 0,
+            sessionId: activeDebateState.sessionId,
+            meta: { runConfig, isFollowUp, promptOverrides }
+        });
+
+        if (activeDebateState.chatId) {
+            const appendResult = await appendChatMessage(activeDebateState.chatId, {
+                role: 'user',
+                content: prompt,
+                timestamp: now,
+                turnIndex: 0,
+                sessionId: activeDebateState.sessionId,
+                meta: { runConfig, isFollowUp, promptOverrides }
             });
-            return;
+            if (appendResult?.ok && Number.isFinite(appendResult?.message?.sequence)) {
+                activeDebateState.userMessageSequence = appendResult.message.sequence;
+                await persistDebateState();
+            }
         }
 
-        const chatgptValidation = await validateProfileForSession('chatgpt', profileIds.chatgpt, { requirePing: true });
-        if (!chatgptValidation.ok) {
-            sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: chatgptValidation.error });
-            return;
-        }
-        const geminiValidation = await validateProfileForSession('gemini', profileIds.gemini, { requirePing: true });
-        if (!geminiValidation.ok) {
-            sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: geminiValidation.error });
-            return;
-        }
-        chatgptTab = { id: chatgptValidation.profile.tabId };
-        geminiTab = { id: geminiValidation.profile.tabId };
-    } else {
-        if (Number.isFinite(requestedTabs.chatgpt) || Number.isFinite(requestedTabs.gemini)) {
-            await setPreferredTabs({
-                chatgptTabId: requestedTabs.chatgpt,
-                geminiTabId: requestedTabs.gemini
-            });
-        }
-
-        const preferred = await getPreferredTabs();
-        chatgptTab = await resolveTabForLLM('chatgpt', requestedTabs.chatgpt, preferred.chatgpt);
-        geminiTab = await resolveTabForLLM('gemini', requestedTabs.gemini, preferred.gemini);
-
-        if (!chatgptTab || !geminiTab) {
-            const missing = [];
-            if (!chatgptTab) missing.push('ChatGPT');
-            if (!geminiTab) missing.push('Gemini');
-            sendMessageToPopup({
-                type: 'UI_SESSION_ERROR',
-                error: `${missing.join(' and ')} tab not found. Please open the required LLM tabs.`
-            });
-            return;
-        }
+        await lockProfilesForSession(activeDebateState.sessionId, activeDebateState.profileIds);
+        await sendDebateTurn(activeDebateState);
+    } catch (error) {
+        console.error('[MLC Debate] Error starting session:', error);
+        sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: error?.message || 'Failed to start session.' });
     }
-
-    const now = Date.now();
-    activeDebateState = {
-        ...defaultDebateState,
-        isActive: true,
-        sessionId: generateSessionId(),
-        rounds: rounds,
-        totalTurns: rounds * 2,
-        turnIndex: 1,
-        firstLLM: firstLLM,
-        secondLLM: secondLLM,
-        profileIds: profileIds,
-        tabIds: {
-            chatgpt: chatgptTab.id,
-            gemini: geminiTab.id
-        },
-        userQuery: prompt,
-        messages: [{ role: 'user', content: prompt, timestamp: now, turnIndex: 0 }],
-        startedAt: now
-    };
-
-    await persistDebateState();
-
-    sendMessageToPopup({
-        type: 'UI_SESSION_STARTED',
-        sessionId: activeDebateState.sessionId,
-        rounds: rounds,
-        firstLLM: firstLLM,
-        tabIds: activeDebateState.tabIds,
-        profileIds: activeDebateState.profileIds
-    });
-
-    sendMessageToPopup({
-        type: 'UI_MESSAGE_ADD',
-        role: 'user',
-        content: prompt,
-        timestamp: now,
-        turnIndex: 0
-    });
-
-    await lockProfilesForSession(activeDebateState.sessionId, activeDebateState.profileIds);
-    await sendDebateTurn(activeDebateState);
 }
 
 async function handleStopDebateSession(message) {
@@ -1022,11 +1660,24 @@ async function handleStopDebateSession(message) {
     await endDebateSession(reason);
 }
 
-function getRoundIndex(turnIndex) {
+function getRoundIndex(turnIndex, session = null) {
+    if (session?.mode === 'direct') {
+        return 1;
+    }
+    if (session?.mode === 'single') {
+        return Math.max(1, turnIndex);
+    }
     return Math.ceil(turnIndex / 2);
 }
 
 function getTurnLLM(session, turnIndex) {
+    if (session?.mode === 'direct') {
+        if (turnIndex === 1) return session.firstLLM || 'chatgpt';
+        return session.secondLLM || session.firstLLM || 'chatgpt';
+    }
+    if (session?.mode === 'single') {
+        return session.firstLLM || 'chatgpt';
+    }
     return turnIndex % 2 === 1 ? session.firstLLM : session.secondLLM;
 }
 
@@ -1041,6 +1692,21 @@ let cachedDebatePromptSource = null;
 let debatePromptConfigLoadPromise = null;
 
 function getDefaultDebatePromptConfig() {
+    const followupDebateWrapper = [
+        "Here's a new message from the user:",
+        '{raw_user_msg}',
+        '',
+        'This is a continuation of the same chat.',
+        'Run: a debate between {first_llm} and {second_llm} over {rounds} iterations (starting with {first_llm}).',
+        'You are {llm} on iteration {round}/{rounds}.'
+    ].join('\n');
+    const followupSingleWrapper = [
+        "Here's a new message from the user:",
+        '{raw_user_msg}',
+        '',
+        'This is a continuation of the same chat. Please {llm} answer.',
+        'If refining: you are on iteration {round}/{rounds}.'
+    ].join('\n');
     return {
         schemaVersion: 1,
         debate: {
@@ -1053,12 +1719,14 @@ function getDefaultDebatePromptConfig() {
                 '- Be constructive: critique to make progress and improve the answer.',
                 '- If unsure, say so briefly and propose a way to verify.'
             ].join('\n'),
+            first_turn_instruction: 'Provide your best answer.',
             intermediary_message: [
                 'Provide a constructive improvement for iteration {round}/{rounds}:',
                 '- Critique key issues (short bullets)',
                 '- Revised answer'
             ].join('\n'),
             final_message: 'Provide your final best answer for the user. Output only the final answer (no critique section).',
+            followup_user_msg_wrapper: followupDebateWrapper,
             turn1: [
                 '{header}',
                 '',
@@ -1067,7 +1735,7 @@ function getDefaultDebatePromptConfig() {
                 'User question:',
                 '{user_msg}',
                 '',
-                'Provide your best answer.'
+                '{first_turn_instruction}'
             ].join('\n'),
             turn2: [
                 '{header}',
@@ -1098,6 +1766,73 @@ function getDefaultDebatePromptConfig() {
                 '',
                 '{intermediary_message}'
             ].join('\n')
+        },
+        single: {
+            placeholders: {},
+            header: 'You are a single LLM agent. Provide the best possible answer to the user.',
+            first_turn_instruction: 'Provide your best answer.',
+            intermediary_message: [
+                'Improve your answer for iteration {round}/{rounds}:',
+                '- Fix errors',
+                '- Add missing details',
+                '- Keep it concise'
+            ].join('\n'),
+            final_message: 'Provide your final best answer for the user. Output only the final answer.',
+            followup_user_msg_wrapper: followupSingleWrapper,
+            turn1: [
+                '{header}',
+                '',
+                'Iteration {round}/{rounds}',
+                '',
+                'User message:',
+                '{user_msg}',
+                '',
+                '{first_turn_instruction}'
+            ].join('\n'),
+            turn2plus: [
+                'Iteration {round}/{rounds}',
+                '',
+                'Your previous answer (iteration {prev_round}/{rounds}):',
+                '{prev_answer}',
+                '',
+                'User message:',
+                '{user_msg}',
+                '',
+                '{intermediary_message}'
+            ].join('\n')
+        },
+        direct: {
+            placeholders: {},
+            single_turn: [
+                "Here's a new message from the user:",
+                '{raw_user_msg}',
+                '',
+                'Please {llm} answer.'
+            ].join('\n'),
+            single_turn_with_history: [
+                'Conversation so far:',
+                '{conversation_history}',
+                '',
+                "Here's a new message from the user:",
+                '{raw_user_msg}',
+                '',
+                'Please {llm} answer.'
+            ].join('\n'),
+            both_turn: [
+                "Here's a new message from the user:",
+                '{raw_user_msg}',
+                '',
+                'You are {llm}. Please answer independently.'
+            ].join('\n'),
+            both_turn_with_history: [
+                'Conversation so far:',
+                '{conversation_history}',
+                '',
+                "Here's a new message from the user:",
+                '{raw_user_msg}',
+                '',
+                'You are {llm}. Please answer independently.'
+            ].join('\n')
         }
     };
 }
@@ -1107,25 +1842,51 @@ function normalizeDebatePromptConfig(rawConfig) {
     if (!rawConfig || typeof rawConfig !== 'object') return defaults;
 
     const rawDebate = rawConfig.debate && typeof rawConfig.debate === 'object' ? rawConfig.debate : null;
-    if (!rawDebate) return defaults;
+    const rawSingle = rawConfig.single && typeof rawConfig.single === 'object' ? rawConfig.single : null;
+    const rawDirect = rawConfig.direct && typeof rawConfig.direct === 'object' ? rawConfig.direct : null;
 
     const pickString = (value, fallback) => (typeof value === 'string' ? value : fallback);
 
     return {
         schemaVersion: 1,
-        debate: {
+        debate: rawDebate ? {
             placeholders:
                 rawDebate.placeholders && typeof rawDebate.placeholders === 'object'
                     ? rawDebate.placeholders
                     : defaults.debate.placeholders,
             header: pickString(rawDebate.header, defaults.debate.header),
+            first_turn_instruction: pickString(rawDebate.first_turn_instruction, defaults.debate.first_turn_instruction),
             intermediary_message: pickString(rawDebate.intermediary_message, defaults.debate.intermediary_message),
             final_message: pickString(rawDebate.final_message, defaults.debate.final_message),
+            followup_user_msg_wrapper: pickString(rawDebate.followup_user_msg_wrapper, defaults.debate.followup_user_msg_wrapper),
             turn1: pickString(rawDebate.turn1, defaults.debate.turn1),
             turn2: pickString(rawDebate.turn2, defaults.debate.turn2),
             turn3plus_first: pickString(rawDebate.turn3plus_first, defaults.debate.turn3plus_first),
             turn3plus_second: pickString(rawDebate.turn3plus_second, defaults.debate.turn3plus_second)
-        }
+        } : defaults.debate,
+        single: rawSingle ? {
+            placeholders:
+                rawSingle.placeholders && typeof rawSingle.placeholders === 'object'
+                    ? rawSingle.placeholders
+                    : defaults.single.placeholders,
+            header: pickString(rawSingle.header, defaults.single.header),
+            first_turn_instruction: pickString(rawSingle.first_turn_instruction, defaults.single.first_turn_instruction),
+            intermediary_message: pickString(rawSingle.intermediary_message, defaults.single.intermediary_message),
+            final_message: pickString(rawSingle.final_message, defaults.single.final_message),
+            followup_user_msg_wrapper: pickString(rawSingle.followup_user_msg_wrapper, defaults.single.followup_user_msg_wrapper),
+            turn1: pickString(rawSingle.turn1, defaults.single.turn1),
+            turn2plus: pickString(rawSingle.turn2plus, defaults.single.turn2plus)
+        } : defaults.single,
+        direct: rawDirect ? {
+            placeholders:
+                rawDirect.placeholders && typeof rawDirect.placeholders === 'object'
+                    ? rawDirect.placeholders
+                    : defaults.direct.placeholders,
+            single_turn: pickString(rawDirect.single_turn, defaults.direct.single_turn),
+            single_turn_with_history: pickString(rawDirect.single_turn_with_history, defaults.direct.single_turn_with_history),
+            both_turn: pickString(rawDirect.both_turn, defaults.direct.both_turn),
+            both_turn_with_history: pickString(rawDirect.both_turn_with_history, defaults.direct.both_turn_with_history)
+        } : defaults.direct
     };
 }
 
@@ -1219,11 +1980,244 @@ function getLastResponse(session, llmType) {
     return '';
 }
 
+function describeMessageRoleForContext(role) {
+    if (!role) return 'Assistant';
+    if (role === 'user') return 'User';
+    if (role === 'chatgpt') return 'ChatGPT';
+    if (role === 'gemini') return 'Gemini';
+    return String(role);
+}
+
+function buildConversationContext(messages, { maxChars = 4000, maxMessages = 10 } = {}) {
+    if (!Array.isArray(messages) || messages.length === 0) return '';
+    const recent = messages.slice(Math.max(0, messages.length - maxMessages));
+    const blocks = [];
+    for (const message of recent) {
+        if (!message) continue;
+        const role = describeMessageRoleForContext(message.role);
+        const content = String(message.content || '').trim();
+        if (!content) continue;
+        blocks.push(`${role}:\n${content}`);
+    }
+    if (blocks.length === 0) return '';
+    let text = blocks.join('\n\n');
+    if (Number.isFinite(maxChars) && maxChars > 0 && text.length > maxChars) {
+        text = text.slice(text.length - maxChars);
+    }
+    return text;
+}
+
+function formatTranscriptForPrompt(messages, { maxChars = 48000 } = {}) {
+    if (!Array.isArray(messages) || messages.length === 0) return '';
+    const blocks = [];
+    for (const message of messages) {
+        if (!message) continue;
+        const role = describeMessageRoleForContext(message.role);
+        const content = String(message.content || '').trim();
+        if (!content) continue;
+        blocks.push(`${role}:\n${content}`);
+    }
+    if (blocks.length === 0) return '';
+    let text = blocks.join('\n\n');
+    if (Number.isFinite(maxChars) && maxChars > 0 && text.length > maxChars) {
+        text = `…(earlier messages omitted)\n\n${text.slice(text.length - maxChars)}`;
+    }
+    return text;
+}
+
+const CHAT_DELIVERY_STATE_META_PREFIX = 'mlc_chat_delivery_state_v1:';
+
+function getChatDeliveryStateKey(chatId) {
+    return `${CHAT_DELIVERY_STATE_META_PREFIX}${chatId}`;
+}
+
+function createEmptyDeliveryState() {
+    return {
+        schemaVersion: 1,
+        updatedAt: 0,
+        providers: {
+            chatgpt: { deliveredUpTo: 0, contextKey: null },
+            gemini: { deliveredUpTo: 0, contextKey: null }
+        }
+    };
+}
+
+function normalizeDeliveryProviderState(value) {
+    const out = { deliveredUpTo: 0, contextKey: null };
+    if (!value || typeof value !== 'object') return out;
+    if (Number.isFinite(value.deliveredUpTo) && value.deliveredUpTo > 0) {
+        out.deliveredUpTo = Math.floor(value.deliveredUpTo);
+    }
+    if (typeof value.contextKey === 'string' && value.contextKey.trim()) {
+        out.contextKey = value.contextKey.trim();
+    }
+    return out;
+}
+
+function normalizeChatDeliveryState(value) {
+    const base = createEmptyDeliveryState();
+    if (!value || typeof value !== 'object') return base;
+
+    if (value.schemaVersion === 1 && value.providers && typeof value.providers === 'object') {
+        const out = createEmptyDeliveryState();
+        out.updatedAt = Number.isFinite(value.updatedAt) ? Math.floor(value.updatedAt) : 0;
+        out.providers.chatgpt = normalizeDeliveryProviderState(value.providers.chatgpt);
+        out.providers.gemini = normalizeDeliveryProviderState(value.providers.gemini);
+        return out;
+    }
+
+    // Legacy shape: { chatgpt: number, gemini: number }
+    const out = createEmptyDeliveryState();
+    if (Number.isFinite(value.chatgpt) && value.chatgpt > 0) out.providers.chatgpt.deliveredUpTo = Math.floor(value.chatgpt);
+    if (Number.isFinite(value.gemini) && value.gemini > 0) out.providers.gemini.deliveredUpTo = Math.floor(value.gemini);
+    return out;
+}
+
+const deliveryStateCache = new Map();
+
+async function getChatDeliveryState(store, chatId) {
+    if (!store || !chatId) return createEmptyDeliveryState();
+    const cached = deliveryStateCache.get(chatId);
+    if (cached) return cached;
+    try {
+        const raw = await store.getMeta(getChatDeliveryStateKey(chatId));
+        const normalized = normalizeChatDeliveryState(raw);
+        deliveryStateCache.set(chatId, normalized);
+        return normalized;
+    } catch (error) {
+        const fallback = createEmptyDeliveryState();
+        deliveryStateCache.set(chatId, fallback);
+        return fallback;
+    }
+}
+
+async function saveChatDeliveryState(store, chatId, state) {
+    if (!store || !chatId) return { ok: false, error: 'Missing store/chatId.' };
+    const normalized = normalizeChatDeliveryState(state);
+    normalized.updatedAt = Date.now();
+    deliveryStateCache.set(chatId, normalized);
+    try {
+        await store.setMeta(getChatDeliveryStateKey(chatId), normalized);
+        return { ok: true, state: normalized };
+    } catch (error) {
+        return { ok: false, error: error?.message || 'Failed to save delivery state.' };
+    }
+}
+
+function getProviderContextKey(session, provider) {
+    const profileId = session?.profileIds?.[provider];
+    if (typeof profileId === 'string' && profileId.trim()) {
+        return `profile:${profileId.trim()}`;
+    }
+    const tabId = session?.tabIds?.[provider];
+    if (Number.isFinite(tabId)) {
+        return `tab:${Math.floor(tabId)}`;
+    }
+    return null;
+}
+
+function getEffectiveDeliveredUpTo(state, provider, contextKey) {
+    if (!state || typeof state !== 'object') return 0;
+    const providers = state.providers && typeof state.providers === 'object' ? state.providers : null;
+    const entry = providers?.[provider] && typeof providers[provider] === 'object'
+        ? providers[provider]
+        : null;
+    const deliveredUpTo = Number.isFinite(entry?.deliveredUpTo) ? Math.max(0, Math.floor(entry.deliveredUpTo)) : 0;
+    const storedContextKey = typeof entry?.contextKey === 'string' && entry.contextKey.trim()
+        ? entry.contextKey.trim()
+        : null;
+    if (contextKey && storedContextKey && contextKey !== storedContextKey) {
+        return 0;
+    }
+    return deliveredUpTo;
+}
+
+async function bumpProviderDeliveredUpTo(store, chatId, provider, sequence, contextKey) {
+    if (!store || !chatId) return { ok: false, error: 'Missing store/chatId.' };
+    if (provider !== 'chatgpt' && provider !== 'gemini') return { ok: false, error: 'Invalid provider.' };
+    if (!Number.isFinite(sequence) || sequence <= 0) return { ok: false, error: 'Invalid sequence.' };
+
+    const state = await getChatDeliveryState(store, chatId);
+    const normalized = normalizeChatDeliveryState(state);
+    const entry = normalized.providers[provider];
+    const safeContextKey = typeof contextKey === 'string' && contextKey.trim() ? contextKey.trim() : null;
+
+    if (safeContextKey && entry.contextKey && entry.contextKey !== safeContextKey) {
+        entry.deliveredUpTo = 0;
+    }
+    if (safeContextKey) entry.contextKey = safeContextKey;
+
+    entry.deliveredUpTo = Math.max(entry.deliveredUpTo, Math.floor(sequence));
+    return saveChatDeliveryState(store, chatId, normalized);
+}
+
+async function buildDirectHistoryDelta(store, chatId, { afterSequence = 0, cutoffSequence, maxMessages = 400, maxChars = 48000 } = {}) {
+    if (!store || !chatId) return '';
+    if (!Number.isFinite(cutoffSequence) || cutoffSequence <= 1) return '';
+    const after = Number.isFinite(afterSequence) ? Math.max(0, Math.floor(afterSequence)) : 0;
+    const cutoff = Math.max(1, Math.floor(cutoffSequence));
+    if (cutoff <= after + 1) return '';
+
+    const collectedReversed = [];
+    let beforeSequence = cutoff; // excludes the new user message (sequence == cutoff) and anything after
+    let reachedBoundary = false;
+
+    while (!reachedBoundary) {
+        const page = await store.listMessages(chatId, { limit: 80, beforeSequence });
+        const messages = Array.isArray(page?.messages) ? page.messages : [];
+        if (messages.length === 0) break;
+
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+            const msg = messages[i];
+            if (!msg || !Number.isFinite(msg.sequence)) continue;
+            if (msg.sequence <= after) {
+                reachedBoundary = true;
+                break;
+            }
+            const role = msg.role;
+            if (role !== 'user' && role !== 'chatgpt' && role !== 'gemini') continue;
+            collectedReversed.push(msg);
+            if (collectedReversed.length >= maxMessages) {
+                reachedBoundary = true;
+                break;
+            }
+        }
+
+        if (reachedBoundary) break;
+        if (!page?.hasMore || !Number.isFinite(page?.nextCursorSequence)) break;
+        beforeSequence = page.nextCursorSequence;
+        if (!Number.isFinite(beforeSequence) || beforeSequence <= 0) break;
+    }
+
+    if (collectedReversed.length === 0) return '';
+    const ordered = collectedReversed.reverse();
+    return formatTranscriptForPrompt(ordered, { maxChars });
+}
+
+function renderUserMessageForSession(session, templates, baseVariables) {
+    const rawUserMsg = String(session?.userQuery || '').trim();
+    if (!rawUserMsg) return '';
+    if (!session?.isFollowUp) return rawUserMsg;
+    const wrapper = typeof templates?.followup_user_msg_wrapper === 'string'
+        ? templates.followup_user_msg_wrapper.trim()
+        : '';
+    if (!wrapper) return rawUserMsg;
+    return renderPromptTemplate(wrapper, {
+        ...(baseVariables && typeof baseVariables === 'object' ? baseVariables : {}),
+        raw_user_msg: rawUserMsg,
+        conversation_context: session?.conversationContext || ''
+    }).trim();
+}
+
 async function buildDebatePrompt(session, turnIndex) {
     const promptConfig = await loadDebatePromptConfig();
-    const templates = promptConfig?.debate || getDefaultDebatePromptConfig().debate;
+    const baseTemplates = promptConfig?.debate || getDefaultDebatePromptConfig().debate;
+    const overrides = session?.promptOverrides?.debate && typeof session.promptOverrides.debate === 'object'
+        ? session.promptOverrides.debate
+        : null;
+    const templates = overrides ? { ...baseTemplates, ...overrides } : baseTemplates;
 
-    const roundIndex = getRoundIndex(turnIndex);
+    const roundIndex = getRoundIndex(turnIndex, session);
     const expectedLLM = getTurnLLM(session, turnIndex);
     const expectedLabel = formatLLMLabel(expectedLLM);
     const otherLLM = expectedLLM === session.firstLLM ? session.secondLLM : session.firstLLM;
@@ -1250,6 +2244,8 @@ async function buildDebatePrompt(session, turnIndex) {
         fisrt_llm: firstLabel,
         second_llm: secondLabel,
         user_msg: session.userQuery,
+        raw_user_msg: session.userQuery,
+        conversation_context: session.conversationContext || '',
         user_query: session.userQuery,
         first_answer: safeFirstResponse,
         other_answer: safeOtherResponse,
@@ -1257,13 +2253,27 @@ async function buildDebatePrompt(session, turnIndex) {
     };
 
     const header = renderPromptTemplate(templates.header, baseVariables);
+    const userMsg = renderUserMessageForSession(session, templates, { ...baseVariables, header });
     const renderedIntermediary = renderPromptTemplate(templates.intermediary_message, { ...baseVariables, header });
     const renderedFinal = renderPromptTemplate(templates.final_message, { ...baseVariables, header });
     const isFinalTurn = turnIndex === totalTurns;
+    const renderedInitialInstruction = renderPromptTemplate(
+        typeof templates.first_turn_instruction === 'string' ? templates.first_turn_instruction : 'Provide your best answer.',
+        { ...baseVariables, header }
+    );
+    const turnInstruction = turnIndex === 1
+        ? renderedInitialInstruction
+        : (isFinalTurn
+            ? (session.rounds === 1
+                ? `${renderedInitialInstruction}\n\n${renderedFinal}`
+                : renderedFinal)
+            : (session.rounds >= 3 ? renderedIntermediary : renderedInitialInstruction));
     const variables = {
         ...baseVariables,
         header,
-        intermediary_message: isFinalTurn ? renderedFinal : renderedIntermediary,
+        user_msg: userMsg,
+        first_turn_instruction: renderedInitialInstruction,
+        intermediary_message: turnInstruction,
         final_message: renderedFinal
     };
 
@@ -1282,13 +2292,141 @@ async function buildDebatePrompt(session, turnIndex) {
     return renderPromptTemplate(templates.turn3plus_second, variables).trim();
 }
 
+async function buildSinglePrompt(session, turnIndex) {
+    const promptConfig = await loadDebatePromptConfig();
+    const baseTemplates = promptConfig?.single || getDefaultDebatePromptConfig().single;
+    const overrides = session?.promptOverrides?.single && typeof session.promptOverrides.single === 'object'
+        ? session.promptOverrides.single
+        : null;
+    const templates = overrides ? { ...baseTemplates, ...overrides } : baseTemplates;
+
+    const roundIndex = Math.max(1, turnIndex);
+    const expectedLLM = getTurnLLM(session, turnIndex);
+    const expectedLabel = formatLLMLabel(expectedLLM);
+    const safePrevAnswer = getLastResponse(session, expectedLLM) || '[No prior response captured yet]';
+
+    const totalTurns = Number.isFinite(session.totalTurns) ? session.totalTurns : session.rounds;
+    const baseVariables = {
+        rounds: session.rounds,
+        iterations: session.rounds,
+        round: roundIndex,
+        iteration: roundIndex,
+        prev_round: Math.max(0, roundIndex - 1),
+        turn: turnIndex,
+        turn_index: turnIndex,
+        total_turns: totalTurns,
+        expected_llm: expectedLabel,
+        llm: expectedLabel,
+        user_msg: session.userQuery,
+        raw_user_msg: session.userQuery,
+        conversation_context: session.conversationContext || '',
+        user_query: session.userQuery,
+        prev_answer: safePrevAnswer
+    };
+
+    const header = renderPromptTemplate(templates.header, baseVariables);
+    const userMsg = renderUserMessageForSession(session, templates, { ...baseVariables, header });
+    const renderedIntermediary = renderPromptTemplate(templates.intermediary_message, { ...baseVariables, header });
+    const renderedFinal = renderPromptTemplate(templates.final_message, { ...baseVariables, header });
+    const isFinalTurn = turnIndex === totalTurns;
+    const renderedInitialInstruction = renderPromptTemplate(
+        typeof templates.first_turn_instruction === 'string' ? templates.first_turn_instruction : 'Provide your best answer.',
+        { ...baseVariables, header }
+    );
+    const turnInstruction = turnIndex === 1
+        ? renderedInitialInstruction
+        : (isFinalTurn
+            ? (session.rounds === 1
+                ? `${renderedInitialInstruction}\n\n${renderedFinal}`
+                : renderedFinal)
+            : renderedIntermediary);
+
+    const variables = {
+        ...baseVariables,
+        header,
+        user_msg: userMsg,
+        first_turn_instruction: renderedInitialInstruction,
+        intermediary_message: turnInstruction,
+        final_message: renderedFinal
+    };
+
+    if (turnIndex === 1) {
+        return renderPromptTemplate(templates.turn1, variables).trim();
+    }
+
+    return renderPromptTemplate(templates.turn2plus, variables).trim();
+}
+
+async function buildDirectPrompt(session, turnIndex) {
+    const promptConfig = await loadDebatePromptConfig();
+    const defaults = getDefaultDebatePromptConfig();
+    const templates = promptConfig?.direct || defaults.direct;
+
+    const expectedLLM = getTurnLLM(session, turnIndex);
+    const expectedLabel = formatLLMLabel(expectedLLM);
+    const rawUserMsg = String(session?.userQuery || '').trim();
+
+    let conversationHistory = '';
+    try {
+        const store = await requireHistoryUnlocked();
+        const deliveryState = await getChatDeliveryState(store, session?.chatId);
+        const contextKey = getProviderContextKey(session, expectedLLM);
+        const deliveredUpTo = getEffectiveDeliveredUpTo(deliveryState, expectedLLM, contextKey);
+        conversationHistory = await buildDirectHistoryDelta(store, session?.chatId, {
+            afterSequence: deliveredUpTo,
+            cutoffSequence: session?.userMessageSequence,
+            maxMessages: 400,
+            maxChars: 48000
+        });
+    } catch (error) {
+        conversationHistory = '';
+    }
+
+    const baseVariables = {
+        llm: expectedLabel,
+        expected_llm: expectedLabel,
+        raw_user_msg: rawUserMsg,
+        user_msg: rawUserMsg,
+        conversation_history: conversationHistory,
+        conversation_context: session?.conversationContext || ''
+    };
+
+    const isBoth = Boolean(session?.secondLLM);
+    const useHistory = Boolean(conversationHistory && conversationHistory.trim().length > 0);
+    const template = isBoth
+        ? (useHistory && typeof templates?.both_turn_with_history === 'string'
+            ? templates.both_turn_with_history
+            : templates?.both_turn)
+        : (useHistory && typeof templates?.single_turn_with_history === 'string'
+            ? templates.single_turn_with_history
+            : templates?.single_turn);
+    const rendered = renderPromptTemplate(template, baseVariables).trim();
+    if (rendered) return rendered;
+
+    const header = "Here's a new message from the user:";
+    if (isBoth) {
+        return `${header}\n${rawUserMsg}\n\nYou are ${expectedLabel}. Please answer independently.`.trim();
+    }
+    return `${header}\n${rawUserMsg}\n\nPlease ${expectedLabel} answer.`.trim();
+}
+
+async function buildSessionPrompt(session, turnIndex) {
+    if (session?.mode === 'direct') {
+        return buildDirectPrompt(session, turnIndex);
+    }
+    if (session?.mode === 'single') {
+        return buildSinglePrompt(session, turnIndex);
+    }
+    return buildDebatePrompt(session, turnIndex);
+}
+
 async function validateTabForProvider(tabId, provider) {
     if (!Number.isFinite(tabId)) {
         return { ok: false, error: 'Tab not set.' };
     }
     try {
         const tab = await chrome.tabs.get(tabId);
-        if (!isExpectedHost(provider, tab.url || '')) {
+        if (!isExpectedHost(provider, getTabUrlCandidate(tab))) {
             return { ok: false, error: 'Tab is not on the expected host.' };
         }
         return { ok: true, tabId: tab.id };
@@ -1354,64 +2492,69 @@ async function resumeDebateSession() {
 
 async function updateProfilesForTab(tab) {
     if (!tab || !Number.isFinite(tab.id)) return null;
-    const state = await loadTabProfiles();
-    let changed = false;
-    const affected = [];
-    state.profiles = state.profiles.map(profile => {
-        if (profile.tabId !== tab.id) return profile;
-        const status = tab.url
-            ? (isExpectedHost(profile.provider, tab.url) ? 'ok' : 'wrong_host')
-            : 'unknown';
-        const next = {
-            ...profile,
-            windowId: tab.windowId,
-            lastKnownTitle: tab.title || profile.lastKnownTitle || '',
-            lastKnownUrl: tab.url || profile.lastKnownUrl || '',
-            status,
-            lastSeenAt: Date.now(),
-            updatedAt: Date.now()
-        };
-        changed = true;
-        affected.push(next);
-        return next;
-    });
-    if (changed) {
-        await saveTabProfiles(state);
-        await notifyTabProfiles(state);
-        for (const profile of affected) {
-            if (profile.inUseBySessionId && profile.status !== 'ok') {
-                await pauseDebateSession(`Profile "${profile.label}" is ${profile.status}.`, profile.provider);
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        let changed = false;
+        const affected = [];
+        state.profiles = state.profiles.map(profile => {
+            if (profile.tabId !== tab.id) return profile;
+            const urlCandidate = getTabUrlCandidate(tab);
+            const status = urlCandidate
+                ? (isExpectedHost(profile.provider, urlCandidate) ? 'ok' : 'wrong_host')
+                : 'unknown';
+            const next = {
+                ...profile,
+                windowId: tab.windowId,
+                lastKnownTitle: tab.title || profile.lastKnownTitle || '',
+                lastKnownUrl: urlCandidate || profile.lastKnownUrl || '',
+                status,
+                lastSeenAt: Date.now(),
+                updatedAt: Date.now()
+            };
+            changed = true;
+            affected.push(next);
+            return next;
+        });
+        if (changed) {
+            await saveTabProfiles(state);
+            await notifyTabProfiles(state);
+            for (const profile of affected) {
+                if (profile.inUseBySessionId && profile.status !== 'ok') {
+                    await pauseDebateSession(`Profile "${profile.label}" is ${profile.status}.`, profile.provider);
+                }
             }
         }
-    }
-    return affected;
+        return affected;
+    });
 }
 
 async function handleTabRemoved(tabId) {
-    const state = await loadTabProfiles();
-    let changed = false;
-    const affected = [];
-    state.profiles = state.profiles.map(profile => {
-        if (profile.tabId !== tabId) return profile;
-        const next = {
-            ...profile,
-            status: 'offline',
-            windowId: null,
-            updatedAt: Date.now()
-        };
-        changed = true;
-        affected.push(next);
-        return next;
-    });
-    if (changed) {
-        await saveTabProfiles(state);
-        await notifyTabProfiles(state);
-        for (const profile of affected) {
-            if (profile.inUseBySessionId) {
-                await pauseDebateSession(`Profile "${profile.label}" went offline.`, profile.provider);
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        let changed = false;
+        const affected = [];
+        state.profiles = state.profiles.map(profile => {
+            if (profile.tabId !== tabId) return profile;
+            const next = {
+                ...profile,
+                status: 'offline',
+                windowId: null,
+                updatedAt: Date.now()
+            };
+            changed = true;
+            affected.push(next);
+            return next;
+        });
+        if (changed) {
+            await saveTabProfiles(state);
+            await notifyTabProfiles(state);
+            for (const profile of affected) {
+                if (profile.inUseBySessionId) {
+                    await pauseDebateSession(`Profile "${profile.label}" went offline.`, profile.provider);
+                }
             }
         }
-    }
+    });
 }
 
 async function handleTabActivated(activeInfo) {
@@ -1473,7 +2616,7 @@ async function sendDebateTurn(session) {
         return;
     }
 
-    const promptText = await buildDebatePrompt(session, turnIndex);
+    const promptText = await buildSessionPrompt(session, turnIndex);
     const promptId = `${session.sessionId}:turn:${turnIndex}`;
 
     activeDebateState.waitingFor = expectedLLM;
@@ -1486,7 +2629,7 @@ async function sendDebateTurn(session) {
         type: 'UI_SESSION_PROGRESS',
         sessionId: session.sessionId,
         waitingFor: expectedLLM,
-        roundIndex: getRoundIndex(turnIndex),
+        roundIndex: getRoundIndex(turnIndex, session),
         totalRounds: session.rounds
     });
 
@@ -1496,6 +2639,21 @@ async function sendDebateTurn(session) {
             promptId: promptId,
             turnIndex: turnIndex
         });
+
+        if (session.mode === 'direct' && session.chatId && Number.isFinite(session.userMessageSequence)) {
+            try {
+                const store = await requireHistoryUnlocked();
+                await bumpProviderDeliveredUpTo(
+                    store,
+                    session.chatId,
+                    expectedLLM,
+                    session.userMessageSequence,
+                    getProviderContextKey(session, expectedLLM)
+                );
+            } catch (error) {
+                // ignore delivery tracking failures
+            }
+        }
     } catch (error) {
         await pauseDebateSession(error.message || 'Failed to send prompt.', expectedLLM);
     }
@@ -1539,18 +2697,26 @@ async function handleDebateResponse(message) {
 
     const content = (message.content || '').trim();
     if (!content) return;
+    const rawHtml = typeof message.contentHtml === 'string' ? message.contentHtml : '';
+    const trimmedHtml = rawHtml.trim();
+    const MAX_HTML_CHARS = 120000;
+    const contentHtml = trimmedHtml && trimmedHtml.length <= MAX_HTML_CHARS
+        ? rawHtml
+        : '';
 
     const turnIndex = session.turnIndex;
-    const roundIndex = getRoundIndex(turnIndex);
+    const roundIndex = getRoundIndex(turnIndex, session);
     const timestamp = Date.now();
 
-    session.messages.push({
+    const entry = {
         role: expectedLLM || message.sourceLLM || 'assistant',
         content: content,
         timestamp: timestamp,
         turnIndex: turnIndex,
         roundIndex: roundIndex
-    });
+    };
+    if (contentHtml) entry.contentHtml = contentHtml;
+    session.messages.push(entry);
 
     session.waitingFor = null;
     session.lastPromptId = null;
@@ -1560,12 +2726,44 @@ async function handleDebateResponse(message) {
 
     sendMessageToPopup({
         type: 'UI_MESSAGE_ADD',
+        chatId: session.chatId || null,
+        sessionId: session.sessionId,
         role: expectedLLM || message.sourceLLM,
         content: content,
+        contentHtml: contentHtml || undefined,
         timestamp: timestamp,
         turnIndex: turnIndex,
         roundIndex: roundIndex
     });
+
+    if (session.chatId) {
+        const persisted = await appendChatMessage(session.chatId, {
+            role: expectedLLM || message.sourceLLM,
+            content,
+            contentHtml: contentHtml || undefined,
+            timestamp,
+            turnIndex,
+            roundIndex,
+            sessionId: session.sessionId
+        });
+        if (persisted?.ok && Number.isFinite(persisted?.message?.sequence)) {
+            const provider = expectedLLM || message.sourceLLM;
+            if (provider === 'chatgpt' || provider === 'gemini') {
+                try {
+                    const store = await requireHistoryUnlocked();
+                    await bumpProviderDeliveredUpTo(
+                        store,
+                        session.chatId,
+                        provider,
+                        persisted.message.sequence,
+                        getProviderContextKey(session, provider)
+                    );
+                } catch (error) {
+                    // ignore delivery tracking failures
+                }
+            }
+        }
+    }
 
     if (turnIndex >= session.totalTurns) {
         await endDebateSession('Session completed.');
@@ -1710,7 +2908,8 @@ function handleGeminiResponse(message) {
     sendMessageToPopup({
         type: 'LLM_RESPONSE',
         llm: 'gemini',
-        content: message.content
+        content: message.content,
+        contentHtml: message.contentHtml || undefined
     });
 }
 
@@ -1739,7 +2938,8 @@ function handleChatGPTResponse(message) {
     sendMessageToPopup({
         type: 'LLM_RESPONSE',
         llm: 'chatgpt',
-        content: message.content
+        content: message.content,
+        contentHtml: message.contentHtml || undefined
     });
 }
 

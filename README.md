@@ -10,6 +10,8 @@ A powerful Chrome extension designed to streamline your workflow with Large Lang
 
 -   **Multi-LLM Support**: Interact with Gemini and ChatGPT.
 -   **Side Panel Interface**: Persistent UI for sending prompts to both LLMs and comparing responses.
+-   **Encrypted Chat History (Local-First)**: Chats and messages are stored in IndexedDB and encrypted with a user passphrase.
+-   **Thread List + Paging**: Open past chats and load older messages on demand (avoids huge payloads).
 -   **In-Page Forwarding**: Toggle buttons injected into ChatGPT and Gemini pages to send the current prompt to the other LLM.
 -   **Auto Follow-up**: When forwarding from ChatGPT to Gemini, after both LLMs respond, the extension automatically inserts Gemini's response into ChatGPT for a comparative follow-up.
 -   **Response Comparison**: View responses side-by-side in the side panel.
@@ -39,6 +41,11 @@ A powerful Chrome extension designed to streamline your workflow with Large Lang
     *   Ensure you are logged into both services.
 2.  **Open the Extension Side Panel**:
     *   Click the "Multi-LLM Coder" icon in your Chrome toolbar and choose to open the side panel, or select it from the side panel dropdown if already open.
+3.  **Enable encrypted history (recommended)**:
+    *   Side panel → **Settings** → **Security**
+    *   Set a passphrase and click **Enable encryption**
+    *   After restarting Chrome, you must click **Unlock** to access history and run sessions again.
+    *   If you lose the passphrase, history cannot be recovered (use **Reset history** to wipe).
 
 ### Sending Prompts (Two Main Ways)
 
@@ -183,6 +190,7 @@ chromeEX/
 -   **Content Scripts**: Open DevTools on the ChatGPT or Gemini page. Console logs from `contentScript.js` will appear here. Errors during `simpleInteraction` (which is injected) will also appear here.
 -   **Background Script**: Go to `chrome://extensions/`, find "Multi-LLM Coder", and click the "Service worker" link to open its DevTools.
 -   **Test Selectors**: Use the browser's DevTools console on the LLM page (e.g., `document.querySelector('#prompt-textarea')`) to test if selectors are still valid.
+-   **Inspect chat history DB**: DevTools → Application → IndexedDB → `mlc_history_v1` (see `AGENTS_DBS.md` for schema + encryption details).
 
 ## 🐛 Troubleshooting
 

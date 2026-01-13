@@ -4,20 +4,21 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 ## 1) What this extension does (current behavior)
 
-- Chrome extension that runs a **side panel chat UI** with a multi‑iteration debate between ChatGPT and Gemini.
+- Chrome extension that runs a **side panel chat UI** with either:
+  - a multi‑iteration debate between ChatGPT and Gemini, or
+  - a direct send to ChatGPT, Gemini, or both (no debate scaffolding).
 - It can also **forward prompts between LLM pages** via injected toggle buttons (legacy flow, still present).
 - The side panel is the primary UI: clicking the extension icon opens the side panel (no popup).
 
-### Main user flow (debate sessions)
+### Main user flow (runs)
 
 1. User creates **Tab Profiles** for ChatGPT and Gemini in the Provider Manager:
    - Use the current tab, or open a new provider tab and claim it after manual model selection.
-2. In the side panel, user selects:
-   - First LLM (ChatGPT or Gemini)
-   - Number of iterations (rounds)
-   - Which ChatGPT and Gemini profile to use (or Default)
-3. User submits a prompt (start is blocked until both selected profiles are valid).
-4. The extension runs a debate:
+2. In the side panel composer, user selects:
+   - **Send to**: Debate (ChatGPT→Gemini), Debate (Gemini→ChatGPT), ChatGPT, Gemini, or Both
+   - **Iterations** (enabled only for Debate; forced to 1 for direct sends)
+3. User writes a message and clicks **Send**.
+4. The extension runs a debate (when Send to = Debate):
    - **Round 1**: first LLM gets full context + user query.
    - **Round 1**: second LLM gets full context + user query + first LLM answer.
    - **Rounds 2..N**: each new prompt contains only the previous model’s latest answer (the tab thread holds history).
@@ -28,6 +29,10 @@ This file is the durable memory for the repo. It is the canonical reference for 
    - GPT answer 2
    - Gemini answer 2
    - ...
+6. Sending again in the same chat is treated as a **continuation**:
+   - Run settings are prefilled from the previous user message’s stored `meta`.
+   - The first turns can wrap the new user message with a follow-up template to avoid “resetting” the context.
+  - Direct sends (ChatGPT/Gemini/Both) backfill the target model with the missing transcript it has not been shown yet (tracked per chat via per-provider delivery cursors), so switching providers retains continuity in both directions.
 
 ### Provider Manager (Tab Profiles) UX
 
@@ -59,12 +64,21 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Claiming does not depend on model detection.
 - Wizard is dismissed on claim or cancel; cancel does not close the tab.
 
+### Quick connect buttons (side panel)
+
+- Side panel includes "Connect ChatGPT", "Connect Gemini", and "Connect both" buttons.
+- These send `CONNECT_PROVIDER` to the background, which:
+  - opens the provider homepage tab, then
+  - immediately claims the tab into a Tab Profile and sets it as the default for that provider.
+- Connection “ready” is still determined by a successful `PING`/`PONG` to the content script (login/redirect pages may delay readiness).
+- Profile writes are serialized in the background to avoid connect-both lost-update races.
+
 ### Session gating and safety
 
-- "Start debate" is disabled until:
+- Send is disabled until:
   - Prompt is non-empty
-  - Iterations > 0
-  - Selected ChatGPT + Gemini profiles are valid (status OK, tab exists)
+  - Iterations > 0 (Debate only)
+  - Selected profiles are valid (status OK, tab exists) for the providers required by the selected Send-to target
 - The background still validates profiles before every prompt injection.
 - If a profile goes offline or navigates away, the session pauses with a clear reason and fix actions.
 
@@ -89,7 +103,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Supports open/claim profile flows and focus tab actions.
 
 - `debate_prompts.json`
-  - User-editable debate prompt templates (initial/header + per-turn scaffolding + intermediary/final messages) used by `buildDebatePrompt(...)`.
+  - User-editable prompt templates for Debate, Single (legacy), and Direct runs used by `buildDebatePrompt(...)` / `buildSinglePrompt(...)` / `buildDirectPrompt(...)`.
   - Loaded by `background.js` via `fetch(chrome.runtime.getURL(...))` with a safe inline fallback.
   - Side panel can override these templates via local storage (see prompt editor below).
 

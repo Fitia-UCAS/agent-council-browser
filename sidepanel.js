@@ -2,31 +2,37 @@
 
 const state = {
     sessionId: null,
+    activeChatId: null,
+    activeChat: null,
+    activeChatHasMore: false,
+    activeChatNextCursorSequence: null,
+    loadingOlderMessages: false,
+    chats: [],
     running: false,
     paused: false,
+    stopRequested: false,
     pausedProvider: null,
     pausedReason: null,
     autoScroll: true,
+    historyStatus: { configured: false, unlocked: false },
+    connectionStatus: { chatgpt: false, gemini: false },
+    connecting: { chatgpt: false, gemini: false },
     profiles: [],
     defaults: { chatgpt: null, gemini: null },
-    selectedProfiles: { chatgpt: 'default', gemini: 'default' },
     sessionProfiles: { chatgpt: null, gemini: null },
-    pendingClaim: null,
     promptConfig: null,
     promptConfigSource: null
 };
 
 const elements = {};
+const HISTORY_PAGE_SIZE = 60;
 
 document.addEventListener('DOMContentLoaded', () => {
     elements.promptInput = document.getElementById('prompt-input');
     elements.sendButton = document.getElementById('send-button');
-    elements.stopButton = document.getElementById('stop-button');
     elements.charCount = document.getElementById('char-count');
-    elements.firstLLM = document.getElementById('first-llm');
+    elements.runTarget = document.getElementById('run-target');
     elements.iterations = document.getElementById('iterations');
-    elements.chatgptProfile = document.getElementById('chatgpt-profile');
-    elements.geminiProfile = document.getElementById('gemini-profile');
     elements.refreshProfiles = document.getElementById('refresh-profiles');
     elements.autoScroll = document.getElementById('auto-scroll');
     elements.timeline = document.getElementById('timeline');
@@ -34,20 +40,35 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.statusChatGPT = document.getElementById('status-chatgpt');
     elements.statusGemini = document.getElementById('status-gemini');
     elements.sessionStatus = document.getElementById('session-status');
+    elements.sessionBanner = document.getElementById('session-banner');
+    elements.composerHint = document.getElementById('composer-hint');
 
     elements.profileListChatgpt = document.getElementById('profile-list-chatgpt');
     elements.profileListGemini = document.getElementById('profile-list-gemini');
-    elements.useCurrentChatgpt = document.getElementById('use-current-chatgpt');
-    elements.useCurrentGemini = document.getElementById('use-current-gemini');
-    elements.openChatgptTab = document.getElementById('open-chatgpt-tab');
-    elements.openGeminiTab = document.getElementById('open-gemini-tab');
+    elements.connectionLabelChatgpt = document.getElementById('connection-label-chatgpt');
+    elements.connectionLabelGemini = document.getElementById('connection-label-gemini');
 
-    elements.claimWizard = document.getElementById('claim-wizard');
-    elements.claimTitle = document.getElementById('claim-title');
-    elements.claimSubtitle = document.getElementById('claim-subtitle');
-    elements.claimModel = document.getElementById('claim-model');
-    elements.claimTabButton = document.getElementById('claim-tab-button');
-    elements.cancelClaimButton = document.getElementById('cancel-claim-button');
+    elements.chatsButton = document.getElementById('chats-button');
+    elements.newChatButton = document.getElementById('new-chat-button');
+    elements.settingsButton = document.getElementById('settings-button');
+
+    elements.chatsDrawer = document.getElementById('chats-drawer');
+    elements.chatsBackdrop = document.getElementById('chats-backdrop');
+    elements.closeChatsButton = document.getElementById('close-chats');
+    elements.drawerNewChatButton = document.getElementById('drawer-new-chat');
+    elements.chatList = document.getElementById('chat-list');
+
+    elements.settingsDrawer = document.getElementById('settings-drawer');
+    elements.settingsBackdrop = document.getElementById('settings-backdrop');
+    elements.closeSettingsButton = document.getElementById('close-settings');
+    elements.settingsConnectChatgpt = document.getElementById('settings-connect-chatgpt');
+    elements.settingsConnectGemini = document.getElementById('settings-connect-gemini');
+    elements.settingsFocusChatgpt = document.getElementById('settings-focus-chatgpt');
+    elements.settingsFocusGemini = document.getElementById('settings-focus-gemini');
+
+    elements.connectChatgpt = document.getElementById('connect-chatgpt');
+    elements.connectGemini = document.getElementById('connect-gemini');
+    elements.connectBoth = document.getElementById('connect-both');
 
     elements.pausedActions = document.getElementById('paused-actions');
     elements.resumeButton = document.getElementById('resume-session');
@@ -63,12 +84,24 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.promptResetButton = document.getElementById('prompt-reset');
     elements.promptStatus = document.getElementById('prompt-status');
 
+    elements.historyPassphrase = document.getElementById('history-passphrase');
+    elements.historyPassphraseConfirm = document.getElementById('history-passphrase-confirm');
+    elements.historyPassphraseConfirmField = document.getElementById('history-passphrase-confirm-field');
+    elements.historyConfigureButton = document.getElementById('history-configure');
+    elements.historyUnlockButton = document.getElementById('history-unlock');
+    elements.historyLockButton = document.getElementById('history-lock');
+    elements.historyResetButton = document.getElementById('history-reset');
+    elements.historyStatus = document.getElementById('history-status');
+
     bindEvents();
+    updateHistoryUi();
     updateCharCount();
     updateSendState();
 
     requestProfiles();
     requestConnectionStatus();
+    requestHistoryStatus();
+    requestChatsState();
     requestActiveSession();
     loadPromptTemplates();
 });
@@ -82,21 +115,21 @@ function bindEvents() {
         elements.promptInput.addEventListener('keydown', (event) => {
             if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
                 event.preventDefault();
-                startSession();
+                handlePrimaryAction();
             }
         });
     }
 
     if (elements.sendButton) {
-        elements.sendButton.addEventListener('click', startSession);
-    }
-
-    if (elements.stopButton) {
-        elements.stopButton.addEventListener('click', stopSession);
+        elements.sendButton.addEventListener('click', handlePrimaryAction);
     }
 
     if (elements.refreshProfiles) {
         elements.refreshProfiles.addEventListener('click', requestProfiles);
+    }
+
+    if (elements.runTarget) {
+        elements.runTarget.addEventListener('change', updateSendState);
     }
 
     if (elements.iterations) {
@@ -109,54 +142,79 @@ function bindEvents() {
         });
     }
 
-    if (elements.chatgptProfile) {
-        elements.chatgptProfile.addEventListener('change', () => {
-            state.selectedProfiles.chatgpt = elements.chatgptProfile.value;
-            updateSendState();
+    if (elements.statusChatGPT) {
+        elements.statusChatGPT.addEventListener('click', () => handleProviderPillClick('chatgpt'));
+    }
+
+    if (elements.statusGemini) {
+        elements.statusGemini.addEventListener('click', () => handleProviderPillClick('gemini'));
+    }
+
+    if (elements.chatsButton) {
+        elements.chatsButton.addEventListener('click', openChatsDrawer);
+    }
+
+    if (elements.newChatButton) {
+        elements.newChatButton.addEventListener('click', createNewChat);
+    }
+
+    if (elements.chatsBackdrop) {
+        elements.chatsBackdrop.addEventListener('click', closeChatsDrawer);
+    }
+
+    if (elements.closeChatsButton) {
+        elements.closeChatsButton.addEventListener('click', closeChatsDrawer);
+    }
+
+    if (elements.drawerNewChatButton) {
+        elements.drawerNewChatButton.addEventListener('click', () => {
+            createNewChat();
+            closeChatsDrawer();
         });
     }
 
-    if (elements.geminiProfile) {
-        elements.geminiProfile.addEventListener('change', () => {
-            state.selectedProfiles.gemini = elements.geminiProfile.value;
-            updateSendState();
-        });
+    if (elements.chatList) {
+        elements.chatList.addEventListener('click', handleChatListClick);
     }
 
-    if (elements.useCurrentChatgpt) {
-        elements.useCurrentChatgpt.addEventListener('click', () => {
-            sendMessage({ type: 'CREATE_PROFILE_FROM_ACTIVE_TAB', provider: 'chatgpt' }, handleActionResponse);
-        });
+    if (elements.settingsButton) {
+        elements.settingsButton.addEventListener('click', openSettingsDrawer);
     }
 
-    if (elements.useCurrentGemini) {
-        elements.useCurrentGemini.addEventListener('click', () => {
-            sendMessage({ type: 'CREATE_PROFILE_FROM_ACTIVE_TAB', provider: 'gemini' }, handleActionResponse);
-        });
+    if (elements.settingsBackdrop) {
+        elements.settingsBackdrop.addEventListener('click', closeSettingsDrawer);
     }
 
-    if (elements.openChatgptTab) {
-        elements.openChatgptTab.addEventListener('click', () => {
-            openProviderTab('chatgpt');
-        });
+    if (elements.closeSettingsButton) {
+        elements.closeSettingsButton.addEventListener('click', closeSettingsDrawer);
     }
 
-    if (elements.openGeminiTab) {
-        elements.openGeminiTab.addEventListener('click', () => {
-            openProviderTab('gemini');
-        });
+    if (elements.connectChatgpt) {
+        elements.connectChatgpt.addEventListener('click', () => connectProvider('chatgpt'));
     }
 
-    if (elements.claimTabButton) {
-        elements.claimTabButton.addEventListener('click', () => {
-            claimPendingTab();
-        });
+    if (elements.connectGemini) {
+        elements.connectGemini.addEventListener('click', () => connectProvider('gemini'));
     }
 
-    if (elements.cancelClaimButton) {
-        elements.cancelClaimButton.addEventListener('click', () => {
-            clearPendingClaim();
-        });
+    if (elements.connectBoth) {
+        elements.connectBoth.addEventListener('click', connectBothProviders);
+    }
+
+    if (elements.settingsConnectChatgpt) {
+        elements.settingsConnectChatgpt.addEventListener('click', () => connectProvider('chatgpt'));
+    }
+
+    if (elements.settingsConnectGemini) {
+        elements.settingsConnectGemini.addEventListener('click', () => connectProvider('gemini'));
+    }
+
+    if (elements.settingsFocusChatgpt) {
+        elements.settingsFocusChatgpt.addEventListener('click', () => focusProvider('chatgpt'));
+    }
+
+    if (elements.settingsFocusGemini) {
+        elements.settingsFocusGemini.addEventListener('click', () => focusProvider('gemini'));
     }
 
     if (elements.profileListChatgpt) {
@@ -195,6 +253,30 @@ function bindEvents() {
         elements.promptJsonSaveButton.addEventListener('click', savePromptTemplatesJson);
     }
 
+    if (elements.historyPassphrase) {
+        elements.historyPassphrase.addEventListener('input', updateHistoryUi);
+    }
+
+    if (elements.historyPassphraseConfirm) {
+        elements.historyPassphraseConfirm.addEventListener('input', updateHistoryUi);
+    }
+
+    if (elements.historyConfigureButton) {
+        elements.historyConfigureButton.addEventListener('click', configureHistoryEncryption);
+    }
+
+    if (elements.historyUnlockButton) {
+        elements.historyUnlockButton.addEventListener('click', unlockHistory);
+    }
+
+    if (elements.historyLockButton) {
+        elements.historyLockButton.addEventListener('click', lockHistory);
+    }
+
+    if (elements.historyResetButton) {
+        elements.historyResetButton.addEventListener('click', resetHistory);
+    }
+
     if (chrome?.runtime?.onMessage) {
         chrome.runtime.onMessage.addListener(handleBackgroundMessage);
     }
@@ -214,6 +296,171 @@ function handleActionResponse(response) {
     if (response && response.ok === false && response.error) {
         setSessionStatus(`Error: ${response.error}`);
     }
+}
+
+function normalizeHistoryStatus(status) {
+    const configured = Boolean(status?.configured);
+    const unlocked = Boolean(status?.unlocked);
+    return { configured, unlocked };
+}
+
+function isHistoryReady() {
+    return Boolean(state.historyStatus?.configured && state.historyStatus?.unlocked);
+}
+
+function setHistoryStatus(text, isError = false) {
+    if (!elements.historyStatus) return;
+    elements.historyStatus.textContent = text;
+    elements.historyStatus.classList.toggle('is-error', Boolean(isError));
+}
+
+function updateHistoryStatus(nextStatus) {
+    state.historyStatus = normalizeHistoryStatus(nextStatus);
+    updateHistoryUi();
+    renderChatList();
+    updateSendState();
+}
+
+function updateHistoryUi() {
+    const configured = Boolean(state.historyStatus?.configured);
+    const unlocked = Boolean(state.historyStatus?.unlocked);
+
+    if (!configured) {
+        setHistoryStatus('History: encryption not configured. Set a passphrase and click Enable encryption.');
+    } else if (!unlocked) {
+        setHistoryStatus('History: locked. Enter your passphrase and click Unlock.');
+    } else {
+        setHistoryStatus('History: unlocked.');
+    }
+
+    if (elements.historyPassphraseConfirmField) {
+        elements.historyPassphraseConfirmField.hidden = configured;
+    }
+
+    if (elements.historyConfigureButton) {
+        elements.historyConfigureButton.hidden = configured;
+    }
+    if (elements.historyUnlockButton) {
+        elements.historyUnlockButton.hidden = !configured || unlocked;
+    }
+    if (elements.historyLockButton) {
+        elements.historyLockButton.hidden = !configured || !unlocked;
+    }
+    if (elements.historyResetButton) {
+        elements.historyResetButton.hidden = !configured;
+    }
+
+    const passphrase = String(elements.historyPassphrase?.value || '');
+    const confirm = String(elements.historyPassphraseConfirm?.value || '');
+    const passphraseReady = passphrase.trim().length > 0;
+    const matches = passphrase === confirm;
+
+    if (elements.historyConfigureButton) {
+        elements.historyConfigureButton.disabled = configured || !passphraseReady || !matches;
+    }
+    if (elements.historyUnlockButton) {
+        elements.historyUnlockButton.disabled = !configured || unlocked || !passphraseReady;
+    }
+}
+
+function configureHistoryEncryption() {
+    if (!elements.historyPassphrase || !elements.historyPassphraseConfirm) return;
+    const passphrase = elements.historyPassphrase.value;
+    const confirm = elements.historyPassphraseConfirm.value;
+    if (!passphrase.trim()) {
+        setHistoryStatus('Passphrase is empty.', true);
+        return;
+    }
+    if (passphrase !== confirm) {
+        setHistoryStatus('Passphrases do not match.', true);
+        return;
+    }
+
+    setHistoryStatus('Configuring encryption…');
+    sendMessage({ type: 'HISTORY_CONFIGURE', passphrase }, (response) => {
+        if (!response || response.ok === false) {
+            const code = response?.code || '';
+            if (code === 'ENCRYPTION_ALREADY_CONFIGURED') {
+                setHistoryStatus('Encryption already enabled. Use Unlock instead.', true);
+                requestHistoryStatus();
+                return;
+            }
+            setHistoryStatus(`Error: ${response?.error || 'Failed to configure encryption.'}`, true);
+            return;
+        }
+        elements.historyPassphrase.value = '';
+        elements.historyPassphraseConfirm.value = '';
+        updateHistoryStatus(response.status);
+        requestChatsState();
+    });
+}
+
+function unlockHistory() {
+    if (!elements.historyPassphrase) return;
+    const passphrase = elements.historyPassphrase.value;
+    if (!passphrase.trim()) {
+        setHistoryStatus('Passphrase is empty.', true);
+        return;
+    }
+
+    setHistoryStatus('Unlocking…');
+    sendMessage({ type: 'HISTORY_UNLOCK', passphrase }, (response) => {
+        if (!response || response.ok === false) {
+            const code = response?.code || '';
+            if (code === 'PASSPHRASE_INVALID') {
+                setHistoryStatus('Incorrect passphrase.', true);
+                return;
+            }
+            if (code === 'ENCRYPTION_NOT_CONFIGURED') {
+                setHistoryStatus('Encryption is not configured yet. Use Enable encryption first.', true);
+                requestHistoryStatus();
+                return;
+            }
+            setHistoryStatus(`Error: ${response?.error || 'Failed to unlock history.'}`, true);
+            return;
+        }
+        elements.historyPassphrase.value = '';
+        if (elements.historyPassphraseConfirm) elements.historyPassphraseConfirm.value = '';
+        updateHistoryStatus(response.status);
+        requestChatsState();
+    });
+}
+
+function lockHistory() {
+    setHistoryStatus('Locking…');
+    sendMessage({ type: 'HISTORY_LOCK' }, (response) => {
+        if (!response || response.ok === false) {
+            setHistoryStatus(`Error: ${response?.error || 'Failed to lock history.'}`, true);
+            return;
+        }
+        updateHistoryStatus(response.status);
+        state.chats = [];
+        state.activeChat = null;
+        state.activeChatId = null;
+        state.activeChatHasMore = false;
+        state.activeChatNextCursorSequence = null;
+        clearTranscript();
+    });
+}
+
+function resetHistory() {
+    const confirmed = window.confirm('Reset encrypted history? This will delete all chats and remove your encryption setup.');
+    if (!confirmed) return;
+    setHistoryStatus('Resetting history…');
+    sendMessage({ type: 'HISTORY_RESET' }, (response) => {
+        if (!response || response.ok === false) {
+            setHistoryStatus(`Error: ${response?.error || 'Failed to reset history.'}`, true);
+            return;
+        }
+        updateHistoryStatus(response.status);
+        state.chats = [];
+        state.activeChat = null;
+        state.activeChatId = null;
+        state.activeChatHasMore = false;
+        state.activeChatNextCursorSequence = null;
+        clearTranscript();
+        renderChatList();
+    });
 }
 
 function setPromptStatus(text, isError = false) {
@@ -350,12 +597,138 @@ function updateCharCount() {
     elements.charCount.textContent = String(elements.promptInput.value.length);
 }
 
+function getRunTarget() {
+    const value = String(elements.runTarget?.value || '').trim();
+    switch (value) {
+        case 'debate_chatgpt':
+        case 'debate_gemini':
+        case 'chatgpt':
+        case 'gemini':
+        case 'both':
+            return value;
+        default:
+            return 'debate_chatgpt';
+    }
+}
+
+function isDebateTarget(runTarget) {
+    return runTarget === 'debate_chatgpt' || runTarget === 'debate_gemini';
+}
+
+function getDebateFirstLLM(runTarget) {
+    return runTarget === 'debate_gemini' ? 'gemini' : 'chatgpt';
+}
+
+function getDirectTarget(runTarget) {
+    if (runTarget === 'both') return 'both';
+    if (runTarget === 'gemini') return 'gemini';
+    return 'chatgpt';
+}
+
+function getRequiredProvidersForRun(runTarget) {
+    if (isDebateTarget(runTarget) || runTarget === 'both') return ['chatgpt', 'gemini'];
+    return [getDirectTarget(runTarget)];
+}
+
+function isRunConnected() {
+    const runTarget = getRunTarget();
+    return getRequiredProvidersForRun(runTarget).every((provider) => Boolean(state.connectionStatus?.[provider]));
+}
+
+function updateRunUi() {
+    const runTarget = getRunTarget();
+    const locked = state.running || state.paused;
+    const debate = isDebateTarget(runTarget);
+    if (elements.iterations) {
+        if (!debate) {
+            elements.iterations.value = '1';
+        }
+        elements.iterations.disabled = locked || !debate;
+    }
+    if (elements.runTarget) {
+        elements.runTarget.disabled = locked;
+    }
+}
+
+function clampInt(value, min, max) {
+    const num = parseInt(value, 10);
+    if (!Number.isFinite(num)) return min;
+    return Math.min(max, Math.max(min, num));
+}
+
+function findLastUserRunConfig(chat) {
+    const messages = Array.isArray(chat?.messages) ? chat.messages : [];
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const message = messages[i];
+        if (!message || message.role !== 'user') continue;
+        const meta = message.meta && typeof message.meta === 'object' ? message.meta : null;
+        const runConfig = meta?.runConfig && typeof meta.runConfig === 'object' ? meta.runConfig : null;
+        if (runConfig) return runConfig;
+    }
+    return null;
+}
+
+function applyRunConfigDefaults(runConfig) {
+    if (!runConfig || typeof runConfig !== 'object') return;
+    const runType = runConfig.runType || runConfig.mode || null;
+    if (runType === 'debate') {
+        const firstLLM = runConfig.firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
+        if (elements.runTarget) {
+            elements.runTarget.value = firstLLM === 'gemini' ? 'debate_gemini' : 'debate_chatgpt';
+        }
+        if (elements.iterations && runConfig.rounds) {
+            elements.iterations.value = String(clampInt(runConfig.rounds, 1, 12));
+        }
+    } else if (runType === 'direct') {
+        const target = runConfig.target;
+        if (elements.runTarget) {
+            if (target === 'both') elements.runTarget.value = 'both';
+            else if (target === 'gemini') elements.runTarget.value = 'gemini';
+            else elements.runTarget.value = 'chatgpt';
+        }
+        if (elements.iterations) {
+            elements.iterations.value = '1';
+        }
+    } else if (runType === 'single') {
+        const llm = runConfig.llm === 'gemini' ? 'gemini' : 'chatgpt';
+        if (elements.runTarget) {
+            elements.runTarget.value = llm;
+        }
+        if (elements.iterations) {
+            elements.iterations.value = '1';
+        }
+    }
+    updateRunUi();
+}
+
+function applyRunDefaultsFromActiveChat() {
+    const runConfig = findLastUserRunConfig(state.activeChat);
+    if (runConfig) {
+        applyRunConfigDefaults(runConfig);
+    } else {
+        updateRunUi();
+    }
+}
+
 function updateSendState() {
     if (!elements.sendButton || !elements.promptInput || !elements.iterations) return;
+    updateRunUi();
+    const locked = state.running || state.paused;
+    if (locked) {
+        elements.sendButton.textContent = 'Stop';
+        elements.sendButton.disabled = !isHistoryReady();
+        updateComposerHint();
+        return;
+    }
     const hasPrompt = elements.promptInput.value.trim().length > 0;
-    const iterations = parseInt(elements.iterations.value, 10) || 0;
-    const profilesReady = isProfileSelectionValid('chatgpt') && isProfileSelectionValid('gemini');
-    elements.sendButton.disabled = state.running || state.paused || !hasPrompt || iterations <= 0 || !profilesReady;
+    const runTarget = getRunTarget();
+    const debate = isDebateTarget(runTarget);
+    const iterations = debate ? (parseInt(elements.iterations.value, 10) || 0) : 1;
+    const connected = isRunConnected();
+    elements.sendButton.textContent = 'Send';
+    elements.sendButton.disabled = !hasPrompt || iterations <= 0 || !connected || !isHistoryReady();
+    updateComposerHint();
+    updateEmptyState();
 }
 
 function setSessionState({ running, paused }) {
@@ -363,27 +736,24 @@ function setSessionState({ running, paused }) {
     state.paused = paused;
     const locked = running || paused;
 
-    if (elements.sendButton) {
-        const hasPrompt = elements.promptInput?.value.trim().length > 0;
-        const label = running ? 'Running...' : (paused ? 'Paused' : 'Start debate');
-        elements.sendButton.textContent = label;
-        elements.sendButton.disabled = locked || !hasPrompt || !isProfileSelectionValid('chatgpt') || !isProfileSelectionValid('gemini');
-    }
-    if (elements.stopButton) {
-        elements.stopButton.disabled = !locked;
-    }
-
-    if (elements.firstLLM) elements.firstLLM.disabled = locked;
-    if (elements.iterations) elements.iterations.disabled = locked;
-    if (elements.chatgptProfile) elements.chatgptProfile.disabled = locked;
-    if (elements.geminiProfile) elements.geminiProfile.disabled = locked;
+    if (elements.runTarget) elements.runTarget.disabled = locked;
+    if (elements.iterations) elements.iterations.disabled = locked || !isDebateTarget(getRunTarget());
     if (elements.refreshProfiles) elements.refreshProfiles.disabled = locked;
+    if (elements.newChatButton) elements.newChatButton.disabled = locked;
+    if (elements.drawerNewChatButton) elements.drawerNewChatButton.disabled = locked;
+    updateRunUi();
     updatePausedActions();
+    updateSendState();
 }
 
 function setSessionStatus(text) {
     if (elements.sessionStatus) {
         elements.sessionStatus.textContent = text;
+    }
+    if (elements.sessionBanner) {
+        const normalized = String(text || '').trim();
+        const show = state.running || state.paused || (normalized && normalized.toLowerCase() !== 'idle');
+        elements.sessionBanner.hidden = !show;
     }
 }
 
@@ -395,50 +765,502 @@ function requestConnectionStatus() {
     sendMessage({ type: 'CHECK_CONNECTION' });
 }
 
+function requestHistoryStatus() {
+    sendMessage({ type: 'HISTORY_STATUS' }, (response) => {
+        if (!response || response.ok === false) {
+            updateHistoryStatus(response?.status || { configured: false, unlocked: false });
+            return;
+        }
+        updateHistoryStatus(response.status);
+    });
+}
+
 function requestActiveSession() {
     sendMessage({ type: 'GET_ACTIVE_SESSION' });
+}
+
+function requestChatsState() {
+    sendMessage({ type: 'GET_CHATS_STATE' }, (response) => {
+        if (!response) {
+            setSessionStatus('Error: Failed to load chats.');
+            return;
+        }
+        if (response.ok === false) {
+            if (response.status) updateHistoryStatus(response.status);
+            const code = response.code || '';
+            if (code === 'HISTORY_LOCKED') {
+                setSessionStatus('History is locked. Unlock it in Settings → Security.');
+            } else if (code === 'HISTORY_NOT_CONFIGURED') {
+                setSessionStatus('Set an encryption passphrase in Settings → Security to enable chat history.');
+            } else {
+                setSessionStatus(`Error: ${response.error || 'Failed to load chats.'}`);
+            }
+            state.chats = [];
+            state.activeChat = null;
+            state.activeChatId = null;
+            state.activeChatHasMore = false;
+            state.activeChatNextCursorSequence = null;
+            clearTranscript();
+            renderChatList();
+            updateSendState();
+            return;
+        }
+        handleChatsState(response);
+    });
+}
+
+function handleChatsState(payload) {
+    const chats = Array.isArray(payload.chats) ? payload.chats : [];
+    state.chats = chats;
+    const nextActiveId = typeof payload.activeChatId === 'string' ? payload.activeChatId : state.activeChatId;
+    const shouldLoad = nextActiveId && (!state.activeChat || state.activeChat.chatId !== nextActiveId);
+    state.activeChatId = nextActiveId;
+    renderChatList();
+    if (shouldLoad) {
+        loadChat(nextActiveId);
+    }
+}
+
+function createNewChat() {
+    if (!isHistoryReady()) {
+        setSessionStatus(state.historyStatus?.configured
+            ? 'History is locked. Unlock it in Settings → Security.'
+            : 'Set an encryption passphrase in Settings → Security to enable chat history.');
+        openSettingsDrawer();
+        return;
+    }
+    if (state.running || state.paused) {
+        setSessionStatus('Stop the current run to start a new chat.');
+        return;
+    }
+    sendMessage({ type: 'CREATE_CHAT' }, (response) => {
+        if (!response || response.ok === false) {
+            handleActionResponse(response || { ok: false, error: 'Failed to create chat.' });
+            return;
+        }
+        if (response.activeChatId) {
+            state.activeChatId = response.activeChatId;
+            loadChat(response.activeChatId);
+        } else if (response.chat?.chatId) {
+            state.activeChatId = response.chat.chatId;
+            loadChat(response.chat.chatId);
+        }
+    });
+}
+
+function loadChat(chatId) {
+    if (!chatId) return;
+    sendMessage({ type: 'GET_CHAT', chatId }, (response) => {
+        if (!response) {
+            setSessionStatus('Error: Failed to load chat.');
+            return;
+        }
+        if (response.ok === false) {
+            if (response.status) updateHistoryStatus(response.status);
+            const code = response.code || '';
+            if (code === 'HISTORY_LOCKED') {
+                setSessionStatus('History is locked. Unlock it in Settings → Security.');
+                openSettingsDrawer();
+                return;
+            }
+            if (code === 'HISTORY_NOT_CONFIGURED') {
+                setSessionStatus('Set an encryption passphrase in Settings → Security to enable chat history.');
+                openSettingsDrawer();
+                return;
+            }
+            handleActionResponse(response || { ok: false, error: 'Failed to load chat.' });
+            return;
+        }
+        state.activeChat = response.chat || null;
+        state.activeChatId = response.chat?.chatId || chatId;
+        state.activeChatHasMore = Boolean(response.chat?.hasMore);
+        state.activeChatNextCursorSequence = Number.isFinite(response.chat?.nextCursorSequence)
+            ? response.chat.nextCursorSequence
+            : null;
+        clearTranscript();
+        if (Array.isArray(response.chat?.messages) && response.chat.messages.length) {
+            response.chat.messages.forEach(addMessage);
+        } else {
+            updateEmptyState();
+        }
+        updateLoadOlderUi();
+        renderChatList();
+        applyRunDefaultsFromActiveChat();
+        updateSendState();
+    });
+}
+
+function handleChatListClick(event) {
+    if (!isHistoryReady()) {
+        setSessionStatus(state.historyStatus?.configured
+            ? 'History is locked. Unlock it in Settings → Security.'
+            : 'Set an encryption passphrase in Settings → Security to enable chat history.');
+        openSettingsDrawer();
+        return;
+    }
+    const item = event.target.closest('.chat-item');
+    if (!item || !item.dataset.chatId) return;
+    const chatId = item.dataset.chatId;
+    if (chatId === state.activeChatId) {
+        closeChatsDrawer();
+        return;
+    }
+    if (state.running || state.paused) {
+        setSessionStatus('Stop the current run to switch chats.');
+        closeChatsDrawer();
+        return;
+    }
+    sendMessage({ type: 'SET_ACTIVE_CHAT', chatId }, (response) => {
+        if (!response || response.ok === false) {
+            handleActionResponse(response || { ok: false, error: 'Failed to switch chat.' });
+            return;
+        }
+        state.activeChatId = response.activeChatId || chatId;
+        loadChat(state.activeChatId);
+        closeChatsDrawer();
+    });
+}
+
+function renderChatList() {
+    if (!elements.chatList) return;
+    elements.chatList.innerHTML = '';
+    if (!isHistoryReady()) {
+        const empty = document.createElement('div');
+        empty.className = 'profile-empty';
+        empty.textContent = state.historyStatus?.configured
+            ? 'History is locked. Unlock it in Settings → Security.'
+            : 'Set an encryption passphrase in Settings → Security to enable chat history.';
+        elements.chatList.appendChild(empty);
+        return;
+    }
+    if (!state.chats.length) {
+        const empty = document.createElement('div');
+        empty.className = 'profile-empty';
+        empty.textContent = 'No chats yet.';
+        elements.chatList.appendChild(empty);
+        return;
+    }
+    state.chats.forEach((chat) => {
+        const item = document.createElement('div');
+        item.className = `chat-item${chat.chatId === state.activeChatId ? ' is-active' : ''}`;
+        item.dataset.chatId = chat.chatId;
+
+        const title = document.createElement('div');
+        title.className = 'chat-item-title';
+        title.textContent = chat.title || 'New chat';
+
+        const meta = document.createElement('div');
+        meta.className = 'chat-item-meta';
+        const updatedAt = Number.isFinite(chat.updatedAt) ? chat.updatedAt : null;
+        const count = Number.isFinite(chat.messageCount) ? chat.messageCount : null;
+        const parts = [];
+        if (count !== null) parts.push(`${count} msg${count === 1 ? '' : 's'}`);
+        if (updatedAt) parts.push(formatRelativeTime(updatedAt));
+        meta.textContent = parts.join(' • ');
+
+        item.appendChild(title);
+        if (meta.textContent) item.appendChild(meta);
+        elements.chatList.appendChild(item);
+    });
+}
+
+function formatRelativeTime(timestampMs) {
+    const delta = Math.max(0, Date.now() - timestampMs);
+    const minute = 60 * 1000;
+    const hour = 60 * minute;
+    const day = 24 * hour;
+    if (delta < minute) return 'just now';
+    if (delta < hour) return `${Math.floor(delta / minute)}m ago`;
+    if (delta < day) return `${Math.floor(delta / hour)}h ago`;
+    return `${Math.floor(delta / day)}d ago`;
+}
+
+function openChatsDrawer() {
+    if (!elements.chatsDrawer || !elements.chatsBackdrop) return;
+    elements.chatsBackdrop.hidden = false;
+    elements.chatsDrawer.classList.add('is-open');
+    elements.chatsDrawer.setAttribute('aria-hidden', 'false');
+    renderChatList();
+}
+
+function closeChatsDrawer() {
+    if (!elements.chatsDrawer || !elements.chatsBackdrop) return;
+    elements.chatsDrawer.classList.remove('is-open');
+    elements.chatsDrawer.setAttribute('aria-hidden', 'true');
+    elements.chatsBackdrop.hidden = true;
+}
+
+function openSettingsDrawer() {
+    if (!elements.settingsDrawer || !elements.settingsBackdrop) return;
+    elements.settingsBackdrop.hidden = false;
+    elements.settingsDrawer.classList.add('is-open');
+    elements.settingsDrawer.setAttribute('aria-hidden', 'false');
+}
+
+function closeSettingsDrawer() {
+    if (!elements.settingsDrawer || !elements.settingsBackdrop) return;
+    elements.settingsDrawer.classList.remove('is-open');
+    elements.settingsDrawer.setAttribute('aria-hidden', 'true');
+    elements.settingsBackdrop.hidden = true;
+}
+
+function getDefaultProfile(provider) {
+    const profileId = state.defaults?.[provider] || null;
+    return profileId ? getProfileById(profileId) : null;
+}
+
+function focusProvider(provider) {
+    const profile = getDefaultProfile(provider);
+    if (profile?.tabId) {
+        sendMessage({ type: 'FOCUS_TAB', tabId: profile.tabId }, handleActionResponse);
+        return;
+    }
+    connectProvider(provider);
+}
+
+function handleProviderPillClick(provider) {
+    const ready = Boolean(state.connectionStatus?.[provider]);
+    const profile = getDefaultProfile(provider);
+    if (ready && profile?.tabId) {
+        focusProvider(provider);
+        return;
+    }
+    connectProvider(provider);
+}
+
+function connectProvider(provider) {
+    if (!provider) return;
+    if (state.connecting[provider]) return;
+    state.connecting[provider] = true;
+    updateProviderUi();
+    sendMessage({ type: 'CONNECT_PROVIDER', provider }, (response) => {
+        state.connecting[provider] = false;
+        updateProviderUi();
+        if (!response || response.ok === false) {
+            handleActionResponse(response || { ok: false, error: 'Failed to connect.' });
+            return;
+        }
+        requestProfiles();
+        requestConnectionStatus();
+        window.setTimeout(requestConnectionStatus, 2500);
+        window.setTimeout(requestConnectionStatus, 8000);
+    });
+}
+
+async function connectBothProviders() {
+    connectProvider('chatgpt');
+    connectProvider('gemini');
+}
+
+function updateProviderUi() {
+    const providers = [
+        ['chatgpt', elements.statusChatGPT, elements.connectionLabelChatgpt],
+        ['gemini', elements.statusGemini, elements.connectionLabelGemini]
+    ];
+
+    providers.forEach(([provider, pill, label]) => {
+        if (!pill) return;
+        const ready = Boolean(state.connectionStatus?.[provider]);
+        const connecting = Boolean(state.connecting?.[provider]);
+        const profile = getDefaultProfile(provider);
+        const modelHint = profile?.modelHint ? ` • ${profile.modelHint}` : '';
+
+        pill.classList.toggle('is-ready', ready);
+        pill.classList.toggle('is-offline', !ready && !connecting);
+        pill.classList.toggle('is-connecting', connecting);
+
+        const baseLabel = formatProviderLabel(provider);
+        let statusText = 'offline';
+        let labelText = 'Not connected';
+
+        if (connecting) {
+            statusText = 'connecting…';
+            labelText = 'Connecting…';
+        } else if (ready) {
+            statusText = 'ready';
+            labelText = `Connected${modelHint}`;
+        } else if (profile?.status === 'wrong_host') {
+            statusText = 'wrong host';
+            labelText = 'Wrong host';
+        } else if (profile?.status === 'unknown') {
+            statusText = 'loading…';
+            labelText = 'Loading…';
+        } else if (profile?.status === 'ok') {
+            statusText = 'waiting…';
+            labelText = 'Waiting…';
+        }
+        pill.textContent = `${baseLabel}: ${statusText}`;
+
+        if (label) {
+            label.textContent = labelText;
+        }
+    });
+
+    if (elements.settingsFocusChatgpt) {
+        elements.settingsFocusChatgpt.disabled = !getDefaultProfile('chatgpt')?.tabId;
+    }
+    if (elements.settingsFocusGemini) {
+        elements.settingsFocusGemini.disabled = !getDefaultProfile('gemini')?.tabId;
+    }
+}
+
+function updateComposerHint() {
+    if (!elements.composerHint || !elements.promptInput) return;
+
+    if (state.running || state.paused) {
+        elements.composerHint.hidden = true;
+        return;
+    }
+
+    const runTarget = getRunTarget();
+    const requiredProviders = getRequiredProvidersForRun(runTarget);
+    const requiredLabel = requiredProviders.length === 2
+        ? 'ChatGPT + Gemini'
+        : formatProviderLabel(requiredProviders[0]);
+    const connected = isRunConnected();
+    const historyReady = isHistoryReady();
+    const hasPrompt = elements.promptInput.value.trim().length > 0;
+    const debate = isDebateTarget(runTarget);
+    const iterations = debate ? (parseInt(elements.iterations?.value, 10) || 0) : 1;
+
+    let hint = '';
+    if (!connected && !historyReady) {
+        hint = state.historyStatus?.configured
+            ? `Connect ${requiredLabel}, then unlock history in Settings → Security.`
+            : `Connect ${requiredLabel}, then set a passphrase in Settings → Security.`;
+    } else if (!connected) {
+        hint = `Connect ${requiredLabel} to start.`;
+    } else if (!historyReady) {
+        hint = state.historyStatus?.configured
+            ? 'Unlock history in Settings → Security.'
+            : 'Set an encryption passphrase in Settings → Security to enable chat history.';
+    } else if (!hasPrompt) {
+        hint = '';
+    } else if (debate && iterations <= 0) {
+        hint = 'Iterations must be at least 1.';
+    }
+
+    elements.composerHint.textContent = hint;
+    elements.composerHint.hidden = !hint;
+    elements.promptInput.placeholder = !connected
+        ? `Connect ${requiredLabel} to start...`
+        : (historyReady ? 'Send a message...' : 'Unlock history in Settings → Security...');
+}
+
+function updateEmptyState() {
+    if (!elements.emptyState || !elements.timeline) return;
+    const hasMessages = Boolean(state.activeChat && Array.isArray(state.activeChat.messages) && state.activeChat.messages.length > 0);
+    if (hasMessages) return;
+
+    if (!elements.timeline.contains(elements.emptyState)) {
+        elements.timeline.appendChild(elements.emptyState);
+    }
+
+    const connected = isRunConnected();
+    const historyReady = isHistoryReady();
+    const titleEl = elements.emptyState.querySelector('.empty-title');
+    const subtitleEl = elements.emptyState.querySelector('.empty-subtitle');
+    const actionsEl = elements.emptyState.querySelector('.empty-actions');
+
+    if (connected && !historyReady) {
+        if (titleEl) {
+            titleEl.textContent = state.historyStatus?.configured ? 'Unlock history' : 'Set passphrase';
+        }
+        if (subtitleEl) {
+            subtitleEl.textContent = state.historyStatus?.configured
+                ? 'Unlock encrypted history in Settings → Security to access your chats.'
+                : 'Set an encryption passphrase in Settings → Security to enable chat history.';
+        }
+        if (actionsEl) {
+            actionsEl.hidden = true;
+        }
+        return;
+    }
+
+    if (titleEl) titleEl.textContent = connected ? 'New chat' : 'Connect to start';
+    if (subtitleEl) {
+        subtitleEl.textContent = connected
+            ? 'Write a message below to start.'
+            : 'Open ChatGPT and/or Gemini once. Then send messages from this panel.';
+    }
+    if (actionsEl) {
+        actionsEl.hidden = connected;
+    }
+}
+
+function handlePrimaryAction() {
+    if (state.running || state.paused) {
+        stopSession();
+        return;
+    }
+    startSession();
 }
 
 function startSession() {
     if (state.running || state.paused) return;
     if (!elements.promptInput) return;
 
-    const prompt = elements.promptInput.value.trim();
-    if (!prompt) return;
-
-    const rounds = parseInt(elements.iterations?.value, 10) || 0;
-    if (rounds <= 0) return;
-
-    if (!isProfileSelectionValid('chatgpt') || !isProfileSelectionValid('gemini')) {
-        setSessionStatus('Select valid profiles for ChatGPT and Gemini.');
+    if (!isHistoryReady()) {
+        setSessionStatus(state.historyStatus?.configured
+            ? 'History is locked. Unlock it in Settings → Security.'
+            : 'Set an encryption passphrase in Settings → Security to enable chat history.');
+        openSettingsDrawer();
         return;
     }
 
-    const firstLLM = elements.firstLLM?.value || 'chatgpt';
-    const chatgptSelection = elements.chatgptProfile?.value || 'default';
-    const geminiSelection = elements.geminiProfile?.value || 'default';
+    const prompt = elements.promptInput.value.trim();
+    if (!prompt) return;
 
+    const runTarget = getRunTarget();
+    const debate = isDebateTarget(runTarget);
+    const rounds = debate ? (parseInt(elements.iterations?.value, 10) || 0) : 1;
+    if (rounds <= 0) return;
+
+    if (!isRunConnected()) {
+        const required = getRequiredProvidersForRun(runTarget);
+        if (required.length === 2) {
+            setSessionStatus('Connect ChatGPT and Gemini to start.');
+        } else {
+            setSessionStatus(`Connect ${formatProviderLabel(required[0])} to start.`);
+        }
+        return;
+    }
+
+    state.stopRequested = false;
     setSessionState({ running: true, paused: false });
     setSessionStatus('Starting session...');
 
-    sendMessage({
-        type: 'START_DEBATE_SESSION',
+    const payload = {
+        type: 'START_RUN',
         prompt,
-        firstLLM,
         rounds,
-        profileIds: {
-            chatgpt: chatgptSelection,
-            gemini: geminiSelection
-        }
-    });
+        chatId: state.activeChatId
+    };
+
+    if (debate) {
+        payload.mode = 'debate';
+        payload.firstLLM = getDebateFirstLLM(runTarget);
+    } else {
+        payload.mode = 'direct';
+        payload.target = getDirectTarget(runTarget);
+    }
+    sendMessage(payload);
+
+    elements.promptInput.value = '';
+    updateCharCount();
+    updateSendState();
 }
 
 function stopSession() {
-    if (!state.sessionId) return;
+    if (!state.running && !state.paused) return;
     setSessionStatus('Stopping session...');
+    if (!state.sessionId) {
+        state.stopRequested = true;
+    }
     sendMessage({
         type: 'STOP_SESSION',
-        sessionId: state.sessionId
+        sessionId: state.sessionId || undefined,
+        reason: 'User requested stop'
     });
 }
 
@@ -448,45 +1270,8 @@ function resumeSession() {
     sendMessage({ type: 'RESUME_SESSION' }, handleActionResponse);
 }
 
-function openProviderTab(provider) {
-    sendMessage({ type: 'OPEN_PROVIDER_TAB', provider, focus: true }, (response) => {
-        if (!response || response.ok === false) {
-            handleActionResponse(response || { ok: false, error: 'Failed to open tab.' });
-            return;
-        }
-        state.pendingClaim = {
-            provider: response.provider,
-            tabId: response.tabId,
-            windowId: response.windowId,
-            modelLabel: ''
-        };
-        renderClaimWizard();
-    });
-}
-
-function claimPendingTab() {
-    if (!state.pendingClaim) return;
-    const providerLabel = formatProviderLabel(state.pendingClaim.provider);
-    const modelLabel = truncateInlineText(state.pendingClaim.modelLabel, 48);
-    const label = modelLabel
-        ? `${providerLabel} - ${modelLabel}`
-        : `${providerLabel} profile`;
-    sendMessage({
-        type: 'CLAIM_TAB_AS_PROFILE',
-        provider: state.pendingClaim.provider,
-        tabId: state.pendingClaim.tabId,
-        label
-    }, (response) => {
-        handleActionResponse(response);
-        if (response?.ok) {
-            clearPendingClaim();
-        }
-    });
-}
-
-function clearPendingClaim() {
-    state.pendingClaim = null;
-    renderClaimWizard();
+function isFullyConnected() {
+    return Boolean(state.connectionStatus.chatgpt && state.connectionStatus.gemini);
 }
 
 function handleBackgroundMessage(message) {
@@ -494,11 +1279,14 @@ function handleBackgroundMessage(message) {
         case 'TAB_PROFILES':
             handleProfileList(message);
             break;
-        case 'PROVIDER_MODEL_INFO':
-            handleModelInfo(message);
-            break;
         case 'CONNECTION_STATUS':
             handleConnectionStatus(message);
+            break;
+        case 'HISTORY_STATUS':
+            updateHistoryStatus(message.status);
+            break;
+        case 'CHATS_STATE':
+            handleChatsState(message);
             break;
         case 'ACTIVE_SESSION':
             hydrateSession(message.session);
@@ -508,13 +1296,34 @@ function handleBackgroundMessage(message) {
             state.sessionProfiles = message.profileIds || state.sessionProfiles;
             setSessionState({ running: true, paused: false });
             setSessionStatus(`Running round 1 of ${message.rounds}`);
-            clearTranscript();
+            if (message.chatId && message.chatId !== state.activeChatId) {
+                loadChat(message.chatId);
+            }
+            if (state.stopRequested) {
+                state.stopRequested = false;
+                stopSession();
+            }
             break;
         case 'UI_SESSION_PROGRESS':
             handleProgress(message);
             break;
         case 'UI_MESSAGE_ADD':
-            addMessage(message);
+            if (!message.chatId || message.chatId === state.activeChatId) {
+                if (state.activeChat && (!message.chatId || message.chatId === state.activeChat.chatId)) {
+                    if (!Array.isArray(state.activeChat.messages)) state.activeChat.messages = [];
+                    state.activeChat.messages.push({
+                        role: message.role,
+                        content: message.content,
+                        contentHtml: message.contentHtml,
+                        timestamp: message.timestamp,
+                        sessionId: message.sessionId,
+                        turnIndex: message.turnIndex,
+                        roundIndex: message.roundIndex,
+                        meta: message.meta
+                    });
+                }
+                addMessage(message);
+            }
             break;
         case 'UI_SESSION_PAUSED':
             handleSessionPaused(message);
@@ -539,50 +1348,9 @@ function handleBackgroundMessage(message) {
 function handleProfileList(message) {
     state.profiles = Array.isArray(message.profiles) ? message.profiles : [];
     state.defaults = message.defaults || { chatgpt: null, gemini: null };
-    renderProfileSelect(elements.chatgptProfile, 'chatgpt');
-    renderProfileSelect(elements.geminiProfile, 'gemini');
     renderProfileLists();
+    updateProviderUi();
     updateSendState();
-}
-
-function handleModelInfo(message) {
-    if (!message || !state.pendingClaim) return;
-    if (state.pendingClaim.tabId !== message.tabId) return;
-    state.pendingClaim.modelLabel = message.modelLabel || '';
-    renderClaimWizard();
-}
-
-function renderProfileSelect(selectEl, provider) {
-    if (!selectEl) return;
-    selectEl.innerHTML = '';
-
-    const defaultProfile = getProfileById(state.defaults[provider]);
-    const defaultOption = document.createElement('option');
-    defaultOption.value = 'default';
-    defaultOption.textContent = defaultProfile
-        ? `Default (${defaultProfile.label})`
-        : 'Default (not set)';
-    selectEl.appendChild(defaultOption);
-
-    const profiles = getProfilesForProvider(provider);
-    if (profiles.length === 0) {
-        const emptyOption = document.createElement('option');
-        emptyOption.value = 'none';
-        emptyOption.textContent = `No ${formatProviderLabel(provider)} profiles`;
-        selectEl.appendChild(emptyOption);
-    } else {
-        profiles.forEach((profile) => {
-            const option = document.createElement('option');
-            option.value = profile.profileId;
-            option.textContent = formatProfileOptionLabel(profile);
-            selectEl.appendChild(option);
-        });
-    }
-
-    const selected = state.selectedProfiles[provider] || 'default';
-    const hasSelected = Array.from(selectEl.options).some(option => option.value === selected);
-    selectEl.value = hasSelected ? selected : 'default';
-    state.selectedProfiles[provider] = selectEl.value;
 }
 
 function renderProfileLists() {
@@ -744,30 +1512,6 @@ function handleProfileListClick(event) {
     }
 }
 
-function renderClaimWizard() {
-    if (!elements.claimWizard) return;
-    if (!state.pendingClaim) {
-        elements.claimWizard.hidden = true;
-        return;
-    }
-    const providerLabel = formatProviderLabel(state.pendingClaim.provider);
-    if (elements.claimTitle) {
-        elements.claimTitle.textContent = `Claim ${providerLabel} tab`;
-    }
-    if (elements.claimSubtitle) {
-        elements.claimSubtitle.textContent = `We opened ${providerLabel}. Select the model there, then claim it.`;
-    }
-    if (elements.claimModel) {
-        const full = normalizeInlineText(state.pendingClaim.modelLabel);
-        const display = truncateInlineText(full, 64);
-        elements.claimModel.textContent = full
-            ? `Detected model: ${display} (best effort)`
-            : 'Detected model: not available yet.';
-        elements.claimModel.title = full ? `Detected model: ${full}` : '';
-    }
-    elements.claimWizard.hidden = false;
-}
-
 function updatePausedActions() {
     if (!elements.pausedActions) return;
     elements.pausedActions.hidden = !state.paused;
@@ -794,23 +1538,22 @@ function rebindPausedProvider() {
 
 function handleConnectionStatus(message) {
     const { gemini, chatgpt } = message.status || {};
-    if (elements.statusChatGPT) {
-        elements.statusChatGPT.textContent = `ChatGPT: ${chatgpt ? 'ready' : 'offline'}`;
-        elements.statusChatGPT.style.borderColor = chatgpt ? 'rgba(245, 158, 11, 0.5)' : 'rgba(148, 163, 184, 0.3)';
-    }
-    if (elements.statusGemini) {
-        elements.statusGemini.textContent = `Gemini: ${gemini ? 'ready' : 'offline'}`;
-        elements.statusGemini.style.borderColor = gemini ? 'rgba(34, 197, 94, 0.5)' : 'rgba(148, 163, 184, 0.3)';
-    }
+    state.connectionStatus = {
+        chatgpt: Boolean(chatgpt),
+        gemini: Boolean(gemini)
+    };
+    updateProviderUi();
+    updateSendState();
 }
 
 function hydrateSession(session) {
-    if (!session) {
+    if (!session || (!session.isActive && !session.isPaused)) {
         setSessionState({ running: false, paused: false });
         state.sessionId = null;
         state.sessionProfiles = { chatgpt: null, gemini: null };
         state.pausedProvider = null;
         state.pausedReason = null;
+        setSessionStatus('Idle');
         return;
     }
 
@@ -828,13 +1571,8 @@ function hydrateSession(session) {
         setSessionStatus(session.isActive ? `Resumed round ${session.roundIndex || 1} of ${session.rounds}` : 'Idle');
     }
 
-    clearTranscript();
-    if (Array.isArray(session.messages)) {
-        const ordered = [...session.messages].sort((a, b) => {
-            if (a.turnIndex && b.turnIndex) return a.turnIndex - b.turnIndex;
-            return (a.timestamp || 0) - (b.timestamp || 0);
-        });
-        ordered.forEach(addMessage);
+    if (session.chatId && session.chatId !== state.activeChatId) {
+        loadChat(session.chatId);
     }
 }
 
@@ -867,6 +1605,7 @@ function handleSessionEnded(message) {
     setSessionState({ running: false, paused: false });
     setSessionStatus(message?.reason || 'Session completed');
     state.sessionId = null;
+    state.stopRequested = false;
     state.sessionProfiles = { chatgpt: null, gemini: null };
 }
 
@@ -874,6 +1613,7 @@ function handleSessionError(message) {
     setSessionState({ running: false, paused: false });
     setSessionStatus(`Error: ${message?.error || 'Unknown error'}`);
     state.sessionId = null;
+    state.stopRequested = false;
 }
 
 function clearTranscript() {
@@ -884,13 +1624,300 @@ function clearTranscript() {
     }
 }
 
-function addMessage(message) {
-    if (!elements.timeline) return;
+function ensureLoadOlderElements() {
+    if (elements.loadOlderWrap && elements.loadOlderButton) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'timeline-load-older';
+    wrap.hidden = true;
 
-    if (elements.emptyState && elements.timeline.contains(elements.emptyState)) {
-        elements.emptyState.remove();
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'ghost-button';
+    button.textContent = 'Load older messages';
+    button.addEventListener('click', loadOlderMessages);
+
+    wrap.appendChild(button);
+    elements.loadOlderWrap = wrap;
+    elements.loadOlderButton = button;
+}
+
+function updateLoadOlderUi() {
+    if (!elements.timeline) return;
+    ensureLoadOlderElements();
+    const hasCursor = Number.isFinite(state.activeChatNextCursorSequence);
+    const show = Boolean(state.activeChatId && state.activeChatHasMore && hasCursor);
+
+    if (!show) {
+        if (elements.loadOlderWrap && elements.timeline.contains(elements.loadOlderWrap)) {
+            elements.loadOlderWrap.remove();
+        }
+        return;
     }
 
+    if (elements.loadOlderWrap && !elements.timeline.contains(elements.loadOlderWrap)) {
+        elements.timeline.insertBefore(elements.loadOlderWrap, elements.timeline.firstChild);
+    }
+
+    elements.loadOlderWrap.hidden = false;
+    if (elements.loadOlderButton) {
+        elements.loadOlderButton.disabled = state.loadingOlderMessages;
+        elements.loadOlderButton.textContent = state.loadingOlderMessages ? 'Loading…' : 'Load older messages';
+    }
+}
+
+function loadOlderMessages() {
+    if (!state.activeChatId) return;
+    if (!state.activeChatHasMore) return;
+    if (!Number.isFinite(state.activeChatNextCursorSequence)) return;
+    if (state.loadingOlderMessages) return;
+
+    state.loadingOlderMessages = true;
+    updateLoadOlderUi();
+
+    const chatId = state.activeChatId;
+    const beforeSequence = state.activeChatNextCursorSequence;
+
+    sendMessage({ type: 'GET_MESSAGES_PAGE', chatId, beforeSequence, limit: HISTORY_PAGE_SIZE }, (response) => {
+        state.loadingOlderMessages = false;
+        if (!response) {
+            setSessionStatus('Error: Failed to load older messages.');
+            updateLoadOlderUi();
+            return;
+        }
+        if (response.ok === false) {
+            setSessionStatus(`Error: ${response.error || 'Failed to load older messages.'}`);
+            updateLoadOlderUi();
+            return;
+        }
+
+        const messages = Array.isArray(response.messages) ? response.messages : [];
+        if (messages.length === 0) {
+            state.activeChatHasMore = false;
+            state.activeChatNextCursorSequence = null;
+            updateLoadOlderUi();
+            return;
+        }
+
+        if (state.activeChat && Array.isArray(state.activeChat.messages)) {
+            state.activeChat.messages.unshift(...messages);
+        }
+        prependMessages(messages);
+
+        state.activeChatHasMore = Boolean(response.hasMore);
+        state.activeChatNextCursorSequence = Number.isFinite(response.nextCursorSequence)
+            ? response.nextCursorSequence
+            : null;
+        updateLoadOlderUi();
+    });
+}
+
+function isSafeLinkHref(href) {
+    if (!href) return false;
+    const value = String(href).trim();
+    if (!value) return false;
+    if (value.startsWith('#')) return true;
+    if (value.startsWith('/')) return true;
+    if (value.startsWith('./') || value.startsWith('../')) return true;
+    return /^https?:\/\//i.test(value) || /^mailto:/i.test(value);
+}
+
+function sanitizeRichHtmlToFragment(html) {
+    const template = document.createElement('template');
+    template.innerHTML = String(html || '');
+
+    const htmlTags = new Set([
+        'a',
+        'b',
+        'blockquote',
+        'br',
+        'caption',
+        'code',
+        'dd',
+        'del',
+        'details',
+        'div',
+        'dl',
+        'dt',
+        'em',
+        'h1',
+        'h2',
+        'h3',
+        'h4',
+        'h5',
+        'h6',
+        'hr',
+        'i',
+        'ins',
+        'kbd',
+        'li',
+        'ol',
+        'p',
+        'pre',
+        's',
+        'section',
+        'small',
+        'span',
+        'strong',
+        'sub',
+        'summary',
+        'sup',
+        'table',
+        'tbody',
+        'td',
+        'tfoot',
+        'th',
+        'thead',
+        'tr',
+        'u',
+        'ul'
+    ]);
+
+    const mathMlTags = new Set([
+        'annotation',
+        'maction',
+        'math',
+        'menclose',
+        'merror',
+        'mfenced',
+        'mfrac',
+        'mi',
+        'mlabeledtr',
+        'mmultiscripts',
+        'mn',
+        'mo',
+        'mover',
+        'mpadded',
+        'mphantom',
+        'mroot',
+        'mrow',
+        'ms',
+        'mspace',
+        'msqrt',
+        'mstyle',
+        'msub',
+        'msubsup',
+        'msup',
+        'mtable',
+        'mtd',
+        'mtext',
+        'mtr',
+        'munder',
+        'munderover',
+        'semantics'
+    ]);
+
+    const dropTags = new Set([
+        'audio',
+        'button',
+        'canvas',
+        'embed',
+        'form',
+        'iframe',
+        'img',
+        'input',
+        'link',
+        'meta',
+        'noscript',
+        'object',
+        'option',
+        'script',
+        'select',
+        'style',
+        'svg',
+        'textarea',
+        'video'
+    ]);
+
+    const mathNs = 'http://www.w3.org/1998/Math/MathML';
+
+    const sanitizeNode = (node) => {
+        if (!node) return null;
+        if (node.nodeType === Node.TEXT_NODE) {
+            return document.createTextNode(node.nodeValue || '');
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+            return null;
+        }
+
+        const tag = String(node.tagName || '').toLowerCase();
+        if (!tag) return null;
+        if (dropTags.has(tag)) return null;
+
+        const classAttr = node.getAttribute('class') || '';
+        if (/\bkatex-html\b/i.test(classAttr)) return null;
+
+        const isMath = mathMlTags.has(tag);
+        const isHtml = htmlTags.has(tag);
+        if (!isMath && !isHtml) {
+            const fragment = document.createDocumentFragment();
+            Array.from(node.childNodes).forEach((child) => {
+                const sanitizedChild = sanitizeNode(child);
+                if (sanitizedChild) fragment.appendChild(sanitizedChild);
+            });
+            return fragment;
+        }
+
+        const el = isMath
+            ? document.createElementNS(mathNs, tag)
+            : document.createElement(tag);
+
+        if (tag === 'a') {
+            const href = node.getAttribute('href') || '';
+            if (isSafeLinkHref(href)) {
+                el.setAttribute('href', href);
+                el.setAttribute('target', '_blank');
+                el.setAttribute('rel', 'noopener noreferrer');
+                const title = node.getAttribute('title');
+                if (title) el.setAttribute('title', title);
+            }
+        } else if (tag === 'td' || tag === 'th') {
+            const colspan = node.getAttribute('colspan');
+            const rowspan = node.getAttribute('rowspan');
+            if (colspan && /^[0-9]+$/.test(colspan)) el.setAttribute('colspan', colspan);
+            if (rowspan && /^[0-9]+$/.test(rowspan)) el.setAttribute('rowspan', rowspan);
+        } else if (isMath) {
+            const display = node.getAttribute('display');
+            if (display) el.setAttribute('display', display);
+            const xmlns = node.getAttribute('xmlns');
+            if (xmlns) el.setAttribute('xmlns', xmlns);
+            const encoding = node.getAttribute('encoding');
+            if (encoding && tag === 'annotation') el.setAttribute('encoding', encoding);
+        }
+
+        const ariaLabel = node.getAttribute('aria-label');
+        if (ariaLabel) el.setAttribute('aria-label', ariaLabel);
+        const ariaHidden = node.getAttribute('aria-hidden');
+        if (ariaHidden) el.setAttribute('aria-hidden', ariaHidden);
+
+        Array.from(node.childNodes).forEach((child) => {
+            const sanitizedChild = sanitizeNode(child);
+            if (sanitizedChild) el.appendChild(sanitizedChild);
+        });
+
+        return el;
+    };
+
+    const fragment = document.createDocumentFragment();
+    Array.from(template.content.childNodes).forEach((child) => {
+        const sanitized = sanitizeNode(child);
+        if (sanitized) fragment.appendChild(sanitized);
+    });
+    return fragment;
+}
+
+function postProcessRichContent(rootEl) {
+    if (!rootEl) return;
+    rootEl.querySelectorAll('table').forEach((table) => {
+        const parent = table.parentElement;
+        if (parent && parent.classList.contains('table-wrap')) return;
+        const wrap = document.createElement('div');
+        wrap.className = 'table-wrap';
+        table.replaceWith(wrap);
+        wrap.appendChild(table);
+    });
+}
+
+function buildMessageElement(message) {
     const container = document.createElement('div');
     container.className = `message ${message.role || message.llm || 'system'}`;
 
@@ -911,12 +1938,52 @@ function addMessage(message) {
 
     const content = document.createElement('div');
     content.className = 'message-content';
-    content.textContent = message.content || '';
+    const richHtml = typeof message.contentHtml === 'string' ? message.contentHtml : '';
+    if (richHtml && richHtml.trim()) {
+        container.classList.add('rich');
+        content.classList.add('rich');
+        content.replaceChildren(sanitizeRichHtmlToFragment(richHtml));
+        postProcessRichContent(content);
+    } else {
+        content.textContent = message.content || '';
+    }
 
     container.appendChild(meta);
     container.appendChild(content);
+    return container;
+}
 
-    elements.timeline.appendChild(container);
+function prependMessages(messages) {
+    if (!elements.timeline) return;
+    if (!Array.isArray(messages) || messages.length === 0) return;
+
+    if (elements.emptyState && elements.timeline.contains(elements.emptyState)) {
+        elements.emptyState.remove();
+    }
+
+    const beforeHeight = elements.timeline.scrollHeight;
+    const fragment = document.createDocumentFragment();
+    messages.forEach((message) => {
+        fragment.appendChild(buildMessageElement(message));
+    });
+
+    const afterLoadOlder = elements.loadOlderWrap && elements.timeline.contains(elements.loadOlderWrap)
+        ? elements.loadOlderWrap.nextSibling
+        : elements.timeline.firstChild;
+
+    elements.timeline.insertBefore(fragment, afterLoadOlder || null);
+    const afterHeight = elements.timeline.scrollHeight;
+    elements.timeline.scrollTop += Math.max(0, afterHeight - beforeHeight);
+}
+
+function addMessage(message) {
+    if (!elements.timeline) return;
+
+    if (elements.emptyState && elements.timeline.contains(elements.emptyState)) {
+        elements.emptyState.remove();
+    }
+
+    elements.timeline.appendChild(buildMessageElement(message));
 
     if (state.autoScroll) {
         elements.timeline.scrollTop = elements.timeline.scrollHeight;
@@ -940,14 +2007,6 @@ function normalizeInlineText(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
-function truncateInlineText(value, maxLen) {
-    const normalized = normalizeInlineText(value);
-    if (!normalized) return '';
-    if (!Number.isFinite(maxLen) || maxLen <= 0) return normalized;
-    if (normalized.length <= maxLen) return normalized;
-    return `${normalized.slice(0, Math.max(0, maxLen - 1))}…`;
-}
-
 function getProfilesForProvider(provider) {
     return state.profiles.filter(profile => profile.provider === provider);
 }
@@ -955,27 +2014,6 @@ function getProfilesForProvider(provider) {
 function getProfileById(profileId) {
     if (!profileId) return null;
     return state.profiles.find(profile => profile.profileId === profileId) || null;
-}
-
-function resolveSelectedProfileId(provider) {
-    const selection = state.selectedProfiles[provider] || 'default';
-    if (selection === 'default') {
-        return state.defaults?.[provider] || null;
-    }
-    return selection;
-}
-
-function isProfileSelectionValid(provider) {
-    const profileId = resolveSelectedProfileId(provider);
-    if (!profileId) return false;
-    const profile = getProfileById(profileId);
-    return Boolean(profile && profile.status === 'ok' && profile.tabId);
-}
-
-function formatProfileOptionLabel(profile) {
-    const statusSuffix = profile.status && profile.status !== 'ok' ? ` (${formatStatusLabel(profile.status)})` : '';
-    const inUse = profile.inUseBySessionId ? ' [in use]' : '';
-    return `${profile.label || 'Untitled'}${statusSuffix}${inUse}`;
 }
 
 function formatProfileTabLabel(profile) {

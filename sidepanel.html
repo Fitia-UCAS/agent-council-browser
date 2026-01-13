@@ -10,102 +10,186 @@
 </head>
 <body>
     <div class="app">
-        <header class="app-header">
-            <div class="title-group">
-                <div class="title">Multi-LLM Debate</div>
-                <div class="subtitle">Side panel session runner</div>
+        <header class="topbar">
+            <div class="topbar-left">
+                <button class="icon-button" id="chats-button" type="button" aria-label="Chats">
+                    <span class="material-symbols-rounded">menu</span>
+                </button>
+                <button class="icon-button" id="new-chat-button" type="button" aria-label="New chat" title="New chat">
+                    <span class="material-symbols-rounded">add</span>
+                </button>
+                <div class="topbar-title">Multi-LLM</div>
             </div>
-            <div class="status-chips">
-                <span class="chip" id="status-chatgpt">ChatGPT: checking</span>
-                <span class="chip" id="status-gemini">Gemini: checking</span>
+            <div class="topbar-right">
+                <button class="provider-pill provider-pill-chatgpt" id="status-chatgpt" type="button" aria-label="ChatGPT connection">ChatGPT</button>
+                <button class="provider-pill provider-pill-gemini" id="status-gemini" type="button" aria-label="Gemini connection">Gemini</button>
+                <button class="icon-button" id="settings-button" type="button" aria-label="Settings" title="Settings">
+                    <span class="material-symbols-rounded">settings</span>
+                </button>
             </div>
         </header>
 
-        <details class="settings provider-manager" id="provider-manager" open>
-            <summary class="settings-summary">
-                <span>Provider manager</span>
-                <span class="material-symbols-rounded">hub</span>
-            </summary>
-            <div class="settings-body">
-                <div class="profile-actions">
-                    <button class="ghost-button" id="use-current-chatgpt" type="button">Use current ChatGPT tab</button>
-                    <button class="ghost-button" id="use-current-gemini" type="button">Use current Gemini tab</button>
-                    <button class="ghost-button" id="open-chatgpt-tab" type="button">Open new ChatGPT tab</button>
-                    <button class="ghost-button" id="open-gemini-tab" type="button">Open new Gemini tab</button>
-                </div>
-                <div class="claim-wizard" id="claim-wizard" hidden>
-                    <div class="claim-content">
-                        <div class="claim-title" id="claim-title">Claim new tab</div>
-                        <div class="claim-subtitle" id="claim-subtitle">Select a model in the new tab, then claim it.</div>
-                        <div class="claim-meta" id="claim-model"></div>
-                    </div>
-                    <div class="claim-actions">
-                        <button class="ghost-button" id="claim-tab-button" type="button">Claim this tab</button>
-                        <button class="ghost-button" id="cancel-claim-button" type="button">Cancel</button>
-                    </div>
-                </div>
-                <div class="profile-columns">
-                    <section class="profile-column">
-                        <div class="profile-column-title">ChatGPT profiles</div>
-                        <div class="profile-list" id="profile-list-chatgpt"></div>
-                    </section>
-                    <section class="profile-column">
-                        <div class="profile-column-title">Gemini profiles</div>
-                        <div class="profile-list" id="profile-list-gemini"></div>
-                    </section>
+        <div class="session-banner" id="session-banner" hidden>
+            <div class="session-banner-text" id="session-status">Idle</div>
+            <div class="session-banner-actions paused-actions" id="paused-actions" hidden>
+                <button class="ghost-button" id="paused-focus" type="button">Focus tab</button>
+                <button class="ghost-button" id="paused-rebind" type="button">Reconnect</button>
+                <button class="ghost-button" id="resume-session" type="button">Resume</button>
+            </div>
+        </div>
+
+        <main class="timeline" id="timeline">
+            <div class="empty-state" id="empty-state">
+                <div class="empty-title">Connect to start</div>
+                <div class="empty-subtitle">Open ChatGPT and/or Gemini once. Then send messages from this panel.</div>
+                <div class="empty-actions">
+                    <button class="primary-button" id="connect-chatgpt" type="button">Connect ChatGPT</button>
+                    <button class="primary-button" id="connect-gemini" type="button">Connect Gemini</button>
+                    <button class="ghost-button" id="connect-both" type="button">Connect both</button>
                 </div>
             </div>
-        </details>
+        </main>
 
-        <details class="settings" id="settings" open>
-            <summary class="settings-summary">
-                <span>Session settings</span>
-                <span class="material-symbols-rounded">tune</span>
-            </summary>
-            <div class="settings-body">
-                <div class="settings-grid">
+        <footer class="composer">
+            <label class="composer-label" for="prompt-input">Prompt</label>
+            <textarea id="prompt-input" rows="3" maxlength="8000" placeholder="Send a message..."></textarea>
+            <div class="composer-hint" id="composer-hint" hidden></div>
+            <div class="composer-run-settings" id="composer-run-settings">
+                <div class="composer-run-row">
                     <label class="field">
-                        <span class="field-label">First LLM</span>
-                        <select id="first-llm">
+                        <span class="field-label">Send to</span>
+                        <select id="run-target">
+                            <option value="debate_chatgpt">Debate (ChatGPT → Gemini)</option>
+                            <option value="debate_gemini">Debate (Gemini → ChatGPT)</option>
                             <option value="chatgpt">ChatGPT</option>
                             <option value="gemini">Gemini</option>
+                            <option value="both">Both</option>
                         </select>
                     </label>
                     <label class="field">
                         <span class="field-label">Iterations</span>
                         <input id="iterations" type="number" min="1" max="12" value="3">
                     </label>
+                </div>
+            </div>
+            <div class="composer-actions">
+                <div class="composer-meta">
+                    <span id="char-count">0</span>/8000
+                </div>
+                <div class="composer-buttons">
+                    <button class="primary-button" id="send-button" type="button" disabled>Send</button>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <div class="drawer-backdrop" id="chats-backdrop" hidden></div>
+    <aside class="drawer drawer-left" id="chats-drawer" aria-hidden="true">
+        <div class="drawer-header">
+            <div class="drawer-title">Chats</div>
+            <button class="icon-button" id="close-chats" type="button" aria-label="Close chats">
+                <span class="material-symbols-rounded">close</span>
+            </button>
+        </div>
+        <div class="drawer-body">
+            <button class="drawer-primary" id="drawer-new-chat" type="button">
+                <span class="material-symbols-rounded">add</span>
+                <span>New chat</span>
+            </button>
+            <div class="chat-list" id="chat-list"></div>
+        </div>
+    </aside>
+
+    <div class="drawer-backdrop" id="settings-backdrop" hidden></div>
+    <aside class="drawer drawer-right" id="settings-drawer" aria-hidden="true">
+        <div class="drawer-header">
+            <div class="drawer-title">Settings</div>
+            <button class="icon-button" id="close-settings" type="button" aria-label="Close settings">
+                <span class="material-symbols-rounded">close</span>
+            </button>
+        </div>
+        <div class="drawer-body drawer-scroll">
+            <section class="drawer-section">
+                <div class="drawer-section-title">Connections</div>
+                <div class="connection-row">
+                    <div class="connection-meta">
+                        <div class="connection-name">ChatGPT</div>
+                        <div class="connection-status" id="connection-label-chatgpt">Checking…</div>
+                    </div>
+                    <div class="connection-actions">
+                        <button class="ghost-button" id="settings-connect-chatgpt" type="button">Connect</button>
+                        <button class="ghost-button" id="settings-focus-chatgpt" type="button">Focus</button>
+                    </div>
+                </div>
+                <div class="connection-row">
+                    <div class="connection-meta">
+                        <div class="connection-name">Gemini</div>
+                        <div class="connection-status" id="connection-label-gemini">Checking…</div>
+                    </div>
+                    <div class="connection-actions">
+                        <button class="ghost-button" id="settings-connect-gemini" type="button">Connect</button>
+                        <button class="ghost-button" id="settings-focus-gemini" type="button">Focus</button>
+                    </div>
+                </div>
+                <div class="settings-actions">
+                    <button class="ghost-button" id="refresh-profiles" type="button">Refresh connections</button>
+                </div>
+                <details class="drawer-details" id="advanced-connections">
+                    <summary class="drawer-details-summary">
+                        <span>Advanced</span>
+                        <span class="material-symbols-rounded">expand_more</span>
+                    </summary>
+                    <div class="drawer-details-body">
+                        <div class="profile-columns">
+                            <section class="profile-column">
+                                <div class="profile-column-title">ChatGPT connections</div>
+                                <div class="profile-list" id="profile-list-chatgpt"></div>
+                            </section>
+                            <section class="profile-column">
+                                <div class="profile-column-title">Gemini connections</div>
+                                <div class="profile-list" id="profile-list-gemini"></div>
+                            </section>
+                        </div>
+                    </div>
+                </details>
+            </section>
+
+            <section class="drawer-section">
+                <div class="drawer-section-title">Security</div>
+                <div class="prompt-note">
+                    Chat history is stored locally in an encrypted database. You will need your passphrase to unlock it after restarting Chrome.
+                </div>
+                <div class="settings-grid">
                     <label class="field">
-                        <span class="field-label">ChatGPT profile</span>
-                        <select id="chatgpt-profile"></select>
+                        <span class="field-label">Passphrase</span>
+                        <input id="history-passphrase" type="password" autocomplete="new-password" placeholder="Enter passphrase">
                     </label>
-                    <label class="field">
-                        <span class="field-label">Gemini profile</span>
-                        <select id="gemini-profile"></select>
+                    <label class="field" id="history-passphrase-confirm-field">
+                        <span class="field-label">Confirm</span>
+                        <input id="history-passphrase-confirm" type="password" autocomplete="new-password" placeholder="Confirm passphrase">
                     </label>
                 </div>
                 <div class="settings-actions">
-                    <button class="ghost-button" id="refresh-profiles" type="button">Refresh profiles</button>
+                    <button class="ghost-button" id="history-configure" type="button">Enable encryption</button>
+                    <button class="ghost-button" id="history-unlock" type="button">Unlock</button>
+                    <button class="ghost-button" id="history-lock" type="button">Lock</button>
+                    <button class="ghost-button" id="history-reset" type="button">Reset history</button>
+                </div>
+                <div class="prompt-status" id="history-status">History: checking…</div>
+            </section>
+
+            <section class="drawer-section">
+                <div class="drawer-section-title">Transcript</div>
+                <div class="settings-actions">
                     <label class="inline-toggle">
                         <input type="checkbox" id="auto-scroll" checked>
                         <span>Auto-scroll transcript</span>
                     </label>
                 </div>
-                <div class="session-status" id="session-status">Idle</div>
-                <div class="paused-actions" id="paused-actions" hidden>
-                    <button class="ghost-button" id="paused-focus" type="button">Focus tab</button>
-                    <button class="ghost-button" id="paused-rebind" type="button">Rebind to current tab</button>
-                    <button class="ghost-button" id="resume-session" type="button">Resume session</button>
-                </div>
-            </div>
-        </details>
+            </section>
 
-        <details class="settings" id="prompt-templates" open>
-            <summary class="settings-summary">
-                <span>Prompt templates</span>
-                <span class="material-symbols-rounded">code</span>
-            </summary>
-            <div class="settings-body">
+            <section class="drawer-section">
+                <div class="drawer-section-title">Templates</div>
                 <div class="prompt-note">
                     Customize how each agent is instructed (saved locally in this extension). Templates support placeholders like
                     <code>{other_llm}</code>, <code>{round}</code>, <code>{rounds}</code>, and <code>{other_answer}</code>.
@@ -149,30 +233,9 @@
                     <button class="ghost-button" id="prompt-reset" type="button">Reset to default</button>
                 </div>
                 <div class="prompt-status" id="prompt-status">Not loaded</div>
-            </div>
-        </details>
-
-        <main class="timeline" id="timeline">
-            <div class="empty-state" id="empty-state">
-                <div class="empty-title">No session yet</div>
-                <div class="empty-subtitle">Send a prompt to start the debate.</div>
-            </div>
-        </main>
-
-        <footer class="composer">
-            <label class="composer-label" for="prompt-input">Prompt</label>
-            <textarea id="prompt-input" rows="3" maxlength="8000" placeholder="Ask a question for ChatGPT and Gemini..."></textarea>
-            <div class="composer-actions">
-                <div class="composer-meta">
-                    <span id="char-count">0</span>/8000
-                </div>
-                <div class="composer-buttons">
-                    <button class="secondary-button" id="stop-button" type="button" disabled>Stop</button>
-                    <button class="primary-button" id="send-button" type="button" disabled>Start debate</button>
-                </div>
-            </div>
-        </footer>
-    </div>
+            </section>
+        </div>
+    </aside>
 
     <script src="sidepanel.js"></script>
 </body>

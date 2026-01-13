@@ -23,6 +23,17 @@ runTest('looksLikeReferenceList: detects Sources heading + url list', () => {
   assert.strictEqual(CaptureUtils.looksLikeReferenceList(text, { provider: 'chatgpt' }), true);
 });
 
+runTest('looksLikeReferenceList: detects Sources heading + title-only list', () => {
+  const text = [
+    'Sources',
+    'Example report one',
+    'Example report two',
+    'Example report three',
+    'Example report four'
+  ].join('\n');
+  assert.strictEqual(CaptureUtils.looksLikeReferenceList(text, { provider: 'chatgpt' }), true);
+});
+
 runTest('looksLikeReferenceList: detects +N list pattern', () => {
   const text = [
     'Title one',
@@ -74,4 +85,3 @@ runTest('chooseBestTextCandidate: returns sources list when it is the only candi
   const result = CaptureUtils.chooseBestTextCandidate([sourcesOnly], { provider: 'chatgpt' });
   assert.strictEqual(result.bestIndex, 0);
 });
-
