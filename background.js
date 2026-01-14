@@ -392,7 +392,37 @@ let activeDebateState = { ...defaultDebateState };
 
 // Attachment payloads are intentionally kept out of chrome.storage.local (quota + privacy).
 // They live in-memory for the active session only and are cleared once delivered.
-let activeSessionAttachments = null; // { sessionId, attachments: [...], sentTo: { chatgpt, gemini } }
+// sentTo: attachments have been accounted for that provider (uploaded+sent, or intentionally skipped).
+// preparedTo: attachments have been pre-attached to the provider UI but not necessarily sent yet.
+let activeSessionAttachments = null; // { sessionId, attachments: [...], sentTo: { [provider]: boolean }, preparedTo: { [provider]: boolean } }
+
+function normalizeProviderKey(provider) {
+    return String(provider || '').trim().toLowerCase();
+}
+
+function initProviderFlagMap(providers, initialValue) {
+    const map = {};
+    if (!Array.isArray(providers)) return map;
+    for (const provider of providers) {
+        const key = normalizeProviderKey(provider);
+        if (!key || Object.prototype.hasOwnProperty.call(map, key)) continue;
+        map[key] = Boolean(initialValue);
+    }
+    return map;
+}
+
+function listSessionProviders(session, fallbackProvider) {
+    const ordered = [];
+    const push = (provider) => {
+        const key = normalizeProviderKey(provider);
+        if (!key) return;
+        if (!ordered.includes(key)) ordered.push(key);
+    };
+    push(session?.firstLLM);
+    push(session?.secondLLM);
+    push(fallbackProvider);
+    return ordered;
+}
 
 function stripDataUrlPrefix(value) {
     const raw = typeof value === 'string' ? value.trim() : '';
@@ -439,7 +469,7 @@ function normalizeIncomingAttachments(input) {
     return output;
 }
 
-function setActiveSessionAttachments(sessionId, attachments) {
+function setActiveSessionAttachments(sessionId, attachments, providers = null) {
     const sanitized = normalizeIncomingAttachments(attachments);
     if (!sessionId || sanitized.length === 0) {
         activeSessionAttachments = null;
@@ -448,23 +478,59 @@ function setActiveSessionAttachments(sessionId, attachments) {
     activeSessionAttachments = {
         sessionId,
         attachments: sanitized,
-        sentTo: { chatgpt: false, gemini: false }
+        sentTo: initProviderFlagMap(providers, false),
+        preparedTo: initProviderFlagMap(providers, false)
     };
 }
 
-function getPendingSessionAttachments(sessionId, provider) {
+function hasSessionAttachments(sessionId) {
+    return Boolean(
+        activeSessionAttachments &&
+        activeSessionAttachments.sessionId === sessionId &&
+        Array.isArray(activeSessionAttachments.attachments) &&
+        activeSessionAttachments.attachments.length > 0
+    );
+}
+
+function getPendingSessionAttachments(sessionId, provider, { includePrepared = false } = {}) {
     if (!activeSessionAttachments || activeSessionAttachments.sessionId !== sessionId) return null;
-    const normalizedProvider = provider === 'gemini' ? 'gemini' : 'chatgpt';
+    const normalizedProvider = normalizeProviderKey(provider);
+    if (!normalizedProvider) return null;
     if (activeSessionAttachments.sentTo?.[normalizedProvider]) return null;
+    if (!includePrepared && activeSessionAttachments.preparedTo?.[normalizedProvider]) return null;
     return activeSessionAttachments.attachments || null;
+}
+
+function markSessionAttachmentsPrepared(session, provider) {
+    if (!session?.sessionId || !activeSessionAttachments || activeSessionAttachments.sessionId !== session.sessionId) return;
+    const normalizedProvider = normalizeProviderKey(provider);
+    if (!normalizedProvider) return;
+    if (!activeSessionAttachments.preparedTo || typeof activeSessionAttachments.preparedTo !== 'object') {
+        activeSessionAttachments.preparedTo = {};
+    }
+    activeSessionAttachments.preparedTo[normalizedProvider] = true;
+    if (!activeSessionAttachments.sentTo || typeof activeSessionAttachments.sentTo !== 'object') {
+        activeSessionAttachments.sentTo = {};
+    }
+    if (typeof activeSessionAttachments.sentTo[normalizedProvider] !== 'boolean') {
+        activeSessionAttachments.sentTo[normalizedProvider] = false;
+    }
 }
 
 function markSessionAttachmentsSent(session, provider) {
     if (!session?.sessionId || !activeSessionAttachments || activeSessionAttachments.sessionId !== session.sessionId) return;
-    const normalizedProvider = provider === 'gemini' ? 'gemini' : 'chatgpt';
+    const normalizedProvider = normalizeProviderKey(provider);
+    if (!normalizedProvider) return;
+    if (!activeSessionAttachments.sentTo || typeof activeSessionAttachments.sentTo !== 'object') {
+        activeSessionAttachments.sentTo = {};
+    }
     activeSessionAttachments.sentTo[normalizedProvider] = true;
+    if (!activeSessionAttachments.preparedTo || typeof activeSessionAttachments.preparedTo !== 'object') {
+        activeSessionAttachments.preparedTo = {};
+    }
+    activeSessionAttachments.preparedTo[normalizedProvider] = true;
 
-    const requiredProviders = session.secondLLM ? ['chatgpt', 'gemini'] : [session.firstLLM || normalizedProvider];
+    const requiredProviders = listSessionProviders(session, normalizedProvider);
     const allSent = requiredProviders.every((p) => activeSessionAttachments.sentTo?.[p]);
     if (allSent) {
         activeSessionAttachments = null;
@@ -1131,6 +1197,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[MLC Background] Received message:', message);
 
     switch (message.type) {
+        case 'GET_PROVIDER_CAPABILITIES':
+            sendResponse({ ok: true, capabilities: PROVIDER_CAPABILITIES });
+            break;
         case 'SEND_PROMPT':
             handleSendPrompt(message);
             sendResponse({ status: 'received', type: message.type });
@@ -1693,7 +1762,7 @@ async function handleStartDebateSession(message) {
             startedAt: now
         };
 
-        setActiveSessionAttachments(sessionId, message.attachments);
+        setActiveSessionAttachments(sessionId, message.attachments, requiredProviders);
         const attachmentsMeta = activeSessionAttachments?.sessionId === sessionId
             ? activeSessionAttachments.attachments.map(({ name, type, size }) => ({ name, type, size }))
             : null;
@@ -1777,6 +1846,29 @@ function getTurnLLM(session, turnIndex) {
 
 function formatLLMLabel(llmType) {
     return llmType === 'gemini' ? 'Gemini' : 'ChatGPT';
+}
+
+const PROVIDER_CAPABILITIES = {
+    chatgpt: {
+        attachments: {
+            mode: 'auto'
+        }
+    },
+    gemini: {
+        // Gemini currently blocks reliable programmatic uploads from extension content scripts:
+        // - No discoverable <input type="file"> in light DOM / open shadow roots
+        // - Synthetic drag/drop events are ignored (event.isTrusted === false)
+        // Fall back to sending text-only (no programmatic upload).
+        attachments: {
+            mode: 'manual'
+        }
+    }
+};
+
+function getProviderAttachmentMode(provider) {
+    const mode = PROVIDER_CAPABILITIES?.[provider]?.attachments?.mode;
+    if (mode === 'manual' || mode === 'none') return mode;
+    return 'auto';
 }
 
 const DEBATE_PROMPTS_PATH = 'debate_prompts.json';
@@ -2700,6 +2792,43 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
     });
 });
 
+async function prefetchSessionAttachments(session, excludeProvider) {
+    try {
+        const sessionId = session?.sessionId;
+        if (!sessionId) return;
+        if (!hasSessionAttachments(sessionId)) return;
+        if (!activeSessionAttachments || activeSessionAttachments.sessionId !== sessionId) return;
+
+        const attachments = activeSessionAttachments.attachments;
+        if (!Array.isArray(attachments) || attachments.length === 0) return;
+
+        const excludeKey = normalizeProviderKey(excludeProvider);
+        const providers = listSessionProviders(session).filter((provider) => provider && provider !== excludeKey);
+
+        for (const provider of providers) {
+            if (!hasSessionAttachments(sessionId)) return;
+            if (getProviderAttachmentMode(provider) !== 'auto') continue;
+            if (activeSessionAttachments.sentTo?.[provider]) continue;
+            if (activeSessionAttachments.preparedTo?.[provider]) continue;
+
+            const resolution = await resolveSessionTab(session, provider);
+            if (!resolution.ok) {
+                console.warn(`[MLC Attachments] Prefetch skipped for ${provider}: ${resolution.error || 'Tab validation failed.'}`);
+                continue;
+            }
+
+            try {
+                await injectAndPrepareAttachments(resolution.tabId, provider, attachments);
+                markSessionAttachmentsPrepared(session, provider);
+            } catch (error) {
+                console.warn(`[MLC Attachments] Prefetch failed for ${provider}:`, error?.message || error);
+            }
+        }
+    } catch (error) {
+        console.warn('[MLC Attachments] Prefetch threw unexpectedly:', error);
+    }
+}
+
 async function sendDebateTurn(session) {
     if (session.isPaused) return;
     const turnIndex = session.turnIndex;
@@ -2727,16 +2856,23 @@ async function sendDebateTurn(session) {
         totalRounds: session.rounds
     });
 
+    const sessionHasAttachments = hasSessionAttachments(session.sessionId);
+    const attachmentMode = sessionHasAttachments ? getProviderAttachmentMode(expectedLLM) : 'auto';
+    const shouldSkipAttachments = sessionHasAttachments && attachmentMode !== 'auto';
+    const attachmentsToSend = shouldSkipAttachments || !sessionHasAttachments
+        ? null
+        : getPendingSessionAttachments(session.sessionId, expectedLLM);
+
     try {
-        const attachments = getPendingSessionAttachments(session.sessionId, expectedLLM);
         await injectAndExecute(resolution.tabId, expectedLLM, promptText, {
             sessionId: session.sessionId,
             promptId: promptId,
             turnIndex: turnIndex,
-            attachments: attachments || undefined
+            attachments: attachmentsToSend || undefined
         });
-        if (attachments) {
+        if (sessionHasAttachments) {
             markSessionAttachmentsSent(session, expectedLLM);
+            await prefetchSessionAttachments(session, expectedLLM);
         }
 
         if (session.mode === 'direct' && session.chatId && Number.isFinite(session.userMessageSequence)) {
@@ -2754,7 +2890,28 @@ async function sendDebateTurn(session) {
             }
         }
     } catch (error) {
-        await pauseDebateSession(error.message || 'Failed to send prompt.', expectedLLM);
+        const code = error?.code;
+        const isAttachmentFailure = code === 'ATTACHMENTS_FAILED' || String(error?.message || '').includes('Attachment upload failed');
+        if (attachmentsToSend && attachmentsToSend.length > 0 && isAttachmentFailure) {
+            // Attach failed (DOM drift / provider change). Retry immediately without attachments so the run continues.
+            try {
+                markSessionAttachmentsSent(session, expectedLLM);
+                await injectAndExecute(resolution.tabId, expectedLLM, promptText, {
+                    sessionId: session.sessionId,
+                    promptId: promptId,
+                    turnIndex: turnIndex
+                });
+                if (sessionHasAttachments) {
+                    await prefetchSessionAttachments(session, expectedLLM);
+                }
+                return;
+            } catch (retryError) {
+                await pauseDebateSession(retryError?.message || error?.message || 'Failed to send prompt.', expectedLLM);
+                return;
+            }
+        }
+
+        await pauseDebateSession(error?.message || 'Failed to send prompt.', expectedLLM);
     }
 }
 
@@ -3303,18 +3460,69 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                 return promptId;
             } else {
                 console.error(`[MLC Background] simpleInteraction FAILED for ${llmType}:`, result.error);
-                throw new Error(result.error || `Unknown error in simpleInteraction for ${llmType}`);
+                const err = new Error(result.error || `Unknown error in simpleInteraction for ${llmType}`);
+                err.code = result.details?.stage === 'attachments' ? 'ATTACHMENTS_FAILED' : 'INTERACTION_FAILED';
+                err.provider = llmType;
+                err.details = result.details || null;
+                throw err;
             }
         } else {
             const noResultError = `No result or unexpected result structure from injection for ${llmType}.`;
             console.error(`[MLC Background] ${noResultError} Results:`, results);
-            throw new Error(noResultError);
+            const err = new Error(noResultError);
+            err.code = 'INJECT_NO_RESULT';
+            err.provider = llmType;
+            throw err;
         }
         
     } catch (error) {
         console.error(`[MLC Background] Error injecting script for ${llmType} into Tab ID ${tabId}:`, error.message, error.stack);
-        // Rethrow to be caught by processLLM
-        throw new Error(`Failed to interact with ${llmType}: ${error.message}`);
+        const wrapped = new Error(`Failed to interact with ${llmType}: ${error.message}`);
+        wrapped.code = error?.code || 'INTERACTION_FAILED';
+        wrapped.provider = llmType;
+        wrapped.details = error?.details || null;
+        wrapped.cause = error;
+        throw wrapped;
+    }
+}
+
+async function injectAndPrepareAttachments(tabId, llmType, attachments) {
+    try {
+        console.log(`[MLC Background] Prefetching attachments into Tab ID ${tabId} for ${llmType}.`);
+        const results = await chrome.scripting.executeScript({
+            target: { tabId: tabId },
+            func: simpleInteraction,
+            args: ['', llmType, attachments || null, { mode: 'prepare_attachments' }]
+        });
+
+        if (results && results[0] && results[0].result) {
+            const result = results[0].result;
+            if (result.success) {
+                console.log(`[MLC Background] simpleInteraction prepare_attachments SUCCEEDED for ${llmType}: ${result.method}`);
+                return result;
+            }
+            console.error(`[MLC Background] simpleInteraction prepare_attachments FAILED for ${llmType}:`, result.error);
+            const err = new Error(result.error || `Unknown error preparing attachments for ${llmType}`);
+            err.code = result.details?.stage === 'attachments' ? 'ATTACHMENTS_FAILED' : 'INTERACTION_FAILED';
+            err.provider = llmType;
+            err.details = result.details || null;
+            throw err;
+        }
+
+        const noResultError = `No result or unexpected result structure from preparation injection for ${llmType}.`;
+        console.error(`[MLC Background] ${noResultError} Results:`, results);
+        const err = new Error(noResultError);
+        err.code = 'INJECT_NO_RESULT';
+        err.provider = llmType;
+        throw err;
+    } catch (error) {
+        console.error(`[MLC Background] Error preparing attachments for ${llmType} in Tab ID ${tabId}:`, error.message, error.stack);
+        const wrapped = new Error(`Failed to prepare attachments for ${llmType}: ${error.message}`);
+        wrapped.code = error?.code || 'INTERACTION_FAILED';
+        wrapped.provider = llmType;
+        wrapped.details = error?.details || null;
+        wrapped.cause = error;
+        throw wrapped;
     }
 }
 
@@ -3323,8 +3531,12 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
 // ... (including onInstalled, sendMessageToPopup, onMessage, handleSendPrompt, handleForwardPrompt, processLLM, findLLMTab, injectAndExecute, checkConnectionStatus) ...
 
 // THIS IS THE FUNCTION THAT GETS INJECTED AND EXECUTED IN THE TARGET PAGE
-async function simpleInteraction(prompt, llmType, attachments) { // Added async here for the setTimeout
-    console.log(`[SimpleInteraction INJECTED] Attempting on ${llmType} with prompt: "${prompt.substring(0, 50)}..."`);
+async function simpleInteraction(prompt, llmType, attachments, options = null) { // Added async here for the setTimeout
+    const mode = options && typeof options === 'object' ? options.mode : null;
+    const prepareAttachmentsOnly = mode === 'prepare_attachments';
+    const promptText = typeof prompt === 'string' ? prompt : String(prompt || '');
+
+    console.log(`[SimpleInteraction INJECTED] Attempting on ${llmType} (mode=${prepareAttachmentsOnly ? 'prepare_attachments' : 'send'}) with prompt: "${promptText.substring(0, 50)}..."`);
 
     try {
         let inputElement = null;
@@ -3657,13 +3869,17 @@ async function simpleInteraction(prompt, llmType, attachments) { // Added async 
         }
 
         // --- Setting the prompt ---
+        if (prepareAttachmentsOnly) {
+            return { success: true, method: 'prepare_attachments' };
+        }
+
         if (llmType === 'chatgpt' && inputElement.tagName === 'TEXTAREA') {
             console.log(`[SimpleInteraction INJECTED] Setting prompt for ChatGPT TEXTAREA`);
             const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
             if (nativeInputValueSetter) {
-                nativeInputValueSetter.call(inputElement, prompt);
+                nativeInputValueSetter.call(inputElement, promptText);
             } else {
-                inputElement.value = prompt;
+                inputElement.value = promptText;
             }
             inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
             inputElement.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
@@ -3675,12 +3891,12 @@ async function simpleInteraction(prompt, llmType, attachments) { // Added async 
                    (inputElement.isContentEditable || inputElement.contentEditable === 'true')) { // General contentEditable case
             console.log(`[SimpleInteraction INJECTED] Setting prompt for contentEditable element (${llmType})`);
             document.execCommand('selectAll', false, null);
-            const insertSuccess = document.execCommand('insertText', false, prompt);
+            const insertSuccess = document.execCommand('insertText', false, promptText);
             console.log(`[SimpleInteraction INJECTED] Used document.execCommand('insertText'). Success: ${insertSuccess}.`);
             inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true })); // Ensure input event fires for contentEditable too
         } else { // Fallback for other input types (e.g. Gemini using a textarea which is rare)
             console.log(`[SimpleInteraction INJECTED] Setting prompt for standard input/textarea element (${llmType})`);
-            inputElement.value = prompt;
+            inputElement.value = promptText;
             inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
             inputElement.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
         }
@@ -3689,8 +3905,8 @@ async function simpleInteraction(prompt, llmType, attachments) { // Added async 
         await new Promise(resolve => setTimeout(resolve, 50));
         const currentText = (inputElement.isContentEditable || inputElement.contentEditable === 'true') ? inputElement.textContent : inputElement.value;
         console.log(`[SimpleInteraction INJECTED] Text in input field for ${llmType} after setting: "${currentText.substring(0,100)}..."`);
-        if (!currentText.includes(prompt.substring(0, Math.min(prompt.length, 50)))) {
-            console.warn(`[SimpleInteraction INJECTED] WARNING: Prompt may not have been set correctly for ${llmType}. Expected start: "${prompt.substring(0,50)}...", Got: "${currentText.substring(0,50)}..."`);
+        if (!currentText.includes(promptText.substring(0, Math.min(promptText.length, 50)))) {
+            console.warn(`[SimpleInteraction INJECTED] WARNING: Prompt may not have been set correctly for ${llmType}. Expected start: "${promptText.substring(0,50)}...", Got: "${currentText.substring(0,50)}..."`);
         }
 
         // --- Send (wait for uploads/attachment processing) ---
@@ -3873,11 +4089,16 @@ async function simpleInteraction(prompt, llmType, attachments) { // Added async 
         };
 
         const hasAttachments = attachmentPayloads.length > 0;
-        const readyTimeoutMs = hasAttachments ? 120000 : 6000;
-        const maxAttempts = hasAttachments ? 3 : 2;
+        const wantsLongReadyWait = (() => {
+            if (hasAttachments) return true;
+            const candidate = findSendButton({ allowDisabled: true, includeFallback: true });
+            return Boolean(candidate && isVisible(candidate) && isDisabledButton(candidate));
+        })();
+        const readyTimeoutMs = wantsLongReadyWait ? 120000 : 6000;
+        const maxAttempts = wantsLongReadyWait ? 3 : 2;
 
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            if (hasAttachments || attempt > 1) {
+            if (wantsLongReadyWait || attempt > 1) {
                 console.log(`[SimpleInteraction INJECTED] Waiting for Send to be ready for ${llmType} (attempt ${attempt}/${maxAttempts})...`);
                 await waitForSendReady({ timeoutMs: readyTimeoutMs });
             } else {

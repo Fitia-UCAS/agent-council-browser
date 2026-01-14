@@ -19,19 +19,23 @@ const state = {
     connecting: { chatgpt: false, gemini: false },
     profiles: [],
     defaults: { chatgpt: null, gemini: null },
-    sessionProfiles: { chatgpt: null, gemini: null },
-    promptConfig: null,
-    promptConfigSource: null,
-    attachments: [],
-    attachmentsLoading: false,
-    attachmentsWarning: ''
-};
+	    sessionProfiles: { chatgpt: null, gemini: null },
+	    promptConfig: null,
+	    promptConfigSource: null,
+	    providerCapabilities: null,
+	    manualUploadAckKey: null,
+	    attachments: [],
+	    attachmentsLoading: false,
+	    attachmentsWarning: ''
+	};
 
 const elements = {};
 const HISTORY_PAGE_SIZE = 60;
 const ATTACHMENTS_MAX_FILES = 10;
 const ATTACHMENTS_MAX_FILE_BYTES = 10 * 1024 * 1024;
 const ATTACHMENTS_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
+
+let attachmentsModalResolver = null;
 
 document.addEventListener('DOMContentLoaded', () => {
     elements.promptInput = document.getElementById('prompt-input');
@@ -105,6 +109,14 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.historyResetButton = document.getElementById('history-reset');
     elements.historyStatus = document.getElementById('history-status');
 
+    elements.modalBackdrop = document.getElementById('modal-backdrop');
+    elements.attachmentsModal = document.getElementById('attachments-modal');
+    elements.attachmentsModalTitle = document.getElementById('attachments-modal-title');
+    elements.attachmentsModalText = document.getElementById('attachments-modal-text');
+    elements.attachmentsModalOk = document.getElementById('attachments-modal-ok');
+    elements.attachmentsModalCancel = document.getElementById('attachments-modal-cancel');
+    elements.attachmentsModalClose = document.getElementById('attachments-modal-close');
+
     bindEvents();
     updateHistoryUi();
     updateCharCount();
@@ -116,6 +128,7 @@ document.addEventListener('DOMContentLoaded', () => {
     requestHistoryStatus();
     requestChatsState();
     requestActiveSession();
+    requestProviderCapabilities();
     loadPromptTemplates();
 });
 
@@ -328,6 +341,25 @@ function bindEvents() {
         elements.historyResetButton.addEventListener('click', resetHistory);
     }
 
+    if (elements.attachmentsModalOk) {
+        elements.attachmentsModalOk.addEventListener('click', () => closeAttachmentsModal(true));
+    }
+    if (elements.attachmentsModalCancel) {
+        elements.attachmentsModalCancel.addEventListener('click', () => closeAttachmentsModal(false));
+    }
+    if (elements.attachmentsModalClose) {
+        elements.attachmentsModalClose.addEventListener('click', () => closeAttachmentsModal(false));
+    }
+    if (elements.modalBackdrop) {
+        elements.modalBackdrop.addEventListener('click', () => closeAttachmentsModal(false));
+    }
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && isAttachmentsModalOpen()) {
+            event.preventDefault();
+            closeAttachmentsModal(false);
+        }
+    });
+
     if (chrome?.runtime?.onMessage) {
         chrome.runtime.onMessage.addListener(handleBackgroundMessage);
     }
@@ -341,6 +373,51 @@ function sendMessage(message, callback) {
         }
         if (callback) callback(response);
     });
+}
+
+function isAttachmentsModalOpen() {
+    return Boolean(elements.attachmentsModal && elements.attachmentsModal.hidden === false);
+}
+
+function showAttachmentsModal({ title, text }) {
+    if (!elements.attachmentsModal || !elements.modalBackdrop) {
+        return Promise.resolve(true);
+    }
+
+    if (attachmentsModalResolver) {
+        attachmentsModalResolver(true);
+        attachmentsModalResolver = null;
+    }
+
+    if (elements.attachmentsModalTitle) {
+        elements.attachmentsModalTitle.textContent = title || 'Attachments';
+    }
+    if (elements.attachmentsModalText) {
+        elements.attachmentsModalText.textContent = text || '';
+    }
+
+    elements.modalBackdrop.hidden = false;
+    elements.attachmentsModal.hidden = false;
+
+    window.setTimeout(() => {
+        if (elements.attachmentsModalOk) elements.attachmentsModalOk.focus();
+    }, 0);
+
+    return new Promise((resolve) => {
+        attachmentsModalResolver = resolve;
+    });
+}
+
+function closeAttachmentsModal(result) {
+    if (elements.attachmentsModal) {
+        elements.attachmentsModal.hidden = true;
+    }
+    if (elements.modalBackdrop) {
+        elements.modalBackdrop.hidden = true;
+    }
+    const resolver = attachmentsModalResolver;
+    attachmentsModalResolver = null;
+    if (resolver) resolver(Boolean(result));
 }
 
 function handleActionResponse(response) {
@@ -866,6 +943,28 @@ function getRequiredProvidersForRun(runTarget) {
     return [getDirectTarget(runTarget)];
 }
 
+function getProviderAttachmentMode(provider) {
+    const mode = state.providerCapabilities?.[provider]?.attachments?.mode;
+    if (mode === 'auto' || mode === 'manual' || mode === 'none') return mode;
+    // Safe defaults until a provider is explicitly supported.
+    return provider === 'chatgpt' ? 'auto' : 'manual';
+}
+
+function buildManualUploadAckKey(runTarget, attachments, manualProviders) {
+    const providersKey = Array.isArray(manualProviders) ? [...manualProviders].sort().join(',') : '';
+    const attachmentKey = Array.isArray(attachments)
+        ? attachments.map((item) => String(item?.id || '')).filter(Boolean).join(',')
+        : '';
+    return `${runTarget}|${providersKey}|${attachmentKey}`;
+}
+
+function getAttachmentProviderPlan(runTarget) {
+    const required = getRequiredProvidersForRun(runTarget);
+    const autoProviders = required.filter((provider) => getProviderAttachmentMode(provider) === 'auto');
+    const manualProviders = required.filter((provider) => getProviderAttachmentMode(provider) !== 'auto');
+    return { required, autoProviders, manualProviders };
+}
+
 function isRunConnected() {
     const runTarget = getRunTarget();
     return getRequiredProvidersForRun(runTarget).every((provider) => Boolean(state.connectionStatus?.[provider]));
@@ -1003,6 +1102,15 @@ function requestProfiles() {
 
 function requestConnectionStatus() {
     sendMessage({ type: 'CHECK_CONNECTION' });
+}
+
+function requestProviderCapabilities() {
+    sendMessage({ type: 'GET_PROVIDER_CAPABILITIES' }, (response) => {
+        if (!response || response.ok === false) return;
+        state.providerCapabilities = response.capabilities || null;
+        updateAttachmentsUi();
+        updateSendState();
+    });
 }
 
 function requestHistoryStatus() {
@@ -1385,6 +1493,12 @@ function updateComposerHint() {
             hint = 'Reading attachments…';
         } else if (state.attachmentsWarning) {
             hint = state.attachmentsWarning;
+        } else if (Array.isArray(state.attachments) && state.attachments.length > 0) {
+            const { manualProviders } = getAttachmentProviderPlan(runTarget);
+            if (manualProviders.length > 0) {
+                const label = manualProviders.map(formatProviderLabel).join(' + ');
+                hint = `${label} will receive text only (attachments are not auto-uploaded).`;
+            }
         }
     }
 
@@ -1436,15 +1550,19 @@ function updateEmptyState() {
     }
 }
 
-function handlePrimaryAction() {
+async function handlePrimaryAction() {
     if (state.running || state.paused) {
         stopSession();
         return;
     }
-    startSession();
+    try {
+        await startSession();
+    } catch (error) {
+        setSessionStatus(`Error: ${error?.message || 'Failed to start session.'}`);
+    }
 }
 
-function startSession() {
+async function startSession() {
     if (state.running || state.paused) return;
     if (!elements.promptInput) return;
 
@@ -1474,9 +1592,48 @@ function startSession() {
         return;
     }
 
-    state.stopRequested = false;
-    setSessionState({ running: true, paused: false });
-    setSessionStatus('Starting session...');
+	    const attachments = Array.isArray(state.attachments) ? state.attachments : [];
+	    const attachmentPlan = attachments.length > 0 ? getAttachmentProviderPlan(runTarget) : null;
+
+	    if (attachmentPlan && attachmentPlan.manualProviders.length > 0) {
+	        const { autoProviders, manualProviders } = attachmentPlan;
+	        const count = attachments.length;
+	        const totalBytes = getAttachmentsTotalBytes();
+	        const countLabel = count === 1 ? '1 attachment' : `${count} attachments`;
+	        const manualLabel = manualProviders.map(formatProviderLabel).join(' + ');
+	        const autoLabel = autoProviders.length > 0 ? autoProviders.map(formatProviderLabel).join(' + ') : 'none';
+	        const ackKey = buildManualUploadAckKey(runTarget, attachments, manualProviders);
+	        const alreadyAcknowledged = state.manualUploadAckKey === ackKey;
+	
+	        if (!alreadyAcknowledged) {
+	            const ok = await showAttachmentsModal({
+	                title: 'Manual upload required',
+	                text: [
+	                    `You attached ${countLabel} (${formatBytes(totalBytes)}).`,
+	                    '',
+	                    `Auto upload: ${autoLabel}`,
+	                    `Manual upload required: ${manualLabel}`,
+	                    '',
+	                    `We will send your message text-only to ${manualLabel} (no files).`,
+	                    `If you want ${manualLabel} to use the file, attach it manually in the ${manualLabel} tab.`,
+	                    '',
+	                    'Click OK to acknowledge this notice. This will not send your message.',
+	                    'After uploading manually, return here and click Send again.'
+	                ].join('\n')
+	            });
+	            if (!ok) return;
+	            state.manualUploadAckKey = ackKey;
+	            setSessionStatus(`Upload the file manually in ${manualLabel}, then click Send again.`);
+	            updateComposerHint();
+	            updateSendState();
+	            return;
+	        }
+	    }
+
+	    state.manualUploadAckKey = null;
+	    state.stopRequested = false;
+	    setSessionState({ running: true, paused: false });
+	    setSessionStatus('Starting session...');
 
     const payload = {
         type: 'START_RUN',
@@ -1484,8 +1641,8 @@ function startSession() {
         rounds,
         chatId: state.activeChatId
     };
-    if (Array.isArray(state.attachments) && state.attachments.length > 0) {
-        payload.attachments = state.attachments.map((item) => ({
+    if (attachmentPlan && attachmentPlan.autoProviders.length > 0) {
+        payload.attachments = attachments.map((item) => ({
             name: item.name,
             type: item.type,
             size: item.size,
@@ -1534,6 +1691,11 @@ function isFullyConnected() {
 
 function handleBackgroundMessage(message) {
     switch (message.type) {
+        case 'PROVIDER_CAPABILITIES':
+            state.providerCapabilities = message.capabilities || null;
+            updateAttachmentsUi();
+            updateSendState();
+            break;
         case 'TAB_PROFILES':
             handleProfileList(message);
             break;
