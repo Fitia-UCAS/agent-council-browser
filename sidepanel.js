@@ -15,6 +15,7 @@ const state = {
     pausedReason: null,
     autoScroll: true,
     historyStatus: { configured: false, unlocked: false },
+    historyUnlockPrompted: false,
     connectionStatus: { chatgpt: false, gemini: false },
     connecting: { chatgpt: false, gemini: false },
     profiles: [],
@@ -26,6 +27,7 @@ const state = {
 
 const elements = {};
 const HISTORY_PAGE_SIZE = 60;
+let passphrasePrompt = null;
 
 document.addEventListener('DOMContentLoaded', () => {
     elements.promptInput = document.getElementById('prompt-input');
@@ -84,14 +86,23 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.promptResetButton = document.getElementById('prompt-reset');
     elements.promptStatus = document.getElementById('prompt-status');
 
-    elements.historyPassphrase = document.getElementById('history-passphrase');
-    elements.historyPassphraseConfirm = document.getElementById('history-passphrase-confirm');
-    elements.historyPassphraseConfirmField = document.getElementById('history-passphrase-confirm-field');
     elements.historyConfigureButton = document.getElementById('history-configure');
     elements.historyUnlockButton = document.getElementById('history-unlock');
     elements.historyLockButton = document.getElementById('history-lock');
     elements.historyResetButton = document.getElementById('history-reset');
     elements.historyStatus = document.getElementById('history-status');
+
+    elements.passphraseBackdrop = document.getElementById('passphrase-backdrop');
+    elements.passphraseModal = document.getElementById('passphrase-modal');
+    elements.passphraseTitle = document.getElementById('passphrase-title');
+    elements.passphraseNote = document.getElementById('passphrase-note');
+    elements.passphraseInput = document.getElementById('passphrase-input');
+    elements.passphraseConfirmField = document.getElementById('passphrase-confirm-field');
+    elements.passphraseConfirm = document.getElementById('passphrase-confirm');
+    elements.passphraseError = document.getElementById('passphrase-error');
+    elements.passphraseCancel = document.getElementById('passphrase-cancel');
+    elements.passphraseClose = document.getElementById('passphrase-close');
+    elements.passphraseSubmit = document.getElementById('passphrase-submit');
 
     bindEvents();
     updateHistoryUi();
@@ -100,8 +111,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     requestProfiles();
     requestConnectionStatus();
-    requestHistoryStatus();
-    requestChatsState();
+    requestHistoryStatus({ hydrateChats: true, promptUnlock: true });
     requestActiveSession();
     loadPromptTemplates();
 });
@@ -253,14 +263,6 @@ function bindEvents() {
         elements.promptJsonSaveButton.addEventListener('click', savePromptTemplatesJson);
     }
 
-    if (elements.historyPassphrase) {
-        elements.historyPassphrase.addEventListener('input', updateHistoryUi);
-    }
-
-    if (elements.historyPassphraseConfirm) {
-        elements.historyPassphraseConfirm.addEventListener('input', updateHistoryUi);
-    }
-
     if (elements.historyConfigureButton) {
         elements.historyConfigureButton.addEventListener('click', configureHistoryEncryption);
     }
@@ -277,6 +279,35 @@ function bindEvents() {
         elements.historyResetButton.addEventListener('click', resetHistory);
     }
 
+    if (elements.passphraseClose) {
+        elements.passphraseClose.addEventListener('click', cancelPassphrasePrompt);
+    }
+
+    if (elements.passphraseCancel) {
+        elements.passphraseCancel.addEventListener('click', cancelPassphrasePrompt);
+    }
+
+    if (elements.passphraseBackdrop) {
+        elements.passphraseBackdrop.addEventListener('click', cancelPassphrasePrompt);
+    }
+
+    if (elements.passphraseSubmit) {
+        elements.passphraseSubmit.addEventListener('click', submitPassphrasePrompt);
+    }
+
+    document.addEventListener('keydown', (event) => {
+        if (!passphrasePrompt) return;
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            cancelPassphrasePrompt();
+            return;
+        }
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            submitPassphrasePrompt();
+        }
+    });
+
     if (chrome?.runtime?.onMessage) {
         chrome.runtime.onMessage.addListener(handleBackgroundMessage);
     }
@@ -289,6 +320,12 @@ function sendMessage(message, callback) {
             console.warn('Message failed:', message.type, chrome.runtime.lastError.message);
         }
         if (callback) callback(response);
+    });
+}
+
+function sendMessageAsync(message) {
+    return new Promise((resolve) => {
+        sendMessage(message, (response) => resolve(response));
     });
 }
 
@@ -306,6 +343,10 @@ function normalizeHistoryStatus(status) {
 
 function isHistoryReady() {
     return Boolean(state.historyStatus?.configured && state.historyStatus?.unlocked);
+}
+
+function isHistoryBlocked() {
+    return Boolean(state.historyStatus?.configured && !state.historyStatus?.unlocked);
 }
 
 function setHistoryStatus(text, isError = false) {
@@ -326,15 +367,11 @@ function updateHistoryUi() {
     const unlocked = Boolean(state.historyStatus?.unlocked);
 
     if (!configured) {
-        setHistoryStatus('History: encryption not configured. Set a passphrase and click Enable encryption.');
+        setHistoryStatus('History: off (optional).');
     } else if (!unlocked) {
-        setHistoryStatus('History: locked. Enter your passphrase and click Unlock.');
+        setHistoryStatus('History: locked.');
     } else {
         setHistoryStatus('History: unlocked.');
-    }
-
-    if (elements.historyPassphraseConfirmField) {
-        elements.historyPassphraseConfirmField.hidden = configured;
     }
 
     if (elements.historyConfigureButton) {
@@ -350,80 +387,181 @@ function updateHistoryUi() {
         elements.historyResetButton.hidden = !configured;
     }
 
-    const passphrase = String(elements.historyPassphrase?.value || '');
-    const confirm = String(elements.historyPassphraseConfirm?.value || '');
-    const passphraseReady = passphrase.trim().length > 0;
-    const matches = passphrase === confirm;
-
     if (elements.historyConfigureButton) {
-        elements.historyConfigureButton.disabled = configured || !passphraseReady || !matches;
+        elements.historyConfigureButton.disabled = configured;
     }
     if (elements.historyUnlockButton) {
-        elements.historyUnlockButton.disabled = !configured || unlocked || !passphraseReady;
+        elements.historyUnlockButton.disabled = !configured || unlocked;
     }
 }
 
-function configureHistoryEncryption() {
-    if (!elements.historyPassphrase || !elements.historyPassphraseConfirm) return;
-    const passphrase = elements.historyPassphrase.value;
-    const confirm = elements.historyPassphraseConfirm.value;
+function setPassphrasePromptError(text) {
+    if (!elements.passphraseError) return;
+    const normalized = String(text || '').trim();
+    elements.passphraseError.textContent = normalized;
+    elements.passphraseError.hidden = !normalized;
+}
+
+function openPassphrasePrompt({ mode, errorText = null } = {}) {
+    if (passphrasePrompt?.promise) {
+        setPassphrasePromptError(errorText);
+        return passphrasePrompt.promise;
+    }
+    if (!elements.passphraseBackdrop || !elements.passphraseModal || !elements.passphraseInput) {
+        return Promise.resolve(null);
+    }
+
+    const promptPromise = new Promise((resolve) => {
+        passphrasePrompt = { mode, resolve, promise: null };
+    });
+    passphrasePrompt.promise = promptPromise;
+
+    const configuring = mode === 'configure';
+    if (elements.passphraseTitle) {
+        elements.passphraseTitle.textContent = configuring ? 'Enable encryption' : 'Unlock history';
+    }
+    if (elements.passphraseNote) {
+        elements.passphraseNote.textContent = configuring
+            ? 'Set a passphrase to enable encrypted history.'
+            : 'Enter your passphrase to unlock encrypted history.';
+    }
+    if (elements.passphraseConfirmField) {
+        elements.passphraseConfirmField.hidden = !configuring;
+    }
+    if (elements.passphraseSubmit) {
+        elements.passphraseSubmit.textContent = configuring ? 'Enable' : 'Unlock';
+    }
+
+    elements.passphraseBackdrop.hidden = false;
+    elements.passphraseModal.hidden = false;
+    elements.passphraseModal.setAttribute('aria-hidden', 'false');
+    setPassphrasePromptError(errorText);
+
+    elements.passphraseInput.value = '';
+    if (elements.passphraseConfirm) elements.passphraseConfirm.value = '';
+
+    window.setTimeout(() => {
+        elements.passphraseInput?.focus();
+    }, 0);
+
+    return promptPromise;
+}
+
+function closePassphrasePrompt(result) {
+    if (!passphrasePrompt) return;
+    const { resolve } = passphrasePrompt;
+    passphrasePrompt = null;
+
+    if (elements.passphraseBackdrop) elements.passphraseBackdrop.hidden = true;
+    if (elements.passphraseModal) {
+        elements.passphraseModal.hidden = true;
+        elements.passphraseModal.setAttribute('aria-hidden', 'true');
+    }
+    if (elements.passphraseInput) elements.passphraseInput.value = '';
+    if (elements.passphraseConfirm) elements.passphraseConfirm.value = '';
+    setPassphrasePromptError(null);
+
+    resolve(result === undefined ? null : result);
+}
+
+function cancelPassphrasePrompt() {
+    closePassphrasePrompt(null);
+}
+
+function submitPassphrasePrompt() {
+    if (!passphrasePrompt) return;
+    const mode = passphrasePrompt.mode;
+    const passphrase = String(elements.passphraseInput?.value || '');
+    const confirm = String(elements.passphraseConfirm?.value || '');
+
     if (!passphrase.trim()) {
-        setHistoryStatus('Passphrase is empty.', true);
+        setPassphrasePromptError('Passphrase is empty.');
+        elements.passphraseInput?.focus();
         return;
     }
-    if (passphrase !== confirm) {
-        setHistoryStatus('Passphrases do not match.', true);
+    if (mode === 'configure' && passphrase !== confirm) {
+        setPassphrasePromptError('Passphrases do not match.');
+        elements.passphraseConfirm?.focus();
         return;
     }
+
+    closePassphrasePrompt(passphrase);
+}
+
+async function promptForPassphrase({ mode, errorText = null } = {}) {
+    if (!elements.passphraseBackdrop || !elements.passphraseModal || !elements.passphraseInput) {
+        const label = mode === 'configure' ? 'Set a passphrase' : 'Enter your passphrase';
+        const first = window.prompt(label);
+        if (first === null) return null;
+        const passphrase = String(first || '');
+        if (!passphrase.trim()) return null;
+        if (mode === 'configure') {
+            const confirmValue = window.prompt('Confirm passphrase');
+            if (confirmValue === null) return null;
+            if (passphrase !== String(confirmValue || '')) {
+                window.alert('Passphrases do not match.');
+                return null;
+            }
+        }
+        return passphrase;
+    }
+    return openPassphrasePrompt({ mode, errorText });
+}
+
+async function configureHistoryEncryption() {
+    if (state.historyStatus?.configured) return;
+
+    const passphrase = await promptForPassphrase({ mode: 'configure' });
+    if (passphrase === null) return;
 
     setHistoryStatus('Configuring encryption…');
-    sendMessage({ type: 'HISTORY_CONFIGURE', passphrase }, (response) => {
-        if (!response || response.ok === false) {
-            const code = response?.code || '';
-            if (code === 'ENCRYPTION_ALREADY_CONFIGURED') {
-                setHistoryStatus('Encryption already enabled. Use Unlock instead.', true);
-                requestHistoryStatus();
-                return;
-            }
-            setHistoryStatus(`Error: ${response?.error || 'Failed to configure encryption.'}`, true);
+    const response = await sendMessageAsync({ type: 'HISTORY_CONFIGURE', passphrase });
+    if (!response || response.ok === false) {
+        const code = response?.code || '';
+        if (code === 'ENCRYPTION_ALREADY_CONFIGURED') {
+            setHistoryStatus('Encryption already enabled. Use Unlock instead.', true);
+            requestHistoryStatus({ hydrateChats: true, promptUnlock: false });
             return;
         }
-        elements.historyPassphrase.value = '';
-        elements.historyPassphraseConfirm.value = '';
-        updateHistoryStatus(response.status);
-        requestChatsState();
-    });
-}
-
-function unlockHistory() {
-    if (!elements.historyPassphrase) return;
-    const passphrase = elements.historyPassphrase.value;
-    if (!passphrase.trim()) {
-        setHistoryStatus('Passphrase is empty.', true);
+        setHistoryStatus(`Error: ${response?.error || 'Failed to configure encryption.'}`, true);
         return;
     }
+    updateHistoryStatus(response.status);
+    requestChatsState();
+}
 
-    setHistoryStatus('Unlocking…');
-    sendMessage({ type: 'HISTORY_UNLOCK', passphrase }, (response) => {
+async function unlockHistory({ auto = false } = {}) {
+    if (!state.historyStatus?.configured) {
+        if (!auto) setHistoryStatus('Encryption is not configured yet. Enable encryption first.', true);
+        return;
+    }
+    if (state.historyStatus?.unlocked) return;
+
+    let errorText = null;
+    while (true) {
+        const passphrase = await promptForPassphrase({ mode: 'unlock', errorText });
+        if (passphrase === null) return;
+
+        setHistoryStatus('Unlocking…');
+        const response = await sendMessageAsync({ type: 'HISTORY_UNLOCK', passphrase });
         if (!response || response.ok === false) {
             const code = response?.code || '';
             if (code === 'PASSPHRASE_INVALID') {
-                setHistoryStatus('Incorrect passphrase.', true);
-                return;
+                errorText = 'Incorrect passphrase.';
+                continue;
             }
             if (code === 'ENCRYPTION_NOT_CONFIGURED') {
-                setHistoryStatus('Encryption is not configured yet. Use Enable encryption first.', true);
-                requestHistoryStatus();
+                setHistoryStatus('Encryption is not configured yet. Enable encryption first.', true);
+                requestHistoryStatus({ hydrateChats: false, promptUnlock: false });
                 return;
             }
             setHistoryStatus(`Error: ${response?.error || 'Failed to unlock history.'}`, true);
             return;
         }
-        elements.historyPassphrase.value = '';
-        if (elements.historyPassphraseConfirm) elements.historyPassphraseConfirm.value = '';
         updateHistoryStatus(response.status);
         requestChatsState();
-    });
+        return;
+    }
 }
 
 function lockHistory() {
@@ -716,7 +854,7 @@ function updateSendState() {
     const locked = state.running || state.paused;
     if (locked) {
         elements.sendButton.textContent = 'Stop';
-        elements.sendButton.disabled = !isHistoryReady();
+        elements.sendButton.disabled = false;
         updateComposerHint();
         return;
     }
@@ -726,7 +864,7 @@ function updateSendState() {
     const iterations = debate ? (parseInt(elements.iterations.value, 10) || 0) : 1;
     const connected = isRunConnected();
     elements.sendButton.textContent = 'Send';
-    elements.sendButton.disabled = !hasPrompt || iterations <= 0 || !connected || !isHistoryReady();
+    elements.sendButton.disabled = !hasPrompt || iterations <= 0 || !connected || isHistoryBlocked();
     updateComposerHint();
     updateEmptyState();
 }
@@ -765,13 +903,28 @@ function requestConnectionStatus() {
     sendMessage({ type: 'CHECK_CONNECTION' });
 }
 
-function requestHistoryStatus() {
+function requestHistoryStatus({ hydrateChats = false, promptUnlock = false } = {}) {
     sendMessage({ type: 'HISTORY_STATUS' }, (response) => {
         if (!response || response.ok === false) {
             updateHistoryStatus(response?.status || { configured: false, unlocked: false });
             return;
         }
+
         updateHistoryStatus(response.status);
+
+        const configured = Boolean(response.status?.configured);
+        const unlocked = Boolean(response.status?.unlocked);
+
+        if (hydrateChats && configured && unlocked) {
+            requestChatsState();
+        }
+
+        if (promptUnlock && configured && !unlocked && !state.historyUnlockPrompted) {
+            state.historyUnlockPrompted = true;
+            unlockHistory({ auto: true }).catch((error) => {
+                console.warn('Auto-unlock failed:', error);
+            });
+        }
     });
 }
 
@@ -789,9 +942,13 @@ function requestChatsState() {
             if (response.status) updateHistoryStatus(response.status);
             const code = response.code || '';
             if (code === 'HISTORY_LOCKED') {
-                setSessionStatus('History is locked. Unlock it in Settings → Security.');
+                setSessionStatus('Unlock history to continue.');
+                unlockHistory({ auto: true }).catch((error) => {
+                    console.warn('Unlock failed:', error);
+                });
             } else if (code === 'HISTORY_NOT_CONFIGURED') {
-                setSessionStatus('Set an encryption passphrase in Settings → Security to enable chat history.');
+                setSessionStatus('History is off. Enable encryption in Settings → Security to save chats.');
+                openSettingsDrawer();
             } else {
                 setSessionStatus(`Error: ${response.error || 'Failed to load chats.'}`);
             }
@@ -823,10 +980,15 @@ function handleChatsState(payload) {
 
 function createNewChat() {
     if (!isHistoryReady()) {
-        setSessionStatus(state.historyStatus?.configured
-            ? 'History is locked. Unlock it in Settings → Security.'
-            : 'Set an encryption passphrase in Settings → Security to enable chat history.');
-        openSettingsDrawer();
+        if (isHistoryBlocked()) {
+            setSessionStatus('Unlock history to continue.');
+            unlockHistory({ auto: true }).catch((error) => {
+                console.warn('Unlock failed:', error);
+            });
+        } else {
+            setSessionStatus('History is off. Enable encryption in Settings → Security to save chats.');
+            openSettingsDrawer();
+        }
         return;
     }
     if (state.running || state.paused) {
@@ -859,12 +1021,14 @@ function loadChat(chatId) {
             if (response.status) updateHistoryStatus(response.status);
             const code = response.code || '';
             if (code === 'HISTORY_LOCKED') {
-                setSessionStatus('History is locked. Unlock it in Settings → Security.');
-                openSettingsDrawer();
+                setSessionStatus('Unlock history to continue.');
+                unlockHistory({ auto: true }).catch((error) => {
+                    console.warn('Unlock failed:', error);
+                });
                 return;
             }
             if (code === 'HISTORY_NOT_CONFIGURED') {
-                setSessionStatus('Set an encryption passphrase in Settings → Security to enable chat history.');
+                setSessionStatus('History is off. Enable encryption in Settings → Security to save chats.');
                 openSettingsDrawer();
                 return;
             }
@@ -892,10 +1056,15 @@ function loadChat(chatId) {
 
 function handleChatListClick(event) {
     if (!isHistoryReady()) {
-        setSessionStatus(state.historyStatus?.configured
-            ? 'History is locked. Unlock it in Settings → Security.'
-            : 'Set an encryption passphrase in Settings → Security to enable chat history.');
-        openSettingsDrawer();
+        if (isHistoryBlocked()) {
+            setSessionStatus('Unlock history to continue.');
+            unlockHistory({ auto: true }).catch((error) => {
+                console.warn('Unlock failed:', error);
+            });
+        } else {
+            setSessionStatus('History is off. Enable encryption in Settings → Security to save chats.');
+            openSettingsDrawer();
+        }
         return;
     }
     const item = event.target.closest('.chat-item');
@@ -928,8 +1097,8 @@ function renderChatList() {
         const empty = document.createElement('div');
         empty.className = 'profile-empty';
         empty.textContent = state.historyStatus?.configured
-            ? 'History is locked. Unlock it in Settings → Security.'
-            : 'Set an encryption passphrase in Settings → Security to enable chat history.';
+            ? 'History is locked. Unlock it to access chats.'
+            : 'History is off. Enable encryption in Settings → Security to save chats.';
         elements.chatList.appendChild(empty);
         return;
     }
@@ -1118,22 +1287,16 @@ function updateComposerHint() {
         ? 'ChatGPT + Gemini'
         : formatProviderLabel(requiredProviders[0]);
     const connected = isRunConnected();
-    const historyReady = isHistoryReady();
+    const historyBlocked = isHistoryBlocked();
     const hasPrompt = elements.promptInput.value.trim().length > 0;
     const debate = isDebateTarget(runTarget);
     const iterations = debate ? (parseInt(elements.iterations?.value, 10) || 0) : 1;
 
     let hint = '';
-    if (!connected && !historyReady) {
-        hint = state.historyStatus?.configured
-            ? `Connect ${requiredLabel}, then unlock history in Settings → Security.`
-            : `Connect ${requiredLabel}, then set a passphrase in Settings → Security.`;
-    } else if (!connected) {
+    if (!connected) {
         hint = `Connect ${requiredLabel} to start.`;
-    } else if (!historyReady) {
-        hint = state.historyStatus?.configured
-            ? 'Unlock history in Settings → Security.'
-            : 'Set an encryption passphrase in Settings → Security to enable chat history.';
+    } else if (historyBlocked) {
+        hint = 'Unlock history to continue.';
     } else if (!hasPrompt) {
         hint = '';
     } else if (debate && iterations <= 0) {
@@ -1144,33 +1307,32 @@ function updateComposerHint() {
     elements.composerHint.hidden = !hint;
     elements.promptInput.placeholder = !connected
         ? `Connect ${requiredLabel} to start...`
-        : (historyReady ? 'Send a message...' : 'Unlock history in Settings → Security...');
+        : (historyBlocked ? 'Unlock history to continue...' : 'Send a message...');
 }
 
 function updateEmptyState() {
     if (!elements.emptyState || !elements.timeline) return;
-    const hasMessages = Boolean(state.activeChat && Array.isArray(state.activeChat.messages) && state.activeChat.messages.length > 0);
-    if (hasMessages) return;
+    const hasMessages = Boolean(elements.timeline.querySelector('.message'));
+    if (hasMessages) {
+        if (elements.timeline.contains(elements.emptyState)) {
+            elements.emptyState.remove();
+        }
+        return;
+    }
 
     if (!elements.timeline.contains(elements.emptyState)) {
         elements.timeline.appendChild(elements.emptyState);
     }
 
     const connected = isRunConnected();
-    const historyReady = isHistoryReady();
+    const historyBlocked = isHistoryBlocked();
     const titleEl = elements.emptyState.querySelector('.empty-title');
     const subtitleEl = elements.emptyState.querySelector('.empty-subtitle');
     const actionsEl = elements.emptyState.querySelector('.empty-actions');
 
-    if (connected && !historyReady) {
-        if (titleEl) {
-            titleEl.textContent = state.historyStatus?.configured ? 'Unlock history' : 'Set passphrase';
-        }
-        if (subtitleEl) {
-            subtitleEl.textContent = state.historyStatus?.configured
-                ? 'Unlock encrypted history in Settings → Security to access your chats.'
-                : 'Set an encryption passphrase in Settings → Security to enable chat history.';
-        }
+    if (connected && historyBlocked) {
+        if (titleEl) titleEl.textContent = 'Unlock history';
+        if (subtitleEl) subtitleEl.textContent = 'Enter your passphrase to unlock encrypted history.';
         if (actionsEl) {
             actionsEl.hidden = true;
         }
@@ -1200,11 +1362,11 @@ function startSession() {
     if (state.running || state.paused) return;
     if (!elements.promptInput) return;
 
-    if (!isHistoryReady()) {
-        setSessionStatus(state.historyStatus?.configured
-            ? 'History is locked. Unlock it in Settings → Security.'
-            : 'Set an encryption passphrase in Settings → Security to enable chat history.');
-        openSettingsDrawer();
+    if (isHistoryBlocked()) {
+        setSessionStatus('Unlock history to continue.');
+        unlockHistory({ auto: true }).catch((error) => {
+            console.warn('Unlock failed:', error);
+        });
         return;
     }
 

@@ -1478,33 +1478,31 @@ async function handleStartDebateSession(message) {
             return;
         }
 
-        let historyStore = null;
-        try {
-            historyStore = await requireHistoryUnlocked();
-        } catch (error) {
-            const hint = error?.code === 'HISTORY_NOT_CONFIGURED'
-                ? 'Set an encryption passphrase in Settings → Security to enable chat history.'
-                : 'Unlock history in Settings → Security to enable chat history.';
-            sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: hint });
-            sendMessageToPopup({ type: 'HISTORY_STATUS', status: await getHistoryStatus().catch(() => ({ configured: false, unlocked: false })) });
-            return;
-        }
+	        let historyStore = null;
+	        try {
+	            historyStore = await requireHistoryUnlocked();
+	        } catch (error) {
+	            historyStore = null;
+	        }
 
-        if (activeDebateState.isActive) {
-            await endDebateSession('Session replaced by a new request.');
-        }
+	        if (activeDebateState.isActive) {
+	            await endDebateSession('Session replaced by a new request.');
+	        }
 
-        let profileIds = { chatgpt: null, gemini: null };
-        const tabIds = { chatgpt: null, gemini: null };
-        const chatsState = await loadChatsState();
-        const chatIdCandidate = requestedChatId || chatsState.activeChatId;
-        const hasCandidate = chatIdCandidate && Array.isArray(chatsState.chats)
-            ? chatsState.chats.some((chat) => chat.chatId === chatIdCandidate)
-            : false;
-        const chatId = hasCandidate ? chatIdCandidate : chatsState.activeChatId;
-        if (chatId && chatsState.activeChatId !== chatId) {
-            await setActiveChat(chatId);
-        }
+	        let profileIds = { chatgpt: null, gemini: null };
+	        const tabIds = { chatgpt: null, gemini: null };
+	        let chatId = null;
+	        if (historyStore) {
+	            const chatsState = await loadChatsState();
+	            const chatIdCandidate = requestedChatId || chatsState.activeChatId;
+	            const hasCandidate = chatIdCandidate && Array.isArray(chatsState.chats)
+	                ? chatsState.chats.some((chat) => chat.chatId === chatIdCandidate)
+	                : false;
+	            chatId = hasCandidate ? chatIdCandidate : chatsState.activeChatId;
+	            if (chatId && chatsState.activeChatId !== chatId) {
+	                await setActiveChat(chatId);
+	            }
+	        }
 
         let isFollowUp = false;
         let conversationContext = '';

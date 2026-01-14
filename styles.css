@@ -552,6 +552,7 @@ body {
 
 select,
 input[type="number"],
+input[type="password"],
 textarea {
   font-family: var(--font-family-sans);
   background: var(--bg-tertiary);
@@ -565,6 +566,7 @@ textarea {
 
 select:focus,
 input[type="number"]:focus,
+input[type="password"]:focus,
 textarea:focus {
   border-color: var(--accent-primary);
   box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.18);
@@ -965,6 +967,61 @@ textarea:focus {
   z-index: 40;
   background: rgba(3, 6, 12, 0.55);
   backdrop-filter: blur(3px);
+}
+
+#passphrase-backdrop {
+  z-index: 55;
+}
+
+.modal {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 60;
+  width: min(420px, 92vw);
+  max-height: min(80vh, 560px);
+  background: rgba(12, 18, 26, 0.98);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-strong);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  background: rgba(12, 18, 26, 0.98);
+}
+
+.modal-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.modal-body {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.modal-actions {
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  border-top: 1px solid var(--border-soft);
+  background: rgba(12, 18, 26, 0.98);
 }
 
 .drawer {
