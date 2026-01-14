@@ -72,6 +72,18 @@
                     </label>
                 </div>
             </div>
+            <div class="composer-attachments" id="composer-attachments">
+                <input id="attachment-input" type="file" multiple hidden>
+                <div class="composer-attachments-row">
+                    <button class="ghost-button composer-attachments-button" id="attachment-button" type="button">
+                        <span class="material-symbols-rounded">attach_file</span>
+                        <span>Attach</span>
+                    </button>
+                    <div class="composer-attachments-summary" id="attachment-summary">No attachments</div>
+                    <button class="ghost-button danger composer-attachments-clear" id="attachment-clear" type="button" hidden>Clear</button>
+                </div>
+                <div class="attachment-list" id="attachment-list" hidden></div>
+            </div>
             <div class="composer-actions">
                 <div class="composer-meta">
                     <span id="char-count">0</span> chars

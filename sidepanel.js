@@ -21,11 +21,17 @@ const state = {
     defaults: { chatgpt: null, gemini: null },
     sessionProfiles: { chatgpt: null, gemini: null },
     promptConfig: null,
-    promptConfigSource: null
+    promptConfigSource: null,
+    attachments: [],
+    attachmentsLoading: false,
+    attachmentsWarning: ''
 };
 
 const elements = {};
 const HISTORY_PAGE_SIZE = 60;
+const ATTACHMENTS_MAX_FILES = 10;
+const ATTACHMENTS_MAX_FILE_BYTES = 10 * 1024 * 1024;
+const ATTACHMENTS_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 
 document.addEventListener('DOMContentLoaded', () => {
     elements.promptInput = document.getElementById('prompt-input');
@@ -42,6 +48,12 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.sessionStatus = document.getElementById('session-status');
     elements.sessionBanner = document.getElementById('session-banner');
     elements.composerHint = document.getElementById('composer-hint');
+
+    elements.attachmentInput = document.getElementById('attachment-input');
+    elements.attachmentButton = document.getElementById('attachment-button');
+    elements.attachmentSummary = document.getElementById('attachment-summary');
+    elements.attachmentClear = document.getElementById('attachment-clear');
+    elements.attachmentList = document.getElementById('attachment-list');
 
     elements.profileListChatgpt = document.getElementById('profile-list-chatgpt');
     elements.profileListGemini = document.getElementById('profile-list-gemini');
@@ -96,6 +108,7 @@ document.addEventListener('DOMContentLoaded', () => {
     bindEvents();
     updateHistoryUi();
     updateCharCount();
+    updateAttachmentsUi();
     updateSendState();
 
     requestProfiles();
@@ -122,6 +135,44 @@ function bindEvents() {
 
     if (elements.sendButton) {
         elements.sendButton.addEventListener('click', handlePrimaryAction);
+    }
+
+    if (elements.attachmentButton && elements.attachmentInput) {
+        elements.attachmentButton.addEventListener('click', () => {
+            if (state.running || state.paused || state.attachmentsLoading) return;
+            elements.attachmentInput.click();
+        });
+    }
+
+    if (elements.attachmentInput) {
+        elements.attachmentInput.addEventListener('change', (event) => {
+            const files = Array.from(event.target?.files || []);
+            // Allow selecting the same file twice in a row.
+            event.target.value = '';
+            if (files.length === 0) return;
+            addAttachments(files).catch((error) => {
+                console.warn('[MLC UI] Failed to add attachments:', error);
+                state.attachmentsLoading = false;
+                state.attachmentsWarning = 'Failed to read attachments.';
+                updateAttachmentsUi();
+                updateSendState();
+            });
+        });
+    }
+
+    if (elements.attachmentClear) {
+        elements.attachmentClear.addEventListener('click', clearAttachments);
+    }
+
+    if (elements.attachmentList) {
+        elements.attachmentList.addEventListener('click', (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLElement)) return;
+            if (target.dataset.action === 'remove-attachment') {
+                const id = target.dataset.attachmentId;
+                if (id) removeAttachment(id);
+            }
+        });
     }
 
     if (elements.refreshProfiles) {
@@ -597,6 +648,191 @@ function updateCharCount() {
     elements.charCount.textContent = String(elements.promptInput.value.length);
 }
 
+function formatBytes(bytes) {
+    const value = Number(bytes);
+    if (!Number.isFinite(value) || value <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    const exponent = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
+    const scaled = value / (1024 ** exponent);
+    const formatted = scaled >= 10 || exponent === 0 ? scaled.toFixed(0) : scaled.toFixed(1);
+    return `${formatted} ${units[exponent]}`;
+}
+
+function getAttachmentsTotalBytes() {
+    if (!Array.isArray(state.attachments)) return 0;
+    return state.attachments.reduce((total, item) => total + (Number.isFinite(item?.size) ? item.size : 0), 0);
+}
+
+function updateAttachmentsUi() {
+    const locked = state.running || state.paused;
+    if (elements.attachmentButton) {
+        elements.attachmentButton.disabled = locked || state.attachmentsLoading;
+    }
+    if (elements.attachmentInput) {
+        elements.attachmentInput.disabled = locked || state.attachmentsLoading;
+    }
+
+    const count = Array.isArray(state.attachments) ? state.attachments.length : 0;
+    const totalBytes = getAttachmentsTotalBytes();
+
+    if (elements.attachmentSummary) {
+        if (state.attachmentsLoading) {
+            elements.attachmentSummary.textContent = 'Reading attachments…';
+        } else if (count === 0) {
+            elements.attachmentSummary.textContent = 'No attachments';
+        } else {
+            const label = count === 1 ? '1 file' : `${count} files`;
+            elements.attachmentSummary.textContent = `${label} • ${formatBytes(totalBytes)}`;
+        }
+    }
+
+    if (elements.attachmentClear) {
+        elements.attachmentClear.hidden = locked || state.attachmentsLoading || count === 0;
+    }
+
+    if (!elements.attachmentList) return;
+    elements.attachmentList.replaceChildren();
+
+    if (count === 0) {
+        elements.attachmentList.hidden = true;
+        return;
+    }
+
+    state.attachments.forEach((attachment) => {
+        const item = document.createElement('div');
+        item.className = 'attachment-item';
+
+        const meta = document.createElement('div');
+        meta.className = 'attachment-meta';
+
+        const name = document.createElement('div');
+        name.className = 'attachment-name';
+        name.textContent = attachment.name || 'attachment';
+
+        const sub = document.createElement('div');
+        sub.className = 'attachment-sub';
+        const typeLabel = attachment.type ? attachment.type : 'unknown type';
+        const sizeLabel = Number.isFinite(attachment.size) ? formatBytes(attachment.size) : '';
+        sub.textContent = [typeLabel, sizeLabel].filter(Boolean).join(' • ');
+
+        meta.appendChild(name);
+        meta.appendChild(sub);
+
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'attachment-remove';
+        remove.dataset.action = 'remove-attachment';
+        remove.dataset.attachmentId = attachment.id;
+        remove.textContent = 'Remove';
+
+        item.appendChild(meta);
+        item.appendChild(remove);
+        elements.attachmentList.appendChild(item);
+    });
+
+    elements.attachmentList.hidden = false;
+}
+
+function clearAttachments() {
+    state.attachments = [];
+    state.attachmentsLoading = false;
+    state.attachmentsWarning = '';
+    updateAttachmentsUi();
+    updateSendState();
+}
+
+function removeAttachment(id) {
+    if (!id) return;
+    const next = Array.isArray(state.attachments)
+        ? state.attachments.filter((item) => item.id !== id)
+        : [];
+    state.attachments = next;
+    updateAttachmentsUi();
+    updateSendState();
+}
+
+function generateAttachmentId() {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `att_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+function readFileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(reader.error || new Error('File read failed.'));
+        reader.onload = () => {
+            const result = typeof reader.result === 'string' ? reader.result : '';
+            const commaIndex = result.indexOf(',');
+            if (commaIndex === -1) {
+                reject(new Error('Unexpected DataURL format.'));
+                return;
+            }
+            resolve(result.slice(commaIndex + 1));
+        };
+        reader.readAsDataURL(file);
+    });
+}
+
+async function addAttachments(files) {
+    if (state.running || state.paused) return;
+    if (!Array.isArray(files) || files.length === 0) return;
+
+    const existing = Array.isArray(state.attachments) ? state.attachments : [];
+    const remainingSlots = Math.max(0, ATTACHMENTS_MAX_FILES - existing.length);
+    const warnings = [];
+
+    if (remainingSlots === 0) {
+        state.attachmentsWarning = `Attachment limit reached (${ATTACHMENTS_MAX_FILES}).`;
+        updateAttachmentsUi();
+        updateSendState();
+        return;
+    }
+
+    const selected = files.slice(0, remainingSlots);
+    if (files.length > selected.length) {
+        warnings.push(`Only the first ${selected.length} file(s) were kept.`);
+    }
+
+    let totalBytes = getAttachmentsTotalBytes();
+    state.attachmentsLoading = true;
+    state.attachmentsWarning = '';
+    updateAttachmentsUi();
+    updateSendState();
+
+    for (const file of selected) {
+        if (!file) continue;
+        if (Number.isFinite(file.size) && file.size > ATTACHMENTS_MAX_FILE_BYTES) {
+            warnings.push(`${file.name} is larger than ${formatBytes(ATTACHMENTS_MAX_FILE_BYTES)}.`);
+            continue;
+        }
+        if (Number.isFinite(file.size) && totalBytes + file.size > ATTACHMENTS_MAX_TOTAL_BYTES) {
+            warnings.push(`Total attachments exceed ${formatBytes(ATTACHMENTS_MAX_TOTAL_BYTES)}.`);
+            break;
+        }
+
+        try {
+            const base64 = await readFileAsBase64(file);
+            const type = file.type || 'application/octet-stream';
+            state.attachments.push({
+                id: generateAttachmentId(),
+                name: file.name || 'attachment',
+                type,
+                size: file.size,
+                lastModified: file.lastModified,
+                base64
+            });
+            totalBytes += file.size;
+        } catch (error) {
+            warnings.push(`Failed to read ${file.name}.`);
+        }
+    }
+
+    state.attachmentsLoading = false;
+    state.attachmentsWarning = warnings.join(' ');
+    updateAttachmentsUi();
+    updateSendState();
+}
+
 function getRunTarget() {
     const value = String(elements.runTarget?.value || '').trim();
     switch (value) {
@@ -721,12 +957,13 @@ function updateSendState() {
         return;
     }
     const hasPrompt = elements.promptInput.value.trim().length > 0;
+    const attachmentsReady = !state.attachmentsLoading;
     const runTarget = getRunTarget();
     const debate = isDebateTarget(runTarget);
     const iterations = debate ? (parseInt(elements.iterations.value, 10) || 0) : 1;
     const connected = isRunConnected();
     elements.sendButton.textContent = 'Send';
-    elements.sendButton.disabled = !hasPrompt || iterations <= 0 || !connected || !isHistoryReady();
+    elements.sendButton.disabled = !hasPrompt || !attachmentsReady || iterations <= 0 || !connected || !isHistoryReady();
     updateComposerHint();
     updateEmptyState();
 }
@@ -741,7 +978,10 @@ function setSessionState({ running, paused }) {
     if (elements.refreshProfiles) elements.refreshProfiles.disabled = locked;
     if (elements.newChatButton) elements.newChatButton.disabled = locked;
     if (elements.drawerNewChatButton) elements.drawerNewChatButton.disabled = locked;
+    if (elements.attachmentButton) elements.attachmentButton.disabled = locked || state.attachmentsLoading;
+    if (elements.attachmentInput) elements.attachmentInput.disabled = locked || state.attachmentsLoading;
     updateRunUi();
+    updateAttachmentsUi();
     updatePausedActions();
     updateSendState();
 }
@@ -1140,6 +1380,14 @@ function updateComposerHint() {
         hint = 'Iterations must be at least 1.';
     }
 
+    if (!hint) {
+        if (state.attachmentsLoading) {
+            hint = 'Reading attachments…';
+        } else if (state.attachmentsWarning) {
+            hint = state.attachmentsWarning;
+        }
+    }
+
     elements.composerHint.textContent = hint;
     elements.composerHint.hidden = !hint;
     elements.promptInput.placeholder = !connected
@@ -1236,6 +1484,15 @@ function startSession() {
         rounds,
         chatId: state.activeChatId
     };
+    if (Array.isArray(state.attachments) && state.attachments.length > 0) {
+        payload.attachments = state.attachments.map((item) => ({
+            name: item.name,
+            type: item.type,
+            size: item.size,
+            lastModified: item.lastModified,
+            base64: item.base64
+        }));
+    }
 
     if (debate) {
         payload.mode = 'debate';
@@ -1247,6 +1504,7 @@ function startSession() {
     sendMessage(payload);
 
     elements.promptInput.value = '';
+    clearAttachments();
     updateCharCount();
     updateSendState();
 }
