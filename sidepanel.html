@@ -52,7 +52,7 @@
 
         <footer class="composer">
             <label class="composer-label" for="prompt-input">Prompt</label>
-            <textarea id="prompt-input" rows="3" maxlength="8000" placeholder="Send a message..."></textarea>
+            <textarea id="prompt-input" rows="3" placeholder="Send a message..."></textarea>
             <div class="composer-hint" id="composer-hint" hidden></div>
             <div class="composer-run-settings" id="composer-run-settings">
                 <div class="composer-run-row">
@@ -72,9 +72,21 @@
                     </label>
                 </div>
             </div>
+            <div class="composer-attachments" id="composer-attachments">
+                <input id="attachment-input" type="file" multiple hidden>
+                <div class="composer-attachments-row">
+                    <button class="ghost-button composer-attachments-button" id="attachment-button" type="button">
+                        <span class="material-symbols-rounded">attach_file</span>
+                        <span>Attach</span>
+                    </button>
+                    <div class="composer-attachments-summary" id="attachment-summary">No attachments</div>
+                    <button class="ghost-button danger composer-attachments-clear" id="attachment-clear" type="button" hidden>Clear</button>
+                </div>
+                <div class="attachment-list" id="attachment-list" hidden></div>
+            </div>
             <div class="composer-actions">
                 <div class="composer-meta">
-                    <span id="char-count">0</span>/8000
+                    <span id="char-count">0</span> chars
                 </div>
                 <div class="composer-buttons">
                     <button class="primary-button" id="send-button" type="button" disabled>Send</button>
@@ -236,6 +248,23 @@
             </section>
         </div>
     </aside>
+
+    <div class="modal-backdrop" id="modal-backdrop" hidden></div>
+    <div class="modal" id="attachments-modal" role="dialog" aria-modal="true" aria-labelledby="attachments-modal-title" hidden>
+        <div class="modal-header">
+            <div class="modal-title" id="attachments-modal-title">Attachments</div>
+            <button class="icon-button" id="attachments-modal-close" type="button" aria-label="Close attachment notice">
+                <span class="material-symbols-rounded">close</span>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div class="modal-text" id="attachments-modal-text"></div>
+        </div>
+        <div class="modal-actions">
+            <button class="ghost-button" id="attachments-modal-cancel" type="button">Cancel</button>
+            <button class="primary-button" id="attachments-modal-ok" type="button">OK</button>
+        </div>
+    </div>
 
     <script src="sidepanel.js"></script>
 </body>

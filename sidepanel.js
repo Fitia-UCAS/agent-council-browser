@@ -19,13 +19,23 @@ const state = {
     connecting: { chatgpt: false, gemini: false },
     profiles: [],
     defaults: { chatgpt: null, gemini: null },
-    sessionProfiles: { chatgpt: null, gemini: null },
-    promptConfig: null,
-    promptConfigSource: null
-};
+	    sessionProfiles: { chatgpt: null, gemini: null },
+	    promptConfig: null,
+	    promptConfigSource: null,
+	    providerCapabilities: null,
+	    manualUploadAckKey: null,
+	    attachments: [],
+	    attachmentsLoading: false,
+	    attachmentsWarning: ''
+	};
 
 const elements = {};
 const HISTORY_PAGE_SIZE = 60;
+const ATTACHMENTS_MAX_FILES = 10;
+const ATTACHMENTS_MAX_FILE_BYTES = 10 * 1024 * 1024;
+const ATTACHMENTS_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
+
+let attachmentsModalResolver = null;
 
 document.addEventListener('DOMContentLoaded', () => {
     elements.promptInput = document.getElementById('prompt-input');
@@ -42,6 +52,12 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.sessionStatus = document.getElementById('session-status');
     elements.sessionBanner = document.getElementById('session-banner');
     elements.composerHint = document.getElementById('composer-hint');
+
+    elements.attachmentInput = document.getElementById('attachment-input');
+    elements.attachmentButton = document.getElementById('attachment-button');
+    elements.attachmentSummary = document.getElementById('attachment-summary');
+    elements.attachmentClear = document.getElementById('attachment-clear');
+    elements.attachmentList = document.getElementById('attachment-list');
 
     elements.profileListChatgpt = document.getElementById('profile-list-chatgpt');
     elements.profileListGemini = document.getElementById('profile-list-gemini');
@@ -93,9 +109,18 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.historyResetButton = document.getElementById('history-reset');
     elements.historyStatus = document.getElementById('history-status');
 
+    elements.modalBackdrop = document.getElementById('modal-backdrop');
+    elements.attachmentsModal = document.getElementById('attachments-modal');
+    elements.attachmentsModalTitle = document.getElementById('attachments-modal-title');
+    elements.attachmentsModalText = document.getElementById('attachments-modal-text');
+    elements.attachmentsModalOk = document.getElementById('attachments-modal-ok');
+    elements.attachmentsModalCancel = document.getElementById('attachments-modal-cancel');
+    elements.attachmentsModalClose = document.getElementById('attachments-modal-close');
+
     bindEvents();
     updateHistoryUi();
     updateCharCount();
+    updateAttachmentsUi();
     updateSendState();
 
     requestProfiles();
@@ -103,6 +128,7 @@ document.addEventListener('DOMContentLoaded', () => {
     requestHistoryStatus();
     requestChatsState();
     requestActiveSession();
+    requestProviderCapabilities();
     loadPromptTemplates();
 });
 
@@ -122,6 +148,44 @@ function bindEvents() {
 
     if (elements.sendButton) {
         elements.sendButton.addEventListener('click', handlePrimaryAction);
+    }
+
+    if (elements.attachmentButton && elements.attachmentInput) {
+        elements.attachmentButton.addEventListener('click', () => {
+            if (state.running || state.paused || state.attachmentsLoading) return;
+            elements.attachmentInput.click();
+        });
+    }
+
+    if (elements.attachmentInput) {
+        elements.attachmentInput.addEventListener('change', (event) => {
+            const files = Array.from(event.target?.files || []);
+            // Allow selecting the same file twice in a row.
+            event.target.value = '';
+            if (files.length === 0) return;
+            addAttachments(files).catch((error) => {
+                console.warn('[MLC UI] Failed to add attachments:', error);
+                state.attachmentsLoading = false;
+                state.attachmentsWarning = 'Failed to read attachments.';
+                updateAttachmentsUi();
+                updateSendState();
+            });
+        });
+    }
+
+    if (elements.attachmentClear) {
+        elements.attachmentClear.addEventListener('click', clearAttachments);
+    }
+
+    if (elements.attachmentList) {
+        elements.attachmentList.addEventListener('click', (event) => {
+            const target = event.target;
+            if (!(target instanceof HTMLElement)) return;
+            if (target.dataset.action === 'remove-attachment') {
+                const id = target.dataset.attachmentId;
+                if (id) removeAttachment(id);
+            }
+        });
     }
 
     if (elements.refreshProfiles) {
@@ -277,6 +341,25 @@ function bindEvents() {
         elements.historyResetButton.addEventListener('click', resetHistory);
     }
 
+    if (elements.attachmentsModalOk) {
+        elements.attachmentsModalOk.addEventListener('click', () => closeAttachmentsModal(true));
+    }
+    if (elements.attachmentsModalCancel) {
+        elements.attachmentsModalCancel.addEventListener('click', () => closeAttachmentsModal(false));
+    }
+    if (elements.attachmentsModalClose) {
+        elements.attachmentsModalClose.addEventListener('click', () => closeAttachmentsModal(false));
+    }
+    if (elements.modalBackdrop) {
+        elements.modalBackdrop.addEventListener('click', () => closeAttachmentsModal(false));
+    }
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && isAttachmentsModalOpen()) {
+            event.preventDefault();
+            closeAttachmentsModal(false);
+        }
+    });
+
     if (chrome?.runtime?.onMessage) {
         chrome.runtime.onMessage.addListener(handleBackgroundMessage);
     }
@@ -290,6 +373,51 @@ function sendMessage(message, callback) {
         }
         if (callback) callback(response);
     });
+}
+
+function isAttachmentsModalOpen() {
+    return Boolean(elements.attachmentsModal && elements.attachmentsModal.hidden === false);
+}
+
+function showAttachmentsModal({ title, text }) {
+    if (!elements.attachmentsModal || !elements.modalBackdrop) {
+        return Promise.resolve(true);
+    }
+
+    if (attachmentsModalResolver) {
+        attachmentsModalResolver(true);
+        attachmentsModalResolver = null;
+    }
+
+    if (elements.attachmentsModalTitle) {
+        elements.attachmentsModalTitle.textContent = title || 'Attachments';
+    }
+    if (elements.attachmentsModalText) {
+        elements.attachmentsModalText.textContent = text || '';
+    }
+
+    elements.modalBackdrop.hidden = false;
+    elements.attachmentsModal.hidden = false;
+
+    window.setTimeout(() => {
+        if (elements.attachmentsModalOk) elements.attachmentsModalOk.focus();
+    }, 0);
+
+    return new Promise((resolve) => {
+        attachmentsModalResolver = resolve;
+    });
+}
+
+function closeAttachmentsModal(result) {
+    if (elements.attachmentsModal) {
+        elements.attachmentsModal.hidden = true;
+    }
+    if (elements.modalBackdrop) {
+        elements.modalBackdrop.hidden = true;
+    }
+    const resolver = attachmentsModalResolver;
+    attachmentsModalResolver = null;
+    if (resolver) resolver(Boolean(result));
 }
 
 function handleActionResponse(response) {
@@ -597,6 +725,191 @@ function updateCharCount() {
     elements.charCount.textContent = String(elements.promptInput.value.length);
 }
 
+function formatBytes(bytes) {
+    const value = Number(bytes);
+    if (!Number.isFinite(value) || value <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    const exponent = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
+    const scaled = value / (1024 ** exponent);
+    const formatted = scaled >= 10 || exponent === 0 ? scaled.toFixed(0) : scaled.toFixed(1);
+    return `${formatted} ${units[exponent]}`;
+}
+
+function getAttachmentsTotalBytes() {
+    if (!Array.isArray(state.attachments)) return 0;
+    return state.attachments.reduce((total, item) => total + (Number.isFinite(item?.size) ? item.size : 0), 0);
+}
+
+function updateAttachmentsUi() {
+    const locked = state.running || state.paused;
+    if (elements.attachmentButton) {
+        elements.attachmentButton.disabled = locked || state.attachmentsLoading;
+    }
+    if (elements.attachmentInput) {
+        elements.attachmentInput.disabled = locked || state.attachmentsLoading;
+    }
+
+    const count = Array.isArray(state.attachments) ? state.attachments.length : 0;
+    const totalBytes = getAttachmentsTotalBytes();
+
+    if (elements.attachmentSummary) {
+        if (state.attachmentsLoading) {
+            elements.attachmentSummary.textContent = 'Reading attachments…';
+        } else if (count === 0) {
+            elements.attachmentSummary.textContent = 'No attachments';
+        } else {
+            const label = count === 1 ? '1 file' : `${count} files`;
+            elements.attachmentSummary.textContent = `${label} • ${formatBytes(totalBytes)}`;
+        }
+    }
+
+    if (elements.attachmentClear) {
+        elements.attachmentClear.hidden = locked || state.attachmentsLoading || count === 0;
+    }
+
+    if (!elements.attachmentList) return;
+    elements.attachmentList.replaceChildren();
+
+    if (count === 0) {
+        elements.attachmentList.hidden = true;
+        return;
+    }
+
+    state.attachments.forEach((attachment) => {
+        const item = document.createElement('div');
+        item.className = 'attachment-item';
+
+        const meta = document.createElement('div');
+        meta.className = 'attachment-meta';
+
+        const name = document.createElement('div');
+        name.className = 'attachment-name';
+        name.textContent = attachment.name || 'attachment';
+
+        const sub = document.createElement('div');
+        sub.className = 'attachment-sub';
+        const typeLabel = attachment.type ? attachment.type : 'unknown type';
+        const sizeLabel = Number.isFinite(attachment.size) ? formatBytes(attachment.size) : '';
+        sub.textContent = [typeLabel, sizeLabel].filter(Boolean).join(' • ');
+
+        meta.appendChild(name);
+        meta.appendChild(sub);
+
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'attachment-remove';
+        remove.dataset.action = 'remove-attachment';
+        remove.dataset.attachmentId = attachment.id;
+        remove.textContent = 'Remove';
+
+        item.appendChild(meta);
+        item.appendChild(remove);
+        elements.attachmentList.appendChild(item);
+    });
+
+    elements.attachmentList.hidden = false;
+}
+
+function clearAttachments() {
+    state.attachments = [];
+    state.attachmentsLoading = false;
+    state.attachmentsWarning = '';
+    updateAttachmentsUi();
+    updateSendState();
+}
+
+function removeAttachment(id) {
+    if (!id) return;
+    const next = Array.isArray(state.attachments)
+        ? state.attachments.filter((item) => item.id !== id)
+        : [];
+    state.attachments = next;
+    updateAttachmentsUi();
+    updateSendState();
+}
+
+function generateAttachmentId() {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `att_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+function readFileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(reader.error || new Error('File read failed.'));
+        reader.onload = () => {
+            const result = typeof reader.result === 'string' ? reader.result : '';
+            const commaIndex = result.indexOf(',');
+            if (commaIndex === -1) {
+                reject(new Error('Unexpected DataURL format.'));
+                return;
+            }
+            resolve(result.slice(commaIndex + 1));
+        };
+        reader.readAsDataURL(file);
+    });
+}
+
+async function addAttachments(files) {
+    if (state.running || state.paused) return;
+    if (!Array.isArray(files) || files.length === 0) return;
+
+    const existing = Array.isArray(state.attachments) ? state.attachments : [];
+    const remainingSlots = Math.max(0, ATTACHMENTS_MAX_FILES - existing.length);
+    const warnings = [];
+
+    if (remainingSlots === 0) {
+        state.attachmentsWarning = `Attachment limit reached (${ATTACHMENTS_MAX_FILES}).`;
+        updateAttachmentsUi();
+        updateSendState();
+        return;
+    }
+
+    const selected = files.slice(0, remainingSlots);
+    if (files.length > selected.length) {
+        warnings.push(`Only the first ${selected.length} file(s) were kept.`);
+    }
+
+    let totalBytes = getAttachmentsTotalBytes();
+    state.attachmentsLoading = true;
+    state.attachmentsWarning = '';
+    updateAttachmentsUi();
+    updateSendState();
+
+    for (const file of selected) {
+        if (!file) continue;
+        if (Number.isFinite(file.size) && file.size > ATTACHMENTS_MAX_FILE_BYTES) {
+            warnings.push(`${file.name} is larger than ${formatBytes(ATTACHMENTS_MAX_FILE_BYTES)}.`);
+            continue;
+        }
+        if (Number.isFinite(file.size) && totalBytes + file.size > ATTACHMENTS_MAX_TOTAL_BYTES) {
+            warnings.push(`Total attachments exceed ${formatBytes(ATTACHMENTS_MAX_TOTAL_BYTES)}.`);
+            break;
+        }
+
+        try {
+            const base64 = await readFileAsBase64(file);
+            const type = file.type || 'application/octet-stream';
+            state.attachments.push({
+                id: generateAttachmentId(),
+                name: file.name || 'attachment',
+                type,
+                size: file.size,
+                lastModified: file.lastModified,
+                base64
+            });
+            totalBytes += file.size;
+        } catch (error) {
+            warnings.push(`Failed to read ${file.name}.`);
+        }
+    }
+
+    state.attachmentsLoading = false;
+    state.attachmentsWarning = warnings.join(' ');
+    updateAttachmentsUi();
+    updateSendState();
+}
+
 function getRunTarget() {
     const value = String(elements.runTarget?.value || '').trim();
     switch (value) {
@@ -628,6 +941,28 @@ function getDirectTarget(runTarget) {
 function getRequiredProvidersForRun(runTarget) {
     if (isDebateTarget(runTarget) || runTarget === 'both') return ['chatgpt', 'gemini'];
     return [getDirectTarget(runTarget)];
+}
+
+function getProviderAttachmentMode(provider) {
+    const mode = state.providerCapabilities?.[provider]?.attachments?.mode;
+    if (mode === 'auto' || mode === 'manual' || mode === 'none') return mode;
+    // Safe defaults until a provider is explicitly supported.
+    return provider === 'chatgpt' ? 'auto' : 'manual';
+}
+
+function buildManualUploadAckKey(runTarget, attachments, manualProviders) {
+    const providersKey = Array.isArray(manualProviders) ? [...manualProviders].sort().join(',') : '';
+    const attachmentKey = Array.isArray(attachments)
+        ? attachments.map((item) => String(item?.id || '')).filter(Boolean).join(',')
+        : '';
+    return `${runTarget}|${providersKey}|${attachmentKey}`;
+}
+
+function getAttachmentProviderPlan(runTarget) {
+    const required = getRequiredProvidersForRun(runTarget);
+    const autoProviders = required.filter((provider) => getProviderAttachmentMode(provider) === 'auto');
+    const manualProviders = required.filter((provider) => getProviderAttachmentMode(provider) !== 'auto');
+    return { required, autoProviders, manualProviders };
 }
 
 function isRunConnected() {
@@ -721,12 +1056,13 @@ function updateSendState() {
         return;
     }
     const hasPrompt = elements.promptInput.value.trim().length > 0;
+    const attachmentsReady = !state.attachmentsLoading;
     const runTarget = getRunTarget();
     const debate = isDebateTarget(runTarget);
     const iterations = debate ? (parseInt(elements.iterations.value, 10) || 0) : 1;
     const connected = isRunConnected();
     elements.sendButton.textContent = 'Send';
-    elements.sendButton.disabled = !hasPrompt || iterations <= 0 || !connected || !isHistoryReady();
+    elements.sendButton.disabled = !hasPrompt || !attachmentsReady || iterations <= 0 || !connected || !isHistoryReady();
     updateComposerHint();
     updateEmptyState();
 }
@@ -741,7 +1077,10 @@ function setSessionState({ running, paused }) {
     if (elements.refreshProfiles) elements.refreshProfiles.disabled = locked;
     if (elements.newChatButton) elements.newChatButton.disabled = locked;
     if (elements.drawerNewChatButton) elements.drawerNewChatButton.disabled = locked;
+    if (elements.attachmentButton) elements.attachmentButton.disabled = locked || state.attachmentsLoading;
+    if (elements.attachmentInput) elements.attachmentInput.disabled = locked || state.attachmentsLoading;
     updateRunUi();
+    updateAttachmentsUi();
     updatePausedActions();
     updateSendState();
 }
@@ -763,6 +1102,15 @@ function requestProfiles() {
 
 function requestConnectionStatus() {
     sendMessage({ type: 'CHECK_CONNECTION' });
+}
+
+function requestProviderCapabilities() {
+    sendMessage({ type: 'GET_PROVIDER_CAPABILITIES' }, (response) => {
+        if (!response || response.ok === false) return;
+        state.providerCapabilities = response.capabilities || null;
+        updateAttachmentsUi();
+        updateSendState();
+    });
 }
 
 function requestHistoryStatus() {
@@ -1140,6 +1488,20 @@ function updateComposerHint() {
         hint = 'Iterations must be at least 1.';
     }
 
+    if (!hint) {
+        if (state.attachmentsLoading) {
+            hint = 'Reading attachments…';
+        } else if (state.attachmentsWarning) {
+            hint = state.attachmentsWarning;
+        } else if (Array.isArray(state.attachments) && state.attachments.length > 0) {
+            const { manualProviders } = getAttachmentProviderPlan(runTarget);
+            if (manualProviders.length > 0) {
+                const label = manualProviders.map(formatProviderLabel).join(' + ');
+                hint = `${label} will receive text only (attachments are not auto-uploaded).`;
+            }
+        }
+    }
+
     elements.composerHint.textContent = hint;
     elements.composerHint.hidden = !hint;
     elements.promptInput.placeholder = !connected
@@ -1188,15 +1550,19 @@ function updateEmptyState() {
     }
 }
 
-function handlePrimaryAction() {
+async function handlePrimaryAction() {
     if (state.running || state.paused) {
         stopSession();
         return;
     }
-    startSession();
+    try {
+        await startSession();
+    } catch (error) {
+        setSessionStatus(`Error: ${error?.message || 'Failed to start session.'}`);
+    }
 }
 
-function startSession() {
+async function startSession() {
     if (state.running || state.paused) return;
     if (!elements.promptInput) return;
 
@@ -1226,9 +1592,48 @@ function startSession() {
         return;
     }
 
-    state.stopRequested = false;
-    setSessionState({ running: true, paused: false });
-    setSessionStatus('Starting session...');
+	    const attachments = Array.isArray(state.attachments) ? state.attachments : [];
+	    const attachmentPlan = attachments.length > 0 ? getAttachmentProviderPlan(runTarget) : null;
+
+	    if (attachmentPlan && attachmentPlan.manualProviders.length > 0) {
+	        const { autoProviders, manualProviders } = attachmentPlan;
+	        const count = attachments.length;
+	        const totalBytes = getAttachmentsTotalBytes();
+	        const countLabel = count === 1 ? '1 attachment' : `${count} attachments`;
+	        const manualLabel = manualProviders.map(formatProviderLabel).join(' + ');
+	        const autoLabel = autoProviders.length > 0 ? autoProviders.map(formatProviderLabel).join(' + ') : 'none';
+	        const ackKey = buildManualUploadAckKey(runTarget, attachments, manualProviders);
+	        const alreadyAcknowledged = state.manualUploadAckKey === ackKey;
+	
+	        if (!alreadyAcknowledged) {
+	            const ok = await showAttachmentsModal({
+	                title: 'Manual upload required',
+	                text: [
+	                    `You attached ${countLabel} (${formatBytes(totalBytes)}).`,
+	                    '',
+	                    `Auto upload: ${autoLabel}`,
+	                    `Manual upload required: ${manualLabel}`,
+	                    '',
+	                    `We will send your message text-only to ${manualLabel} (no files).`,
+	                    `If you want ${manualLabel} to use the file, attach it manually in the ${manualLabel} tab.`,
+	                    '',
+	                    'Click OK to acknowledge this notice. This will not send your message.',
+	                    'After uploading manually, return here and click Send again.'
+	                ].join('\n')
+	            });
+	            if (!ok) return;
+	            state.manualUploadAckKey = ackKey;
+	            setSessionStatus(`Upload the file manually in ${manualLabel}, then click Send again.`);
+	            updateComposerHint();
+	            updateSendState();
+	            return;
+	        }
+	    }
+
+	    state.manualUploadAckKey = null;
+	    state.stopRequested = false;
+	    setSessionState({ running: true, paused: false });
+	    setSessionStatus('Starting session...');
 
     const payload = {
         type: 'START_RUN',
@@ -1236,6 +1641,15 @@ function startSession() {
         rounds,
         chatId: state.activeChatId
     };
+    if (attachmentPlan && attachmentPlan.autoProviders.length > 0) {
+        payload.attachments = attachments.map((item) => ({
+            name: item.name,
+            type: item.type,
+            size: item.size,
+            lastModified: item.lastModified,
+            base64: item.base64
+        }));
+    }
 
     if (debate) {
         payload.mode = 'debate';
@@ -1247,6 +1661,7 @@ function startSession() {
     sendMessage(payload);
 
     elements.promptInput.value = '';
+    clearAttachments();
     updateCharCount();
     updateSendState();
 }
@@ -1276,6 +1691,11 @@ function isFullyConnected() {
 
 function handleBackgroundMessage(message) {
     switch (message.type) {
+        case 'PROVIDER_CAPABILITIES':
+            state.providerCapabilities = message.capabilities || null;
+            updateAttachmentsUi();
+            updateSendState();
+            break;
         case 'TAB_PROFILES':
             handleProfileList(message);
             break;

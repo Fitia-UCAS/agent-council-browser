@@ -390,6 +390,160 @@ const defaultDebateState = {
 
 let activeDebateState = { ...defaultDebateState };
 
+// Attachment payloads are intentionally kept out of chrome.storage.local (quota + privacy).
+// They live in-memory for the active session only and are cleared once delivered.
+// sentTo: attachments have been accounted for that provider (uploaded+sent, or intentionally skipped).
+// preparedTo: attachments have been pre-attached to the provider UI but not necessarily sent yet.
+let activeSessionAttachments = null; // { sessionId, attachments: [...], sentTo: { [provider]: boolean }, preparedTo: { [provider]: boolean } }
+
+function normalizeProviderKey(provider) {
+    return String(provider || '').trim().toLowerCase();
+}
+
+function initProviderFlagMap(providers, initialValue) {
+    const map = {};
+    if (!Array.isArray(providers)) return map;
+    for (const provider of providers) {
+        const key = normalizeProviderKey(provider);
+        if (!key || Object.prototype.hasOwnProperty.call(map, key)) continue;
+        map[key] = Boolean(initialValue);
+    }
+    return map;
+}
+
+function listSessionProviders(session, fallbackProvider) {
+    const ordered = [];
+    const push = (provider) => {
+        const key = normalizeProviderKey(provider);
+        if (!key) return;
+        if (!ordered.includes(key)) ordered.push(key);
+    };
+    push(session?.firstLLM);
+    push(session?.secondLLM);
+    push(fallbackProvider);
+    return ordered;
+}
+
+function stripDataUrlPrefix(value) {
+    const raw = typeof value === 'string' ? value.trim() : '';
+    if (!raw) return '';
+    if (!raw.startsWith('data:')) return raw;
+    const comma = raw.indexOf(',');
+    return comma === -1 ? '' : raw.slice(comma + 1);
+}
+
+function estimateBytesFromBase64(base64) {
+    if (!base64) return 0;
+    const cleaned = base64.replace(/\s+/g, '');
+    const padding = cleaned.endsWith('==') ? 2 : (cleaned.endsWith('=') ? 1 : 0);
+    return Math.max(0, Math.floor((cleaned.length * 3) / 4) - padding);
+}
+
+function normalizeIncomingAttachments(input) {
+    if (!Array.isArray(input) || input.length === 0) return [];
+    const MAX_FILES = 10;
+    const MAX_TOTAL_BYTES = 20 * 1024 * 1024;
+
+    const output = [];
+    let totalBytes = 0;
+
+    for (const raw of input.slice(0, MAX_FILES)) {
+        if (!raw || typeof raw !== 'object') continue;
+        const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : 'attachment';
+        const type = typeof raw.type === 'string' && raw.type.trim() ? raw.type.trim() : 'application/octet-stream';
+        const base64 = stripDataUrlPrefix(raw.base64);
+        if (!base64) continue;
+        const size = Number.isFinite(raw.size) ? raw.size : estimateBytesFromBase64(base64);
+        if (!Number.isFinite(size) || size <= 0) continue;
+        if (totalBytes + size > MAX_TOTAL_BYTES) break;
+        totalBytes += size;
+        output.push({
+            name,
+            type,
+            size,
+            lastModified: Number.isFinite(raw.lastModified) ? raw.lastModified : Date.now(),
+            base64
+        });
+    }
+
+    return output;
+}
+
+function setActiveSessionAttachments(sessionId, attachments, providers = null) {
+    const sanitized = normalizeIncomingAttachments(attachments);
+    if (!sessionId || sanitized.length === 0) {
+        activeSessionAttachments = null;
+        return;
+    }
+    activeSessionAttachments = {
+        sessionId,
+        attachments: sanitized,
+        sentTo: initProviderFlagMap(providers, false),
+        preparedTo: initProviderFlagMap(providers, false)
+    };
+}
+
+function hasSessionAttachments(sessionId) {
+    return Boolean(
+        activeSessionAttachments &&
+        activeSessionAttachments.sessionId === sessionId &&
+        Array.isArray(activeSessionAttachments.attachments) &&
+        activeSessionAttachments.attachments.length > 0
+    );
+}
+
+function getPendingSessionAttachments(sessionId, provider, { includePrepared = false } = {}) {
+    if (!activeSessionAttachments || activeSessionAttachments.sessionId !== sessionId) return null;
+    const normalizedProvider = normalizeProviderKey(provider);
+    if (!normalizedProvider) return null;
+    if (activeSessionAttachments.sentTo?.[normalizedProvider]) return null;
+    if (!includePrepared && activeSessionAttachments.preparedTo?.[normalizedProvider]) return null;
+    return activeSessionAttachments.attachments || null;
+}
+
+function markSessionAttachmentsPrepared(session, provider) {
+    if (!session?.sessionId || !activeSessionAttachments || activeSessionAttachments.sessionId !== session.sessionId) return;
+    const normalizedProvider = normalizeProviderKey(provider);
+    if (!normalizedProvider) return;
+    if (!activeSessionAttachments.preparedTo || typeof activeSessionAttachments.preparedTo !== 'object') {
+        activeSessionAttachments.preparedTo = {};
+    }
+    activeSessionAttachments.preparedTo[normalizedProvider] = true;
+    if (!activeSessionAttachments.sentTo || typeof activeSessionAttachments.sentTo !== 'object') {
+        activeSessionAttachments.sentTo = {};
+    }
+    if (typeof activeSessionAttachments.sentTo[normalizedProvider] !== 'boolean') {
+        activeSessionAttachments.sentTo[normalizedProvider] = false;
+    }
+}
+
+function markSessionAttachmentsSent(session, provider) {
+    if (!session?.sessionId || !activeSessionAttachments || activeSessionAttachments.sessionId !== session.sessionId) return;
+    const normalizedProvider = normalizeProviderKey(provider);
+    if (!normalizedProvider) return;
+    if (!activeSessionAttachments.sentTo || typeof activeSessionAttachments.sentTo !== 'object') {
+        activeSessionAttachments.sentTo = {};
+    }
+    activeSessionAttachments.sentTo[normalizedProvider] = true;
+    if (!activeSessionAttachments.preparedTo || typeof activeSessionAttachments.preparedTo !== 'object') {
+        activeSessionAttachments.preparedTo = {};
+    }
+    activeSessionAttachments.preparedTo[normalizedProvider] = true;
+
+    const requiredProviders = listSessionProviders(session, normalizedProvider);
+    const allSent = requiredProviders.every((p) => activeSessionAttachments.sentTo?.[p]);
+    if (allSent) {
+        activeSessionAttachments = null;
+    }
+}
+
+function clearSessionAttachments(sessionId) {
+    if (!activeSessionAttachments) return;
+    if (!sessionId || activeSessionAttachments.sessionId === sessionId) {
+        activeSessionAttachments = null;
+    }
+}
+
 function resetDebateState() {
     activeDebateState = { ...defaultDebateState };
     console.log('[MLC Debate] State reset.');
@@ -1043,6 +1197,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[MLC Background] Received message:', message);
 
     switch (message.type) {
+        case 'GET_PROVIDER_CAPABILITIES':
+            sendResponse({ ok: true, capabilities: PROVIDER_CAPABILITIES });
+            break;
         case 'SEND_PROMPT':
             handleSendPrompt(message);
             sendResponse({ status: 'received', type: message.type });
@@ -1583,12 +1740,13 @@ async function handleStartDebateSession(message) {
         const totalTurns = mode === 'direct'
             ? (secondLLM ? 2 : 1)
             : (mode === 'single' ? rounds : rounds * 2);
+        const sessionId = generateSessionId();
         activeDebateState = {
             ...defaultDebateState,
             isActive: true,
             mode,
             chatId: chatId,
-            sessionId: generateSessionId(),
+            sessionId,
             rounds: rounds,
             totalTurns,
             turnIndex: 1,
@@ -1603,6 +1761,11 @@ async function handleStartDebateSession(message) {
             messages: [{ role: 'user', content: prompt, timestamp: now, turnIndex: 0 }],
             startedAt: now
         };
+
+        setActiveSessionAttachments(sessionId, message.attachments, requiredProviders);
+        const attachmentsMeta = activeSessionAttachments?.sessionId === sessionId
+            ? activeSessionAttachments.attachments.map(({ name, type, size }) => ({ name, type, size }))
+            : null;
 
         await persistDebateState();
 
@@ -1626,7 +1789,7 @@ async function handleStartDebateSession(message) {
             timestamp: now,
             turnIndex: 0,
             sessionId: activeDebateState.sessionId,
-            meta: { runConfig, isFollowUp, promptOverrides }
+            meta: { runConfig, isFollowUp, promptOverrides, attachments: attachmentsMeta || undefined }
         });
 
         if (activeDebateState.chatId) {
@@ -1636,7 +1799,7 @@ async function handleStartDebateSession(message) {
                 timestamp: now,
                 turnIndex: 0,
                 sessionId: activeDebateState.sessionId,
-                meta: { runConfig, isFollowUp, promptOverrides }
+                meta: { runConfig, isFollowUp, promptOverrides, attachments: attachmentsMeta || undefined }
             });
             if (appendResult?.ok && Number.isFinite(appendResult?.message?.sequence)) {
                 activeDebateState.userMessageSequence = appendResult.message.sequence;
@@ -1683,6 +1846,29 @@ function getTurnLLM(session, turnIndex) {
 
 function formatLLMLabel(llmType) {
     return llmType === 'gemini' ? 'Gemini' : 'ChatGPT';
+}
+
+const PROVIDER_CAPABILITIES = {
+    chatgpt: {
+        attachments: {
+            mode: 'auto'
+        }
+    },
+    gemini: {
+        // Gemini currently blocks reliable programmatic uploads from extension content scripts:
+        // - No discoverable <input type="file"> in light DOM / open shadow roots
+        // - Synthetic drag/drop events are ignored (event.isTrusted === false)
+        // Fall back to sending text-only (no programmatic upload).
+        attachments: {
+            mode: 'manual'
+        }
+    }
+};
+
+function getProviderAttachmentMode(provider) {
+    const mode = PROVIDER_CAPABILITIES?.[provider]?.attachments?.mode;
+    if (mode === 'manual' || mode === 'none') return mode;
+    return 'auto';
 }
 
 const DEBATE_PROMPTS_PATH = 'debate_prompts.json';
@@ -2606,6 +2792,43 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
     });
 });
 
+async function prefetchSessionAttachments(session, excludeProvider) {
+    try {
+        const sessionId = session?.sessionId;
+        if (!sessionId) return;
+        if (!hasSessionAttachments(sessionId)) return;
+        if (!activeSessionAttachments || activeSessionAttachments.sessionId !== sessionId) return;
+
+        const attachments = activeSessionAttachments.attachments;
+        if (!Array.isArray(attachments) || attachments.length === 0) return;
+
+        const excludeKey = normalizeProviderKey(excludeProvider);
+        const providers = listSessionProviders(session).filter((provider) => provider && provider !== excludeKey);
+
+        for (const provider of providers) {
+            if (!hasSessionAttachments(sessionId)) return;
+            if (getProviderAttachmentMode(provider) !== 'auto') continue;
+            if (activeSessionAttachments.sentTo?.[provider]) continue;
+            if (activeSessionAttachments.preparedTo?.[provider]) continue;
+
+            const resolution = await resolveSessionTab(session, provider);
+            if (!resolution.ok) {
+                console.warn(`[MLC Attachments] Prefetch skipped for ${provider}: ${resolution.error || 'Tab validation failed.'}`);
+                continue;
+            }
+
+            try {
+                await injectAndPrepareAttachments(resolution.tabId, provider, attachments);
+                markSessionAttachmentsPrepared(session, provider);
+            } catch (error) {
+                console.warn(`[MLC Attachments] Prefetch failed for ${provider}:`, error?.message || error);
+            }
+        }
+    } catch (error) {
+        console.warn('[MLC Attachments] Prefetch threw unexpectedly:', error);
+    }
+}
+
 async function sendDebateTurn(session) {
     if (session.isPaused) return;
     const turnIndex = session.turnIndex;
@@ -2633,12 +2856,24 @@ async function sendDebateTurn(session) {
         totalRounds: session.rounds
     });
 
+    const sessionHasAttachments = hasSessionAttachments(session.sessionId);
+    const attachmentMode = sessionHasAttachments ? getProviderAttachmentMode(expectedLLM) : 'auto';
+    const shouldSkipAttachments = sessionHasAttachments && attachmentMode !== 'auto';
+    const attachmentsToSend = shouldSkipAttachments || !sessionHasAttachments
+        ? null
+        : getPendingSessionAttachments(session.sessionId, expectedLLM);
+
     try {
         await injectAndExecute(resolution.tabId, expectedLLM, promptText, {
             sessionId: session.sessionId,
             promptId: promptId,
-            turnIndex: turnIndex
+            turnIndex: turnIndex,
+            attachments: attachmentsToSend || undefined
         });
+        if (sessionHasAttachments) {
+            markSessionAttachmentsSent(session, expectedLLM);
+            await prefetchSessionAttachments(session, expectedLLM);
+        }
 
         if (session.mode === 'direct' && session.chatId && Number.isFinite(session.userMessageSequence)) {
             try {
@@ -2655,7 +2890,28 @@ async function sendDebateTurn(session) {
             }
         }
     } catch (error) {
-        await pauseDebateSession(error.message || 'Failed to send prompt.', expectedLLM);
+        const code = error?.code;
+        const isAttachmentFailure = code === 'ATTACHMENTS_FAILED' || String(error?.message || '').includes('Attachment upload failed');
+        if (attachmentsToSend && attachmentsToSend.length > 0 && isAttachmentFailure) {
+            // Attach failed (DOM drift / provider change). Retry immediately without attachments so the run continues.
+            try {
+                markSessionAttachmentsSent(session, expectedLLM);
+                await injectAndExecute(resolution.tabId, expectedLLM, promptText, {
+                    sessionId: session.sessionId,
+                    promptId: promptId,
+                    turnIndex: turnIndex
+                });
+                if (sessionHasAttachments) {
+                    await prefetchSessionAttachments(session, expectedLLM);
+                }
+                return;
+            } catch (retryError) {
+                await pauseDebateSession(retryError?.message || error?.message || 'Failed to send prompt.', expectedLLM);
+                return;
+            }
+        }
+
+        await pauseDebateSession(error?.message || 'Failed to send prompt.', expectedLLM);
     }
 }
 
@@ -2795,6 +3051,7 @@ async function endDebateSession(reason) {
         reason: reason || 'Session ended.'
     });
 
+    clearSessionAttachments(session.sessionId);
     resetDebateState();
 }
 
@@ -3177,7 +3434,7 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
         const results = await chrome.scripting.executeScript({
             target: { tabId: tabId },
             func: simpleInteraction, // This function is defined below
-            args: [prompt, llmType]
+            args: [prompt, llmType, context.attachments || null]
         });
         
         console.log(`[MLC Background] Injection results for ${llmType} (Tab ID: ${tabId}):`, JSON.stringify(results, null, 2));
@@ -3203,18 +3460,69 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                 return promptId;
             } else {
                 console.error(`[MLC Background] simpleInteraction FAILED for ${llmType}:`, result.error);
-                throw new Error(result.error || `Unknown error in simpleInteraction for ${llmType}`);
+                const err = new Error(result.error || `Unknown error in simpleInteraction for ${llmType}`);
+                err.code = result.details?.stage === 'attachments' ? 'ATTACHMENTS_FAILED' : 'INTERACTION_FAILED';
+                err.provider = llmType;
+                err.details = result.details || null;
+                throw err;
             }
         } else {
             const noResultError = `No result or unexpected result structure from injection for ${llmType}.`;
             console.error(`[MLC Background] ${noResultError} Results:`, results);
-            throw new Error(noResultError);
+            const err = new Error(noResultError);
+            err.code = 'INJECT_NO_RESULT';
+            err.provider = llmType;
+            throw err;
         }
         
     } catch (error) {
         console.error(`[MLC Background] Error injecting script for ${llmType} into Tab ID ${tabId}:`, error.message, error.stack);
-        // Rethrow to be caught by processLLM
-        throw new Error(`Failed to interact with ${llmType}: ${error.message}`);
+        const wrapped = new Error(`Failed to interact with ${llmType}: ${error.message}`);
+        wrapped.code = error?.code || 'INTERACTION_FAILED';
+        wrapped.provider = llmType;
+        wrapped.details = error?.details || null;
+        wrapped.cause = error;
+        throw wrapped;
+    }
+}
+
+async function injectAndPrepareAttachments(tabId, llmType, attachments) {
+    try {
+        console.log(`[MLC Background] Prefetching attachments into Tab ID ${tabId} for ${llmType}.`);
+        const results = await chrome.scripting.executeScript({
+            target: { tabId: tabId },
+            func: simpleInteraction,
+            args: ['', llmType, attachments || null, { mode: 'prepare_attachments' }]
+        });
+
+        if (results && results[0] && results[0].result) {
+            const result = results[0].result;
+            if (result.success) {
+                console.log(`[MLC Background] simpleInteraction prepare_attachments SUCCEEDED for ${llmType}: ${result.method}`);
+                return result;
+            }
+            console.error(`[MLC Background] simpleInteraction prepare_attachments FAILED for ${llmType}:`, result.error);
+            const err = new Error(result.error || `Unknown error preparing attachments for ${llmType}`);
+            err.code = result.details?.stage === 'attachments' ? 'ATTACHMENTS_FAILED' : 'INTERACTION_FAILED';
+            err.provider = llmType;
+            err.details = result.details || null;
+            throw err;
+        }
+
+        const noResultError = `No result or unexpected result structure from preparation injection for ${llmType}.`;
+        console.error(`[MLC Background] ${noResultError} Results:`, results);
+        const err = new Error(noResultError);
+        err.code = 'INJECT_NO_RESULT';
+        err.provider = llmType;
+        throw err;
+    } catch (error) {
+        console.error(`[MLC Background] Error preparing attachments for ${llmType} in Tab ID ${tabId}:`, error.message, error.stack);
+        const wrapped = new Error(`Failed to prepare attachments for ${llmType}: ${error.message}`);
+        wrapped.code = error?.code || 'INTERACTION_FAILED';
+        wrapped.provider = llmType;
+        wrapped.details = error?.details || null;
+        wrapped.cause = error;
+        throw wrapped;
     }
 }
 
@@ -3223,12 +3531,290 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
 // ... (including onInstalled, sendMessageToPopup, onMessage, handleSendPrompt, handleForwardPrompt, processLLM, findLLMTab, injectAndExecute, checkConnectionStatus) ...
 
 // THIS IS THE FUNCTION THAT GETS INJECTED AND EXECUTED IN THE TARGET PAGE
-async function simpleInteraction(prompt, llmType) { // Added async here for the setTimeout
-    console.log(`[SimpleInteraction INJECTED] Attempting on ${llmType} with prompt: "${prompt.substring(0, 50)}..."`);
+async function simpleInteraction(prompt, llmType, attachments, options = null) { // Added async here for the setTimeout
+    const mode = options && typeof options === 'object' ? options.mode : null;
+    const prepareAttachmentsOnly = mode === 'prepare_attachments';
+    const promptText = typeof prompt === 'string' ? prompt : String(prompt || '');
+
+    console.log(`[SimpleInteraction INJECTED] Attempting on ${llmType} (mode=${prepareAttachmentsOnly ? 'prepare_attachments' : 'send'}) with prompt: "${promptText.substring(0, 50)}..."`);
 
     try {
         let inputElement = null;
         let sendButton = null;
+        const attachmentPayloads = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
+
+        function base64ToUint8Array(base64) {
+            const cleaned = String(base64 || '').replace(/\s+/g, '');
+            const binary = atob(cleaned);
+            const len = binary.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i += 1) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return bytes;
+        }
+
+        function acceptAllowsFile(accept, file) {
+            const acceptValue = String(accept || '').trim().toLowerCase();
+            if (!acceptValue) return true;
+            const tokens = acceptValue
+                .split(',')
+                .map((token) => token.trim())
+                .filter(Boolean);
+            if (tokens.length === 0) return true;
+
+            const name = String(file?.name || '').toLowerCase();
+            const mime = String(file?.type || '').toLowerCase();
+
+            return tokens.some((token) => {
+                if (token === '*/*') return true;
+                if (token.endsWith('/*')) {
+                    const prefix = token.slice(0, -1);
+                    return mime.startsWith(prefix);
+                }
+                if (token.startsWith('.')) {
+                    return name.endsWith(token);
+                }
+                if (token.includes('/')) {
+                    return mime === token;
+                }
+                return false;
+            });
+        }
+
+        async function attachFilesToComposer(targetInput) {
+            if (attachmentPayloads.length === 0) return { success: true, attached: 0 };
+
+            const files = [];
+            for (const att of attachmentPayloads) {
+                const base64 = String(att?.base64 || '').trim();
+                if (!base64) continue;
+                const name = typeof att?.name === 'string' && att.name.trim() ? att.name.trim() : 'attachment';
+                const type = typeof att?.type === 'string' && att.type.trim() ? att.type.trim() : 'application/octet-stream';
+                const lastModified = Number.isFinite(att?.lastModified) ? att.lastModified : Date.now();
+                try {
+                    const bytes = base64ToUint8Array(base64);
+                    files.push(new File([bytes], name, { type, lastModified }));
+                } catch (error) {
+                    return { success: false, error: `Failed to decode ${name}: ${error?.message || error}` };
+                }
+            }
+
+            if (files.length === 0) return { success: true, attached: 0 };
+
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const container = targetInput?.closest?.('form') || targetInput?.closest?.('main') || targetInput?.parentElement || document.body;
+
+            const collectSearchRoots = (rootNode) => {
+                const roots = [];
+                const queue = [];
+                const seen = new Set();
+                if (rootNode) queue.push(rootNode);
+
+                while (queue.length > 0) {
+                    const current = queue.shift();
+                    if (!current || seen.has(current)) continue;
+                    seen.add(current);
+                    roots.push(current);
+
+                    let walker = null;
+                    try {
+                        walker = document.createTreeWalker(current, NodeFilter.SHOW_ELEMENT);
+                    } catch (error) {
+                        walker = null;
+                    }
+                    if (!walker) continue;
+
+                    let node = walker.currentNode;
+                    while (node) {
+                        if (node.shadowRoot) queue.push(node.shadowRoot);
+                        if (node.tagName === 'IFRAME') {
+                            try {
+                                if (node.contentDocument) queue.push(node.contentDocument);
+                            } catch (error) {
+                                // ignore cross-origin frames
+                            }
+                        }
+                        node = walker.nextNode();
+                    }
+                }
+
+                return roots;
+            };
+
+            const querySelectorAllDeep = (rootNode, selector) => {
+                const results = [];
+                const seenNodes = new Set();
+                const roots = collectSearchRoots(rootNode);
+                for (const root of roots) {
+                    let matches = [];
+                    try {
+                        matches = Array.from(root.querySelectorAll(selector));
+                    } catch (error) {
+                        continue;
+                    }
+                    for (const match of matches) {
+                        if (!match || seenNodes.has(match)) continue;
+                        seenNodes.add(match);
+                        results.push(match);
+                    }
+                }
+                return results;
+            };
+
+            const findFileInputs = () => {
+                let found = querySelectorAllDeep(container, 'input[type="file"]');
+                if (found.length === 0) {
+                    found = querySelectorAllDeep(document, 'input[type="file"]');
+                }
+                return found.filter((input) => input && !input.disabled);
+            };
+
+            const assignFiles = async (input, nextFiles) => {
+                const dataTransfer = new DataTransfer();
+                nextFiles.forEach((file) => dataTransfer.items.add(file));
+                try {
+                    input.files = dataTransfer.files;
+                } catch (error) {
+                    return { success: false, error: `Failed to set input.files: ${error?.message || error}` };
+                }
+                input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                await sleep(120);
+                return { success: true };
+            };
+
+            const attachViaInputs = async (candidateInputs) => {
+                const inputs = Array.isArray(candidateInputs) ? candidateInputs.filter(Boolean) : [];
+                if (inputs.length === 0) {
+                    return { success: false, error: 'No usable file inputs found.' };
+                }
+
+                const groups = new Map();
+                for (const file of files) {
+                    const candidates = inputs.filter((input) => acceptAllowsFile(input.getAttribute('accept'), file));
+                    const chosen = candidates[0] || inputs[0];
+                    if (!groups.has(chosen)) groups.set(chosen, []);
+                    groups.get(chosen).push(file);
+                }
+
+                let attached = 0;
+                for (const [input, groupFiles] of groups.entries()) {
+                    if (!input.multiple && groupFiles.length > 1) {
+                        for (const single of groupFiles) {
+                            const result = await assignFiles(input, [single]);
+                            if (!result.success) return result;
+                            attached += 1;
+                        }
+                    } else {
+                        const result = await assignFiles(input, groupFiles);
+                        if (!result.success) return result;
+                        attached += groupFiles.length;
+                    }
+                }
+
+                return { success: true, attached, method: 'file_input' };
+            };
+
+            const dispatchDragEvent = (eventType, target, dataTransfer) => {
+                if (!target || !(target instanceof Element)) return false;
+                let event;
+                try {
+                    event = new DragEvent(eventType, { bubbles: true, cancelable: true });
+                } catch (error) {
+                    event = new Event(eventType, { bubbles: true, cancelable: true });
+                }
+                try {
+                    Object.defineProperty(event, 'dataTransfer', { value: dataTransfer });
+                } catch (error) {
+                    // ignore defineProperty failures
+                }
+                return target.dispatchEvent(event);
+            };
+
+            const attachViaDrop = async () => {
+                if (!('DataTransfer' in window)) {
+                    return { success: false, error: 'DataTransfer is unavailable (cannot use drag/drop fallback).' };
+                }
+
+                const dataTransfer = new DataTransfer();
+                files.forEach((file) => dataTransfer.items.add(file));
+
+                const rootEl = container instanceof Element ? container : document.body;
+                const targets = [targetInput, rootEl, document.body].filter(Boolean);
+                const uniqueTargets = [];
+                targets.forEach((el) => {
+                    if (el instanceof Element && !uniqueTargets.includes(el)) uniqueTargets.push(el);
+                });
+
+                for (const target of uniqueTargets) {
+                    dispatchDragEvent('dragenter', target, dataTransfer);
+                    dispatchDragEvent('dragover', target, dataTransfer);
+                    dispatchDragEvent('drop', target, dataTransfer);
+                }
+
+                const fileNames = files.map((file) => String(file?.name || '').trim()).filter(Boolean);
+                const textRoots = (() => {
+                    const roots = [];
+                    const preferred = targetInput?.closest?.('form') || targetInput?.parentElement || null;
+                    [preferred, rootEl, document.body].forEach((node) => {
+                        if (!(node instanceof Element)) return;
+                        if (!roots.includes(node)) roots.push(node);
+                    });
+                    return roots;
+                })();
+                const startedAt = Date.now();
+                const timeoutMs = 8000;
+                while (Date.now() - startedAt < timeoutMs) {
+                    const inputsNow = findFileInputs();
+                    if (inputsNow.some((input) => input?.files && input.files.length > 0)) {
+                        return { success: true, attached: files.length, method: 'drop', confirmed: true };
+                    }
+                    if (fileNames.length > 0) {
+                        for (const root of textRoots) {
+                            const text = (root?.innerText || root?.textContent || '').trim();
+                            if (text && fileNames.some((name) => text.includes(name))) {
+                                return { success: true, attached: files.length, method: 'drop', confirmed: true };
+                            }
+                        }
+                    }
+                    await sleep(200);
+                }
+
+                return { success: false, error: 'Drag/drop fallback did not confirm that files were attached.' };
+            };
+
+            let inputs = findFileInputs();
+            if (inputs.length > 0) {
+                const inputResult = await attachViaInputs(inputs);
+                if (inputResult.success) return inputResult;
+                console.warn('[SimpleInteraction INJECTED] File-input attach failed; trying drag/drop fallback.', inputResult.error);
+            }
+
+            const dropResult = await attachViaDrop();
+            if (!dropResult.success) {
+                if (inputs.length === 0) {
+                    return {
+                        success: false,
+                        error: `No file input found on the page (including open shadow roots), and drag/drop fallback failed: ${dropResult.error || 'unknown error'}`
+                    };
+                }
+                return dropResult;
+            }
+
+            // Drop may have caused a hidden file input to appear. Prefer setting it explicitly if possible.
+            inputs = findFileInputs();
+            if (inputs.some((input) => input?.files && input.files.length > 0)) {
+                return { success: true, attached: files.length, method: 'drop' };
+            }
+            if (inputs.length > 0) {
+                const retry = await attachViaInputs(inputs);
+                if (retry.success) return retry;
+                return retry;
+            }
+
+            return { success: true, attached: files.length, method: 'drop' };
+        }
 
         const inputSelectors = {
             chatgpt: [
@@ -3271,14 +3857,29 @@ async function simpleInteraction(prompt, llmType) { // Added async here for the 
         console.log(`[SimpleInteraction INJECTED] Successfully found input for ${llmType}:`, inputElement);
         inputElement.focus(); // Focus the element first
 
+        if (attachmentPayloads.length > 0) {
+            console.log(`[SimpleInteraction INJECTED] Attaching ${attachmentPayloads.length} file(s) for ${llmType}...`);
+            const attachResult = await attachFilesToComposer(inputElement);
+            if (!attachResult.success) {
+                const errMsg = `[SimpleInteraction INJECTED] Attachment upload failed for ${llmType}: ${attachResult.error || 'unknown error'}`;
+                console.error(errMsg);
+                return { success: false, error: errMsg, details: { stage: 'attachments' } };
+            }
+            console.log(`[SimpleInteraction INJECTED] Attached ${attachResult.attached} file(s) for ${llmType}.`);
+        }
+
         // --- Setting the prompt ---
+        if (prepareAttachmentsOnly) {
+            return { success: true, method: 'prepare_attachments' };
+        }
+
         if (llmType === 'chatgpt' && inputElement.tagName === 'TEXTAREA') {
             console.log(`[SimpleInteraction INJECTED] Setting prompt for ChatGPT TEXTAREA`);
             const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
             if (nativeInputValueSetter) {
-                nativeInputValueSetter.call(inputElement, prompt);
+                nativeInputValueSetter.call(inputElement, promptText);
             } else {
-                inputElement.value = prompt;
+                inputElement.value = promptText;
             }
             inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
             inputElement.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
@@ -3290,12 +3891,12 @@ async function simpleInteraction(prompt, llmType) { // Added async here for the 
                    (inputElement.isContentEditable || inputElement.contentEditable === 'true')) { // General contentEditable case
             console.log(`[SimpleInteraction INJECTED] Setting prompt for contentEditable element (${llmType})`);
             document.execCommand('selectAll', false, null);
-            const insertSuccess = document.execCommand('insertText', false, prompt);
+            const insertSuccess = document.execCommand('insertText', false, promptText);
             console.log(`[SimpleInteraction INJECTED] Used document.execCommand('insertText'). Success: ${insertSuccess}.`);
             inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true })); // Ensure input event fires for contentEditable too
         } else { // Fallback for other input types (e.g. Gemini using a textarea which is rare)
             console.log(`[SimpleInteraction INJECTED] Setting prompt for standard input/textarea element (${llmType})`);
-            inputElement.value = prompt;
+            inputElement.value = promptText;
             inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
             inputElement.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
         }
@@ -3304,67 +3905,230 @@ async function simpleInteraction(prompt, llmType) { // Added async here for the 
         await new Promise(resolve => setTimeout(resolve, 50));
         const currentText = (inputElement.isContentEditable || inputElement.contentEditable === 'true') ? inputElement.textContent : inputElement.value;
         console.log(`[SimpleInteraction INJECTED] Text in input field for ${llmType} after setting: "${currentText.substring(0,100)}..."`);
-        if (!currentText.includes(prompt.substring(0, Math.min(prompt.length, 50)))) {
-            console.warn(`[SimpleInteraction INJECTED] WARNING: Prompt may not have been set correctly for ${llmType}. Expected start: "${prompt.substring(0,50)}...", Got: "${currentText.substring(0,50)}..."`);
+        if (!currentText.includes(promptText.substring(0, Math.min(promptText.length, 50)))) {
+            console.warn(`[SimpleInteraction INJECTED] WARNING: Prompt may not have been set correctly for ${llmType}. Expected start: "${promptText.substring(0,50)}...", Got: "${currentText.substring(0,50)}..."`);
         }
 
-
-        // --- Find and click send button ---
-        const buttonSelectors = {
-             chatgpt: [
-                'button[data-testid="send-button"]',
-                'button[data-testid="fruitjuice-send-button"]',
-                'button[aria-label="Send message" i]',
-                'form button[type="submit"]',
-                'button[class*="bottom"] span[data-state="closed"]',
-                'button:has(svg > path[d*="M7 11L12 6L17 11M12 18V7"])'
-            ],
-            gemini: [ // Gemini send button selectors
-                'button[aria-label="Send message"]',      // Primary target for Gemini
-                'button[data-testid="send-button"]',      // If available
-                'button.send-button',                     // If class is used
-                'button:has(svg[aria-label="Send message"])', // Button containing the send SVG
-                'button.send-button-container button'     // A common pattern in Gemini
-            ],
-            generic: [
-                'button[type="submit"]',
-                'button[aria-label*="Send" i]',
-                'button:has(svg)',
-            ]
+        // --- Send (wait for uploads/attachment processing) ---
+        const providerUiConfig = {
+            chatgpt: {
+                sendSelectors: [
+                    'button[data-testid="send-button"]',
+                    'button[data-testid="fruitjuice-send-button"]',
+                    'button[aria-label="Send message" i]',
+                    'button[type="submit"]'
+                ],
+                sendFallbackSelectors: [
+                    'button[aria-label*="send" i]',
+                    'button[type="submit"]'
+                ],
+                stopSelectors: [
+                    'button[data-testid="stop-button"]',
+                    'button[data-testid="stop-generating-button"]',
+                    'button[aria-label*="stop" i]'
+                ]
+            },
+            gemini: {
+                sendSelectors: [
+                    'button[aria-label="Send message" i]',
+                    'button[data-testid="send-button"]',
+                    'button.send-button',
+                    'button.send-button-container button'
+                ],
+                sendFallbackSelectors: [
+                    'button[aria-label*="send" i]',
+                    'button[type="submit"]'
+                ],
+                stopSelectors: [
+                    'button[aria-label*="stop" i]',
+                    'button[data-testid*="stop" i]'
+                ]
+            },
+            generic: {
+                sendSelectors: [
+                    'button[type="submit"]',
+                    'button[aria-label*="send" i]'
+                ],
+                sendFallbackSelectors: [
+                    'button[aria-label*="send" i]',
+                    'button[type="submit"]'
+                ],
+                stopSelectors: [
+                    'button[aria-label*="stop" i]',
+                    'button[data-testid*="stop" i]'
+                ]
+            }
         };
-        
-        const currentButtonSelectors = buttonSelectors[llmType] ? 
-                                       [...buttonSelectors[llmType], ...buttonSelectors.generic] : 
-                                       buttonSelectors.generic;
 
-        for (const selector of currentButtonSelectors) {
-            const buttons = document.querySelectorAll(selector);
-            for (const btn of buttons) {
-                const style = window.getComputedStyle(btn);
-                if (btn && !btn.disabled && btn.offsetParent !== null && 
-                    style.display !== 'none' && style.visibility !== 'hidden' && 
-                    btn.offsetHeight > 0 && btn.offsetWidth > 0) {
-                    sendButton = btn;
-                    console.log(`[SimpleInteraction INJECTED] Found send button for ${llmType} with: ${selector}`, sendButton);
+        const ui = providerUiConfig[llmType] || providerUiConfig.generic;
+
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        const resolveInputElement = () => {
+            if (inputElement && inputElement.isConnected) return inputElement;
+            const selectors = Array.isArray(currentInputSelectors) ? currentInputSelectors : [];
+            for (const selector of selectors) {
+                const candidate = document.querySelector(selector);
+                if (candidate) {
+                    inputElement = candidate;
                     break;
                 }
             }
-            if (sendButton) break;
+            return inputElement;
+        };
+
+        const getInputText = () => {
+            const el = resolveInputElement();
+            if (!el) return '';
+            if (el.isContentEditable || el.contentEditable === 'true') return el.textContent || '';
+            return el.value || '';
+        };
+
+        const isVisible = (el) => {
+            if (!el || !(el instanceof Element) || !el.isConnected) return false;
+            const style = window.getComputedStyle(el);
+            if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+            if (style.opacity === '0' || style.pointerEvents === 'none') return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 2 && rect.height > 2;
+        };
+
+        const isDisabledButton = (btn) => {
+            if (!btn) return true;
+            if (btn.disabled) return true;
+            const aria = btn.getAttribute && btn.getAttribute('aria-disabled');
+            if (typeof aria === 'string' && aria.toLowerCase() === 'true') return true;
+            if (btn.getAttribute && btn.getAttribute('disabled') !== null) return true;
+            return false;
+        };
+
+        const resolveComposerRoot = () => {
+            const inputEl = resolveInputElement();
+            const root = inputEl?.closest?.('form') || inputEl?.closest?.('main') || document.body;
+            return root && root.isConnected ? root : document.body;
+        };
+
+        const findFirstButton = (selectors, { allowDisabled = false } = {}) => {
+            const list = Array.isArray(selectors) ? selectors : [];
+            for (const selector of list) {
+                const roots = (() => {
+                    const root = resolveComposerRoot();
+                    return root === document.body ? [document.body] : [root, document.body];
+                })();
+                for (const root of roots) {
+                    let nodes = [];
+                    try {
+                        nodes = Array.from(root.querySelectorAll(selector));
+                    } catch (error) {
+                        continue;
+                    }
+                    for (const node of nodes) {
+                        if (!(node instanceof HTMLElement)) continue;
+                        if (!isVisible(node)) continue;
+                        if (!allowDisabled && isDisabledButton(node)) continue;
+                        return node;
+                    }
+                }
+            }
+            return null;
+        };
+
+        const findSendButton = ({ allowDisabled = false, includeFallback = false } = {}) => {
+            const selectors = includeFallback
+                ? [...ui.sendSelectors, ...ui.sendFallbackSelectors]
+                : ui.sendSelectors;
+            return findFirstButton(selectors, { allowDisabled });
+        };
+
+        const findStopButton = () => findFirstButton(ui.stopSelectors, { allowDisabled: true });
+
+        const waitForSendReady = async ({ timeoutMs, stableMs = 350, pollMs = 200 } = {}) => {
+            const startedAt = Date.now();
+            let stableSince = 0;
+            while (Date.now() - startedAt < timeoutMs) {
+                const btn = findSendButton({ allowDisabled: false, includeFallback: false });
+                if (btn) {
+                    if (!stableSince) stableSince = Date.now();
+                    if (Date.now() - stableSince >= stableMs) return btn;
+                } else {
+                    stableSince = 0;
+                }
+                await sleep(pollMs);
+            }
+            const disabledCandidate = findSendButton({ allowDisabled: true, includeFallback: true });
+            const hint = disabledCandidate
+                ? `found disabled send button (${disabledCandidate.tagName.toLowerCase()})`
+                : 'send button not found';
+            throw new Error(`Timed out waiting for Send to become ready (${hint}).`);
+        };
+
+        const waitForSendAcknowledged = async ({ timeoutMs = 10000, pollMs = 150 } = {}) => {
+            const startedAt = Date.now();
+            while (Date.now() - startedAt < timeoutMs) {
+                const current = getInputText().trim();
+                if (!current) return true;
+                const stopBtn = findStopButton();
+                if (stopBtn && isVisible(stopBtn) && !isDisabledButton(stopBtn)) return true;
+                await sleep(pollMs);
+            }
+            return false;
+        };
+
+        const clickSendButton = (btn) => {
+            if (!btn) return;
+            btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, composed: true, cancelable: true }));
+            btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, composed: true, cancelable: true }));
+            btn.click();
+        };
+
+        const pressEnterToSend = () => {
+            const el = resolveInputElement();
+            if (!el) return;
+            el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, composed: true }));
+            el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, composed: true }));
+        };
+
+        const hasAttachments = attachmentPayloads.length > 0;
+        const wantsLongReadyWait = (() => {
+            if (hasAttachments) return true;
+            const candidate = findSendButton({ allowDisabled: true, includeFallback: true });
+            return Boolean(candidate && isVisible(candidate) && isDisabledButton(candidate));
+        })();
+        const readyTimeoutMs = wantsLongReadyWait ? 120000 : 6000;
+        const maxAttempts = wantsLongReadyWait ? 3 : 2;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            if (wantsLongReadyWait || attempt > 1) {
+                console.log(`[SimpleInteraction INJECTED] Waiting for Send to be ready for ${llmType} (attempt ${attempt}/${maxAttempts})...`);
+                await waitForSendReady({ timeoutMs: readyTimeoutMs });
+            } else {
+                // Allow the UI to enable the Send button after we set the prompt.
+                await sleep(75);
+            }
+
+            const button = findSendButton({ allowDisabled: false, includeFallback: true });
+            if (button) {
+                console.log(`[SimpleInteraction INJECTED] Clicking Send for ${llmType} (attempt ${attempt}).`, button);
+                clickSendButton(button);
+            } else {
+                console.warn(`[SimpleInteraction INJECTED] Send button not found for ${llmType}; attempting Enter (attempt ${attempt}).`);
+                pressEnterToSend();
+            }
+
+            const acknowledged = await waitForSendAcknowledged();
+            if (acknowledged) {
+                return {
+                    success: true,
+                    method: button ? `button_click_for_${llmType}` : `enter_key_for_${llmType}`,
+                    details: { stage: 'send', attempts: attempt }
+                };
+            }
+            console.warn(`[SimpleInteraction INJECTED] Send not acknowledged for ${llmType} (attempt ${attempt}).`);
         }
-        
-        if (!sendButton) {
-            console.warn(`[SimpleInteraction INJECTED] No send button found for ${llmType} via selectors. Attempting Enter key on input.`);
-            inputElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, composed: true }));
-            console.log(`[SimpleInteraction INJECTED] Dispatched Enter keydown to input for ${llmType}.`);
-            return { success: true, method: `enter_key_fallback_on_input_for_${llmType}`, details: { stage: 'send_enter_fallback' } };
-        }
-        
-        console.log(`[SimpleInteraction INJECTED] Clicking send button for ${llmType}:`, sendButton);
-        sendButton.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, composed: true, cancelable: true }));
-        sendButton.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, composed: true, cancelable: true }));
-        sendButton.click();
-        
-        return { success: true, method: `button_click_for_${llmType}`, details: { stage: 'send_button_click' } };
+
+        const errMsg = `[SimpleInteraction INJECTED] Failed to send message for ${llmType}: no acknowledgement after ${maxAttempts} attempt(s).`;
+        console.error(errMsg);
+        return { success: false, error: errMsg, details: { stage: 'send_not_acknowledged' } };
         
     } catch (error) {
         const errMsg = `[SimpleInteraction INJECTED] Error during interaction with ${llmType}: ${error.message} (Stack: ${error.stack})`;
