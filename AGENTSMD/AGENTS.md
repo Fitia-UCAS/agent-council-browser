@@ -485,6 +485,7 @@ TAB_PROFILES updates:
   - Resume session (RESUME_SESSION)
 - Dropdown entries show profile label plus status and in-use hints when applicable.
 - Prompt templates can be edited in the side panel (3-field editor; optional advanced raw JSON) and saved to `mlc_debate_prompts_override_v1`.
+- The composer prompt input has no extension-enforced character limit (provider UIs may still impose their own).
 
 ## 7) Tab selection logic
 
