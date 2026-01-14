@@ -7,6 +7,9 @@ This file is the durable memory for the repo. It is the canonical reference for 
 - Chrome extension that runs a **side panel chat UI** with either:
   - a multi‑iteration debate between ChatGPT and Gemini, or
   - a direct send to ChatGPT, Gemini, or both (no debate scaffolding).
+- Side panel supports **attachments** (files/images) that are delivered via provider web UI automation (no official APIs).
+  - ChatGPT: attachments are auto-uploaded when possible (best-effort pre-upload may start while another provider is answering).
+  - Gemini: attachments are **not auto-uploaded**; Gemini receives text-only when files are attached in the side panel (UI warns before sending).
 - It can also **forward prompts between LLM pages** via injected toggle buttons (legacy flow, still present).
 - The side panel is the primary UI: clicking the extension icon opens the side panel (no popup).
 
@@ -81,6 +84,11 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Selected profiles are valid (status OK, tab exists) for the providers required by the selected Send-to target
 - The background still validates profiles before every prompt injection.
 - If a profile goes offline or navigates away, the session pauses with a clear reason and fix actions.
+- Attachments:
+  - Attachments are kept **in-memory only** for the active session (not persisted to `chrome.storage.local`).
+  - Attachments are delivered once per provider per session.
+  - If a provider cannot be auto-attached, the extension sends **text-only** to that provider.
+  - If any required provider needs manual upload, a small modal appears; clicking **OK** only acknowledges the notice (it does not start the run). The user uploads manually, then clicks **Send** again.
 
 ### Long‑running responses
 
@@ -485,6 +493,7 @@ TAB_PROFILES updates:
   - Resume session (RESUME_SESSION)
 - Dropdown entries show profile label plus status and in-use hints when applicable.
 - Prompt templates can be edited in the side panel (3-field editor; optional advanced raw JSON) and saved to `mlc_debate_prompts_override_v1`.
+- The composer prompt input has no extension-enforced character limit (provider UIs may still impose their own).
 
 ## 7) Tab selection logic
 
