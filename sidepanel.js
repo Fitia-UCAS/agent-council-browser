@@ -315,6 +315,26 @@ function renderRouteUi() {
 
     renderRouteSelectedChips(route);
     renderRouteProviderList(route);
+    updateRouteConnectAllUi();
+}
+
+function updateRouteConnectAllUi() {
+    if (!elements.routeConnectAll) return;
+    const supported = getSupportedProviders();
+    const anyConnecting = supported.some((provider) => Boolean(state.connecting?.[provider]));
+    const anyNeedsConnect = supported.some((provider) => !Boolean(state.connectionStatus?.[provider]));
+    if (anyConnecting) {
+        elements.routeConnectAll.textContent = 'Connecting…';
+        elements.routeConnectAll.disabled = true;
+        return;
+    }
+    if (!anyNeedsConnect) {
+        elements.routeConnectAll.textContent = 'All connected';
+        elements.routeConnectAll.disabled = true;
+        return;
+    }
+    elements.routeConnectAll.textContent = 'Connect all';
+    elements.routeConnectAll.disabled = false;
 }
 
 function renderRouteSelectedChips(route) {

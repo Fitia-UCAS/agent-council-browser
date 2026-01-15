@@ -1107,6 +1107,15 @@ textarea:focus {
   gap: 8px;
 }
 
+.route-connect-all {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
 .route-provider-item {
   display: flex;
   align-items: center;
@@ -1179,13 +1188,6 @@ textarea:focus {
   gap: 12px;
   flex-wrap: wrap;
   padding-top: 6px;
-}
-
-.route-footer-left {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
 }
 
 .composer-attachments {
