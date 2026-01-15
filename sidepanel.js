@@ -103,7 +103,6 @@ function sanitizeRoute(input) {
     let kind = 'single';
     if (providers.length >= 2) {
         if (requestedKind === 'debate' && providers.length === 2) kind = 'debate';
-        else if (requestedKind === 'chain') kind = 'chain';
         else kind = 'parallel';
     }
 
@@ -243,6 +242,7 @@ function setRouteKind(kind) {
     if (providers.length < 2) return;
     const normalizedKind = String(kind || '').trim().toLowerCase();
     if (normalizedKind === 'debate' && providers.length !== 2) return;
+    if (normalizedKind !== 'parallel' && normalizedKind !== 'debate') return;
     setRoute({ ...route, kind: normalizedKind });
 }
 
@@ -279,9 +279,6 @@ function formatRouteSummary(route) {
     if (route?.kind === 'debate' && providers.length === 2) {
         return `Debate (${names[0]} ↔ ${names[1]}, ${route.rounds || 1})`;
     }
-    if (route?.kind === 'chain') {
-        return `Chain (${names.join(' → ')})`;
-    }
     return names.join(' + ');
 }
 
@@ -303,9 +300,6 @@ function renderRouteUi() {
 
     if (elements.routeModeParallel) {
         elements.routeModeParallel.classList.toggle('is-active', providerCount >= 2 && route.kind === 'parallel');
-    }
-    if (elements.routeModeChain) {
-        elements.routeModeChain.classList.toggle('is-active', providerCount >= 2 && route.kind === 'chain');
     }
     if (elements.routeModeDebate) {
         elements.routeModeDebate.classList.toggle('is-active', providerCount === 2 && route.kind === 'debate');
@@ -368,6 +362,7 @@ function renderRouteProviderList(route) {
         const ready = Boolean(state.connectionStatus?.[provider]);
         const connecting = Boolean(state.connecting?.[provider]);
         const profile = getDefaultProfile(provider);
+        const connected = Boolean(profile?.tabId && ready);
         const modelHint = profile?.modelHint ? ` • ${profile.modelHint}` : '';
 
         let statusText = 'Not connected';
@@ -377,9 +372,9 @@ function renderRouteProviderList(route) {
         else if (profile?.status === 'unknown') statusText = 'Loading…';
         else if (profile?.status === 'ok') statusText = 'Waiting…';
 
-        const usingText = profile?.tabId
+        const usingText = connected
             ? `Using: ${profile.label || formatProviderLabel(provider)}${modelHint}`
-            : 'No tab yet';
+            : (profile?.label ? `Last: ${profile.label}${modelHint}` : 'No tab yet');
 
         const item = document.createElement('div');
         item.className = 'route-provider-item';
@@ -412,33 +407,44 @@ function renderRouteProviderList(route) {
         const actions = document.createElement('div');
         actions.className = 'route-provider-actions';
 
-        const toggle = document.createElement('button');
-        toggle.type = 'button';
-        toggle.className = 'ghost-button';
-        toggle.dataset.action = 'toggle-provider';
-        toggle.dataset.provider = provider;
-        toggle.textContent = selected ? 'Remove' : 'Add';
-        toggle.setAttribute('aria-pressed', selected ? 'true' : 'false');
+        if (!connected) {
+            const connect = document.createElement('button');
+            connect.type = 'button';
+            connect.className = 'ghost-button';
+            connect.dataset.action = 'connect-provider';
+            connect.dataset.provider = provider;
+            connect.textContent = connecting ? 'Connecting…' : 'Connect';
+            connect.disabled = connecting;
+            actions.appendChild(connect);
+        } else {
+            const toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.className = 'ghost-button';
+            toggle.dataset.action = 'toggle-provider';
+            toggle.dataset.provider = provider;
+            toggle.textContent = selected ? 'Remove' : 'Add';
+            toggle.setAttribute('aria-pressed', selected ? 'true' : 'false');
 
-        const focus = document.createElement('button');
-        focus.type = 'button';
-        focus.className = 'ghost-button';
-        focus.dataset.provider = provider;
-        focus.dataset.action = 'focus-provider';
-        focus.textContent = 'Focus';
-        focus.disabled = connecting || !profile?.tabId;
+            const focus = document.createElement('button');
+            focus.type = 'button';
+            focus.className = 'ghost-button';
+            focus.dataset.provider = provider;
+            focus.dataset.action = 'focus-provider';
+            focus.textContent = 'Focus';
+            focus.disabled = connecting || !profile?.tabId;
 
-        const newTab = document.createElement('button');
-        newTab.type = 'button';
-        newTab.className = 'ghost-button';
-        newTab.dataset.provider = provider;
-        newTab.dataset.action = 'new-tab';
-        newTab.textContent = connecting ? 'Opening…' : 'New tab';
-        newTab.disabled = connecting;
+            const newTab = document.createElement('button');
+            newTab.type = 'button';
+            newTab.className = 'ghost-button';
+            newTab.dataset.provider = provider;
+            newTab.dataset.action = 'new-tab';
+            newTab.textContent = connecting ? 'Opening…' : 'New tab';
+            newTab.disabled = connecting;
 
-        actions.appendChild(toggle);
-        actions.appendChild(focus);
-        actions.appendChild(newTab);
+            actions.appendChild(toggle);
+            actions.appendChild(focus);
+            actions.appendChild(newTab);
+        }
 
         item.appendChild(meta);
         item.appendChild(actions);
@@ -455,6 +461,16 @@ function handleRouteProviderListClick(event) {
     const provider = normalizeProviderId(providerFromButton || target.closest('[data-provider]')?.dataset.provider);
     if (!provider) return;
 
+    const connectAndAdd = () => {
+        const route = state.route || getDefaultRoute();
+        const providers = [...(route.providers || [])];
+        if (!providers.includes(provider)) {
+            providers.push(provider);
+            setRoute({ ...route, providers });
+        }
+        connectProvider(provider);
+    };
+
     if (action === 'focus-provider') {
         focusProvider(provider);
         return;
@@ -463,7 +479,17 @@ function handleRouteProviderListClick(event) {
         connectProvider(provider);
         return;
     }
+    if (action === 'connect-provider') {
+        connectAndAdd();
+        return;
+    }
     if (action === 'toggle-provider' || !action) {
+        const profile = getDefaultProfile(provider);
+        const connected = Boolean(profile?.tabId && Boolean(state.connectionStatus?.[provider]));
+        if (!action && !connected) {
+            connectAndAdd();
+            return;
+        }
         const route = state.route || getDefaultRoute();
         const providers = [...(route.providers || [])];
         const existingIndex = providers.indexOf(provider);
@@ -551,7 +577,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.routeProviderList = document.getElementById('route-provider-list');
     elements.routeModeSection = document.getElementById('route-mode-section');
     elements.routeModeParallel = document.getElementById('route-mode-parallel');
-    elements.routeModeChain = document.getElementById('route-mode-chain');
     elements.routeModeDebate = document.getElementById('route-mode-debate');
     elements.routeDebateSettings = document.getElementById('route-debate-settings');
     elements.routeRounds = document.getElementById('route-rounds');
@@ -559,6 +584,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.routePresetSingle = document.getElementById('route-preset-single');
     elements.routePresetCompare = document.getElementById('route-preset-compare');
     elements.routePresetDebate = document.getElementById('route-preset-debate');
+    elements.routeConnectAll = document.getElementById('route-connect-all');
     elements.routeManageProviders = document.getElementById('route-manage-providers');
     elements.routeDone = document.getElementById('route-done');
 
@@ -723,6 +749,10 @@ function bindEvents() {
 
     if (elements.routeDone) {
         elements.routeDone.addEventListener('click', closeRoutePopover);
+    }
+
+    if (elements.routeConnectAll) {
+        elements.routeConnectAll.addEventListener('click', connectAllProviders);
     }
 
     if (elements.routeManageProviders) {
@@ -1627,7 +1657,6 @@ function isRouteValid(route) {
 function isRouteSupported(route) {
     if (!isRouteValid(route)) return false;
     const providers = Array.isArray(route?.providers) ? route.providers : [];
-    if (route.kind === 'chain') return false;
     if (route.kind === 'single') return providers.length === 1;
     if (route.kind === 'debate') return providers.length === 2 && providers.every((p) => p === 'chatgpt' || p === 'gemini');
     if (route.kind === 'parallel') {
@@ -2083,6 +2112,33 @@ function connectProvider(provider) {
     });
 }
 
+function connectAllProviders() {
+    const supported = getSupportedProviders();
+    if (supported.length === 0) return;
+
+    const route = state.route || getDefaultRoute();
+    const providers = [...(route.providers || [])];
+    let didChangeRoute = false;
+
+    supported.forEach((provider) => {
+        if (!providers.includes(provider)) {
+            providers.push(provider);
+            didChangeRoute = true;
+        }
+    });
+
+    if (didChangeRoute) {
+        setRoute({ ...route, providers });
+    }
+
+    supported.forEach((provider) => {
+        const profile = getDefaultProfile(provider);
+        const connected = Boolean(profile?.tabId && Boolean(state.connectionStatus?.[provider]));
+        if (connected) return;
+        connectProvider(provider);
+    });
+}
+
 function updateProviderUi() {
     const providers = ['chatgpt', 'gemini'];
     let readyCount = 0;
@@ -2164,7 +2220,7 @@ function updateComposerHint() {
     if (!validRoute) {
         hint = 'Choose a provider in To to start.';
     } else if (!supportedRoute) {
-        hint = 'Chain mode is coming soon. Choose Parallel or Debate.';
+        hint = 'This route is not supported yet.';
     } else if (!connected) {
         hint = `Connect ${requiredLabel} to start.`;
     } else if (historyBlocked) {
@@ -2192,7 +2248,7 @@ function updateComposerHint() {
     elements.promptInput.placeholder = !validRoute
         ? 'Choose a provider in To…'
         : (!supportedRoute
-            ? 'Choose Parallel or Debate…'
+            ? 'Choose a supported route…'
             : (!connected
                 ? `Connect ${requiredLabel} to start...`
                 : (historyBlocked ? 'Unlock history to continue...' : 'Send a message...')));
@@ -2237,7 +2293,7 @@ function updateEmptyState() {
 
     if (!isRouteSupported(route)) {
         if (titleEl) titleEl.textContent = 'Route not supported';
-        if (subtitleEl) subtitleEl.textContent = 'Chain mode is coming soon. Choose Parallel or Debate.';
+        if (subtitleEl) subtitleEl.textContent = 'This route is not supported yet.';
         if (actionsEl) actionsEl.hidden = false;
         return;
     }
@@ -2289,7 +2345,7 @@ async function startSession() {
         return;
     }
     if (!isRouteSupported(route)) {
-        setSessionStatus('Chain mode is coming soon. Choose Parallel or Debate.');
+        setSessionStatus('This route is not supported yet.');
         openRoutePopover();
         return;
     }

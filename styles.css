@@ -1053,7 +1053,7 @@ textarea:focus {
 
 .route-modes {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1179,6 +1179,13 @@ textarea:focus {
   gap: 12px;
   flex-wrap: wrap;
   padding-top: 6px;
+}
+
+.route-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .composer-attachments {
