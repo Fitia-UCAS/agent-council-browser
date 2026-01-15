@@ -26,6 +26,7 @@ const state = {
     providerCapabilities: null,
     route: null,
     routeLoaded: false,
+    lastFocusedProvider: null,
     manualUploadAckKey: null,
     attachments: [],
     attachmentsLoading: false,
@@ -371,13 +372,18 @@ function renderRouteProviderList(route) {
 
         let statusText = 'Not connected';
         if (connecting) statusText = 'Connecting…';
-        else if (ready) statusText = `Ready${modelHint}`;
+        else if (ready) statusText = 'Ready';
         else if (profile?.status === 'wrong_host') statusText = 'Wrong host';
         else if (profile?.status === 'unknown') statusText = 'Loading…';
         else if (profile?.status === 'ok') statusText = 'Waiting…';
 
+        const usingText = profile?.tabId
+            ? `Using: ${profile.label || formatProviderLabel(provider)}${modelHint}`
+            : 'No tab yet';
+
         const item = document.createElement('div');
         item.className = 'route-provider-item';
+        item.classList.toggle('is-active', provider === state.lastFocusedProvider);
         item.dataset.provider = provider;
 
         const meta = document.createElement('div');
@@ -400,7 +406,7 @@ function renderRouteProviderList(route) {
 
         const status = document.createElement('div');
         status.className = 'route-provider-status';
-        status.textContent = statusText;
+        status.textContent = `${statusText} • ${usingText}`;
         meta.appendChild(status);
 
         const actions = document.createElement('div');
@@ -414,16 +420,25 @@ function renderRouteProviderList(route) {
         toggle.textContent = selected ? 'Remove' : 'Add';
         toggle.setAttribute('aria-pressed', selected ? 'true' : 'false');
 
-        const connect = document.createElement('button');
-        connect.type = 'button';
-        connect.className = 'ghost-button';
-        connect.dataset.provider = provider;
-        connect.dataset.action = ready ? 'focus-provider' : 'connect-provider';
-        connect.textContent = connecting ? 'Connecting…' : (ready ? 'Focus' : 'Connect');
-        connect.disabled = connecting;
+        const focus = document.createElement('button');
+        focus.type = 'button';
+        focus.className = 'ghost-button';
+        focus.dataset.provider = provider;
+        focus.dataset.action = 'focus-provider';
+        focus.textContent = 'Focus';
+        focus.disabled = connecting || !profile?.tabId;
+
+        const newTab = document.createElement('button');
+        newTab.type = 'button';
+        newTab.className = 'ghost-button';
+        newTab.dataset.provider = provider;
+        newTab.dataset.action = 'new-tab';
+        newTab.textContent = connecting ? 'Opening…' : 'New tab';
+        newTab.disabled = connecting;
 
         actions.appendChild(toggle);
-        actions.appendChild(connect);
+        actions.appendChild(focus);
+        actions.appendChild(newTab);
 
         item.appendChild(meta);
         item.appendChild(actions);
@@ -440,12 +455,12 @@ function handleRouteProviderListClick(event) {
     const provider = normalizeProviderId(providerFromButton || target.closest('[data-provider]')?.dataset.provider);
     if (!provider) return;
 
-    if (action === 'connect-provider') {
-        connectProvider(provider);
-        return;
-    }
     if (action === 'focus-provider') {
         focusProvider(provider);
+        return;
+    }
+    if (action === 'new-tab') {
+        connectProvider(provider);
         return;
     }
     if (action === 'toggle-provider' || !action) {
@@ -2038,6 +2053,8 @@ function getDefaultProfile(provider) {
 }
 
 function focusProvider(provider) {
+    state.lastFocusedProvider = provider;
+    renderRouteUi();
     const profile = getDefaultProfile(provider);
     if (profile?.tabId) {
         sendMessage({ type: 'FOCUS_TAB', tabId: profile.tabId }, handleActionResponse);
@@ -2049,6 +2066,7 @@ function focusProvider(provider) {
 function connectProvider(provider) {
     if (!provider) return;
     if (state.connecting[provider]) return;
+    state.lastFocusedProvider = provider;
     state.connecting[provider] = true;
     updateProviderUi();
     sendMessage({ type: 'CONNECT_PROVIDER', provider }, (response) => {
@@ -2693,10 +2711,13 @@ function hydrateSession(session) {
 
 function handleProgress(message) {
     if (!message) return;
+    const waitingFor = Array.isArray(message.waitingFor)
+        ? message.waitingFor.map(formatProviderLabel).join(' + ')
+        : String(message.waitingFor || message.waitingForLabel || '').trim();
     if (message.roundIndex && message.totalRounds) {
-        setSessionStatus(`Running round ${message.roundIndex} of ${message.totalRounds} - waiting for ${message.waitingFor}`);
-    } else if (message.waitingFor) {
-        setSessionStatus(`Waiting for ${message.waitingFor}`);
+        setSessionStatus(`Running round ${message.roundIndex} of ${message.totalRounds} - waiting for ${waitingFor}`);
+    } else if (waitingFor) {
+        setSessionStatus(`Waiting for ${waitingFor}`);
     }
 }
 

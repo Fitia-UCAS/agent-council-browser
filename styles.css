@@ -1118,6 +1118,11 @@ textarea:focus {
   background: rgba(10, 15, 22, 0.45);
 }
 
+.route-provider-item.is-active {
+  border-color: rgba(245, 158, 11, 0.55);
+  background: rgba(245, 158, 11, 0.08);
+}
+
 .route-provider-meta {
   display: flex;
   flex-direction: column;

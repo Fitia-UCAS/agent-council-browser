@@ -366,6 +366,7 @@ const defaultDebateState = {
     pausedProvider: null,
     pausedAt: 0,
     mode: 'debate',
+    route: null,
     chatId: null,
     sessionId: null,
     rounds: 0,
@@ -382,6 +383,7 @@ const defaultDebateState = {
     userMessageSequence: null,
     messages: [],
     waitingFor: null,
+    parallelPromptIds: null,
     lastPromptId: null,
     lastPromptTimestamp: 0,
     startedAt: 0,
@@ -389,6 +391,15 @@ const defaultDebateState = {
 };
 
 let activeDebateState = { ...defaultDebateState };
+let debateResponseChain = Promise.resolve();
+
+function enqueueDebateResponse(message, label) {
+    debateResponseChain = debateResponseChain
+        .then(() => handleDebateResponse(message))
+        .catch((error) => {
+            console.error(`[MLC Debate] Error handling ${label || 'response'}:`, error);
+        });
+}
 
 // Attachment payloads are intentionally kept out of chrome.storage.local (quota + privacy).
 // They live in-memory for the active session only and are cleared once delivered.
@@ -566,7 +577,7 @@ async function loadActiveDebateState() {
         if (typeof activeDebateState.isPaused !== 'boolean') {
             activeDebateState.isPaused = false;
         }
-        if (!['debate', 'single', 'direct'].includes(activeDebateState.mode)) {
+        if (!['debate', 'single', 'direct', 'parallel'].includes(activeDebateState.mode)) {
             activeDebateState.mode = 'debate';
         }
         if (typeof activeDebateState.isFollowUp !== 'boolean') {
@@ -1297,29 +1308,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ status: 'forward_received', type: message.type });
             break;
         case 'GEMINI_RESPONSE_CAPTURED':
-            handleDebateResponse(message).catch(error => {
-                console.error('[MLC Debate] Error handling Gemini response:', error);
-            });
+            enqueueDebateResponse(message, 'Gemini response');
             handleGeminiResponse(message);
             sendResponse({ status: 'gemini_response_received', type: message.type });
             break;
         case 'CHATGPT_RESPONSE_CAPTURED':
-            handleDebateResponse(message).catch(error => {
-                console.error('[MLC Debate] Error handling ChatGPT response:', error);
-            });
+            enqueueDebateResponse(message, 'ChatGPT response');
             handleChatGPTResponse(message);
             sendResponse({ status: 'chatgpt_response_received', type: message.type });
             break;
         case 'MLC_RESPONSE_CAPTURED':
-            handleDebateResponse(message).catch(error => {
-                console.error('[MLC Debate] Error handling response:', error);
-            });
+            enqueueDebateResponse(message, 'response');
             sendResponse({ status: 'mlc_response_received', type: message.type });
             break;
         case 'MULTI_AGENT_RESPONSE_CAPTURED':
-            handleDebateResponse(message).catch(error => {
-                console.error('[MLC Debate] Error handling multi-agent response:', error);
-            });
+            enqueueDebateResponse(message, 'multi-agent response');
             sendResponse({ status: 'multi_agent_response_received', type: message.type });
             break;
         case 'CHECK_CONNECTION':
@@ -1644,24 +1647,35 @@ function buildRouteFromRun(mode, { firstLLM, secondLLM, directTarget, rounds }) 
 async function handleStartDebateSession(message) {
     try {
         const prompt = (message.prompt || '').trim();
-        const mode = message.mode === 'direct'
+        const baseMode = message.mode === 'direct'
             ? 'direct'
             : (message.mode === 'single' ? 'single' : 'debate');
+        let mode = baseMode;
         const directTarget = message.target === 'both'
             ? 'both'
             : (message.target === 'gemini' ? 'gemini' : 'chatgpt');
-        const rounds = mode === 'debate' || mode === 'single'
+        const rounds = baseMode === 'debate' || baseMode === 'single'
             ? Math.min(12, Math.max(1, parseInt(message.rounds, 10) || 1))
             : 1;
         const singleLLM = message.llm === 'gemini' ? 'gemini' : 'chatgpt';
         const debateFirstLLM = message.firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
-        const [firstLLM, secondLLM] = mode === 'debate'
+        let [firstLLM, secondLLM] = baseMode === 'debate'
             ? [debateFirstLLM, debateFirstLLM === 'chatgpt' ? 'gemini' : 'chatgpt']
-            : (mode === 'single'
+            : (baseMode === 'single'
                 ? [singleLLM, null]
                 : (directTarget === 'both'
                     ? ['chatgpt', 'gemini']
                     : [directTarget, null]));
+        const route = sanitizeUiRoute(message.route) || buildRouteFromRun(baseMode, { firstLLM, secondLLM, directTarget, rounds });
+        if (route?.kind === 'parallel') {
+            mode = 'parallel';
+        } else if (route?.kind === 'debate') {
+            mode = 'debate';
+        }
+        if (Array.isArray(route?.providers) && route.providers.length > 0) {
+            firstLLM = route.providers[0] || firstLLM;
+            secondLLM = route.providers.length > 1 ? route.providers[1] : null;
+        }
         const requestedTabs = message.tabIds || {};
         const requestedProfiles = message.profileIds || null;
         const requestedChatId = typeof message.chatId === 'string' ? message.chatId : null;
@@ -1715,7 +1729,9 @@ async function handleStartDebateSession(message) {
         }
 
         const profilesState = await loadTabProfiles();
-        const requiredProviders = secondLLM ? ['chatgpt', 'gemini'] : [firstLLM];
+        const requiredProviders = Array.isArray(route?.providers) && route.providers.length > 0
+            ? route.providers
+            : (secondLLM ? ['chatgpt', 'gemini'] : [firstLLM]);
         const hasDefaultProfiles = requiredProviders.every((provider) => Boolean(profilesState.defaults?.[provider]));
         const hasExplicitTabIds = requiredProviders.some((provider) => Number.isFinite(requestedTabs[provider]));
         const hasRequestedProfiles = Boolean(requestedProfiles && requiredProviders.some((provider) => requestedProfiles?.[provider]));
@@ -1767,23 +1783,27 @@ async function handleStartDebateSession(message) {
         }
 
         const now = Date.now();
-        let runConfig = mode === 'direct'
-            ? { runType: 'direct', target: directTarget }
-            : (mode === 'single'
-                ? { mode: 'single', rounds, llm: firstLLM }
-                : { runType: 'debate', rounds, firstLLM });
-        const route = sanitizeUiRoute(message.route) || buildRouteFromRun(mode, { firstLLM, secondLLM, directTarget, rounds });
+        let runConfig = mode === 'parallel'
+            ? { runType: 'parallel', providers: requiredProviders }
+            : (mode === 'direct'
+                ? { runType: 'direct', target: directTarget }
+                : (mode === 'single'
+                    ? { mode: 'single', rounds, llm: firstLLM }
+                    : { runType: 'debate', rounds, firstLLM }));
         if (route) {
             runConfig = { ...runConfig, route };
         }
-        const totalTurns = mode === 'direct'
-            ? (secondLLM ? 2 : 1)
-            : (mode === 'single' ? rounds : rounds * 2);
+        const totalTurns = mode === 'parallel'
+            ? 1
+            : (mode === 'direct'
+                ? (secondLLM ? 2 : 1)
+                : (mode === 'single' ? rounds : rounds * 2));
         const sessionId = generateSessionId();
         activeDebateState = {
             ...defaultDebateState,
             isActive: true,
             mode,
+            route: route || null,
             chatId: chatId,
             sessionId,
             rounds: rounds,
@@ -1847,7 +1867,11 @@ async function handleStartDebateSession(message) {
         }
 
         await lockProfilesForSession(activeDebateState.sessionId, activeDebateState.profileIds);
-        await sendDebateTurn(activeDebateState);
+        if (activeDebateState.mode === 'parallel') {
+            await sendParallelTurn(activeDebateState);
+        } else {
+            await sendDebateTurn(activeDebateState);
+        }
     } catch (error) {
         console.error('[MLC Debate] Error starting session:', error);
         sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: error?.message || 'Failed to start session.' });
@@ -1863,7 +1887,7 @@ async function handleStopDebateSession(message) {
 }
 
 function getRoundIndex(turnIndex, session = null) {
-    if (session?.mode === 'direct') {
+    if (session?.mode === 'direct' || session?.mode === 'parallel') {
         return 1;
     }
     if (session?.mode === 'single') {
@@ -1873,6 +1897,9 @@ function getRoundIndex(turnIndex, session = null) {
 }
 
 function getTurnLLM(session, turnIndex) {
+    if (session?.mode === 'parallel') {
+        return session.firstLLM || 'chatgpt';
+    }
     if (session?.mode === 'direct') {
         if (turnIndex === 1) return session.firstLLM || 'chatgpt';
         return session.secondLLM || session.firstLLM || 'chatgpt';
@@ -2636,6 +2663,9 @@ async function buildDirectPrompt(session, turnIndex) {
 }
 
 async function buildSessionPrompt(session, turnIndex) {
+    if (session?.mode === 'parallel') {
+        return ((session?.userQuery || '') + '').trim();
+    }
     if (session?.mode === 'direct') {
         return buildDirectPrompt(session, turnIndex);
     }
@@ -2696,6 +2726,31 @@ async function resumeDebateSession() {
     if (!session.sessionId || !session.isPaused) {
         return { ok: false, error: 'No paused session to resume.' };
     }
+
+    if (session.mode === 'parallel') {
+        const providers = Array.isArray(session.waitingFor) && session.waitingFor.length > 0
+            ? session.waitingFor.map(normalizeProviderKey).filter(Boolean)
+            : getParallelProviders(session);
+        for (const provider of providers) {
+            const validation = await resolveSessionTab(session, provider, { requirePing: true });
+            if (!validation.ok) {
+                await pauseDebateSession(validation.error, provider);
+                return { ok: false, error: validation.error };
+            }
+        }
+        session.isPaused = false;
+        session.pausedReason = null;
+        session.pausedProvider = null;
+        session.pausedAt = 0;
+        await persistDebateState();
+        sendMessageToPopup({
+            type: 'UI_SESSION_RESUMED',
+            sessionId: session.sessionId
+        });
+        await sendParallelTurn(session, { providers });
+        return { ok: true };
+    }
+
     const expectedLLM = getTurnLLM(session, session.turnIndex);
     const validation = await resolveSessionTab(session, expectedLLM, { requirePing: true });
     if (!validation.ok) {
@@ -2868,6 +2923,125 @@ async function prefetchSessionAttachments(session, excludeProvider) {
     }
 }
 
+function getParallelProviders(session) {
+    const providers = [];
+    const candidates = Array.isArray(session?.route?.providers) && session.route.providers.length > 0
+        ? session.route.providers
+        : listSessionProviders(session);
+    for (const candidate of candidates) {
+        const key = normalizeProviderKey(candidate);
+        if (key !== 'chatgpt' && key !== 'gemini') continue;
+        if (!providers.includes(key)) providers.push(key);
+    }
+    return providers;
+}
+
+function buildParallelPromptId(sessionId, provider) {
+    return `${sessionId}:parallel:${normalizeProviderKey(provider)}`;
+}
+
+function formatProvidersForUi(providers) {
+    if (!Array.isArray(providers) || providers.length === 0) return '';
+    return providers.map(formatLLMLabel).join(' + ');
+}
+
+async function sendParallelTurn(session, { providers: providersOverride } = {}) {
+    if (session.isPaused) return;
+    const sessionId = session.sessionId;
+    if (!sessionId) return;
+
+    const allProviders = getParallelProviders(session);
+    const waitingProviders = Array.isArray(session.waitingFor) ? session.waitingFor.map(normalizeProviderKey).filter(Boolean) : [];
+    const base = Array.isArray(providersOverride) ? providersOverride : (waitingProviders.length > 0 ? waitingProviders : allProviders);
+    const providers = base.map(normalizeProviderKey).filter((provider) => provider && allProviders.includes(provider));
+    if (providers.length === 0) return;
+
+    const resolvedTabs = {};
+    for (const provider of providers) {
+        const resolution = await resolveSessionTab(session, provider);
+        if (!resolution.ok) {
+            await pauseDebateSession(resolution.error || 'Tab validation failed.', provider);
+            return;
+        }
+        resolvedTabs[provider] = resolution.tabId;
+    }
+
+    const promptText = await buildSessionPrompt(session, 1);
+    const promptIds = {};
+    providers.forEach((provider) => {
+        promptIds[provider] = buildParallelPromptId(sessionId, provider);
+    });
+
+    const nextWaiting = waitingProviders.length > 0 ? waitingProviders : allProviders;
+    activeDebateState.waitingFor = nextWaiting;
+    activeDebateState.parallelPromptIds = { ...(activeDebateState.parallelPromptIds || {}), ...promptIds };
+    activeDebateState.lastPromptTimestamp = Date.now();
+    await persistDebateState();
+
+    sendMessageToPopup({
+        type: 'UI_SESSION_PROGRESS',
+        sessionId,
+        waitingFor: nextWaiting,
+        waitingForLabel: formatProvidersForUi(nextWaiting),
+        roundIndex: 1,
+        totalRounds: 1
+    });
+
+    const sessionHasAttachments = hasSessionAttachments(sessionId);
+
+    const results = await Promise.allSettled(providers.map(async (provider) => {
+        const tabId = resolvedTabs[provider];
+        const promptId = promptIds[provider];
+
+        const attachmentMode = sessionHasAttachments ? getProviderAttachmentMode(provider) : 'auto';
+        const shouldSkipAttachments = sessionHasAttachments && attachmentMode !== 'auto';
+        const attachmentsToSend = shouldSkipAttachments || !sessionHasAttachments
+            ? null
+            : getPendingSessionAttachments(sessionId, provider);
+
+        try {
+            await injectAndExecute(tabId, provider, promptText, {
+                sessionId,
+                promptId,
+                turnIndex: 1,
+                attachments: attachmentsToSend || undefined
+            });
+            if (sessionHasAttachments) {
+                markSessionAttachmentsSent(session, provider);
+            }
+            return { ok: true, provider };
+        } catch (error) {
+            const code = error?.code;
+            const isAttachmentFailure = code === 'ATTACHMENTS_FAILED'
+                || String(error?.message || '').includes('Attachment upload failed');
+            if (attachmentsToSend && attachmentsToSend.length > 0 && isAttachmentFailure) {
+                try {
+                    if (sessionHasAttachments) {
+                        markSessionAttachmentsSent(session, provider);
+                    }
+                    await injectAndExecute(tabId, provider, promptText, {
+                        sessionId,
+                        promptId,
+                        turnIndex: 1
+                    });
+                    return { ok: true, provider, retriedWithoutAttachments: true };
+                } catch (retryError) {
+                    throw { provider, error: retryError };
+                }
+            }
+            throw { provider, error };
+        }
+    }));
+
+    const firstFailure = results.find((result) => result.status === 'rejected');
+    if (firstFailure && firstFailure.status === 'rejected') {
+        const failure = firstFailure.reason;
+        const provider = normalizeProviderKey(failure?.provider);
+        const error = failure?.error || failure;
+        await pauseDebateSession(error?.message || 'Failed to send prompt.', provider || null);
+    }
+}
+
 async function sendDebateTurn(session) {
     if (session.isPaused) return;
     const turnIndex = session.turnIndex;
@@ -2954,6 +3128,88 @@ async function sendDebateTurn(session) {
     }
 }
 
+async function handleParallelResponse(session, message) {
+    const sessionId = session?.sessionId;
+    if (!sessionId) return;
+
+    const provider = normalizeProviderKey(message.sourceLLM || message.provider || '');
+    if (provider !== 'chatgpt' && provider !== 'gemini') return;
+
+    const waitingFor = Array.isArray(session.waitingFor)
+        ? session.waitingFor.map(normalizeProviderKey).filter(Boolean)
+        : [];
+    if (!waitingFor.includes(provider)) {
+        return;
+    }
+
+    const expectedPromptId = session.parallelPromptIds?.[provider] || buildParallelPromptId(sessionId, provider);
+    if (expectedPromptId && message.promptId && expectedPromptId !== message.promptId) {
+        console.log('[MLC Parallel] Ignoring response with mismatched promptId.', {
+            expectedPromptId,
+            messagePromptId: message.promptId,
+            provider
+        });
+        return;
+    }
+
+    const content = (message.content || '').trim();
+    if (!content) return;
+    const rawHtml = typeof message.contentHtml === 'string' ? message.contentHtml : '';
+    const trimmedHtml = rawHtml.trim();
+    const MAX_HTML_CHARS = 120000;
+    const contentHtml = trimmedHtml && trimmedHtml.length <= MAX_HTML_CHARS
+        ? rawHtml
+        : '';
+
+    const timestamp = Date.now();
+    const entry = {
+        role: provider,
+        content,
+        timestamp,
+        roundIndex: 1
+    };
+    if (contentHtml) entry.contentHtml = contentHtml;
+    session.messages.push(entry);
+
+    session.waitingFor = waitingFor.filter((item) => item !== provider);
+
+    await persistDebateState();
+
+    sendMessageToPopup({
+        type: 'UI_MESSAGE_ADD',
+        chatId: session.chatId || null,
+        sessionId: sessionId,
+        role: provider,
+        content: content,
+        contentHtml: contentHtml || undefined,
+        timestamp: timestamp,
+        roundIndex: 1
+    });
+
+    if (session.chatId) {
+        await appendChatMessage(session.chatId, {
+            role: provider,
+            content,
+            contentHtml: contentHtml || undefined,
+            timestamp,
+            roundIndex: 1,
+            sessionId: sessionId
+        });
+    }
+
+    if (Array.isArray(session.waitingFor) && session.waitingFor.length === 0) {
+        await endDebateSession('Session completed.');
+        return;
+    }
+
+    sendMessageToPopup({
+        type: 'UI_SESSION_PROGRESS',
+        sessionId,
+        waitingFor: session.waitingFor,
+        waitingForLabel: formatProvidersForUi(session.waitingFor)
+    });
+}
+
 async function handleDebateResponse(message) {
     if (!message.sessionId) return;
 
@@ -2962,6 +3218,12 @@ async function handleDebateResponse(message) {
         console.log('[MLC Debate] Ignoring response: session not active or mismatch.');
         return;
     }
+
+    if (session.mode === 'parallel') {
+        await handleParallelResponse(session, message);
+        return;
+    }
+
     if (session.isPaused && !session.lastPromptId) {
         console.log('[MLC Debate] Ignoring response while paused with no active prompt.');
         return;
