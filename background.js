@@ -1604,6 +1604,43 @@ function sanitizeSessionPromptOverrides(input) {
     return Object.keys(output).length > 0 ? output : null;
 }
 
+function sanitizeUiRoute(input) {
+    if (!input || typeof input !== 'object') return null;
+    const kind = typeof input.kind === 'string' ? input.kind.toLowerCase() : '';
+    const rawProviders = Array.isArray(input.providers) ? input.providers : [];
+    const providers = [];
+    for (const item of rawProviders) {
+        if (item !== 'chatgpt' && item !== 'gemini') continue;
+        if (!providers.includes(item)) providers.push(item);
+    }
+    if (providers.length === 0) return null;
+    const rounds = Math.min(12, Math.max(1, parseInt(input.rounds, 10) || 1));
+
+    if (kind === 'debate') {
+        if (providers.length !== 2) return null;
+        return { kind: 'debate', providers, rounds };
+    }
+
+    if (kind === 'parallel') {
+        return { kind: 'parallel', providers, rounds: 1 };
+    }
+
+    return { kind: 'single', providers: [providers[0]], rounds: 1 };
+}
+
+function buildRouteFromRun(mode, { firstLLM, secondLLM, directTarget, rounds }) {
+    if (mode === 'debate') {
+        const first = firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
+        const second = first === 'chatgpt' ? 'gemini' : 'chatgpt';
+        return { kind: 'debate', providers: [first, second], rounds };
+    }
+    if (mode === 'direct' && directTarget === 'both') {
+        return { kind: 'parallel', providers: ['chatgpt', 'gemini'], rounds: 1 };
+    }
+    const provider = firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
+    return { kind: 'single', providers: [provider], rounds: 1 };
+}
+
 async function handleStartDebateSession(message) {
     try {
         const prompt = (message.prompt || '').trim();
@@ -1730,11 +1767,15 @@ async function handleStartDebateSession(message) {
         }
 
         const now = Date.now();
-        const runConfig = mode === 'direct'
+        let runConfig = mode === 'direct'
             ? { runType: 'direct', target: directTarget }
             : (mode === 'single'
                 ? { mode: 'single', rounds, llm: firstLLM }
                 : { runType: 'debate', rounds, firstLLM });
+        const route = sanitizeUiRoute(message.route) || buildRouteFromRun(mode, { firstLLM, secondLLM, directTarget, rounds });
+        if (route) {
+            runConfig = { ...runConfig, route };
+        }
         const totalTurns = mode === 'direct'
             ? (secondLLM ? 2 : 1)
             : (mode === 'single' ? rounds : rounds * 2);
