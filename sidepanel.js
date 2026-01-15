@@ -24,6 +24,9 @@ const state = {
     promptConfig: null,
     promptConfigSource: null,
     providerCapabilities: null,
+    route: null,
+    routeLoaded: false,
+    lastFocusedProvider: null,
     manualUploadAckKey: null,
     attachments: [],
     attachmentsLoading: false,
@@ -33,6 +36,8 @@ const state = {
 const elements = {};
 const HISTORY_PAGE_SIZE = 60;
 
+const ROUTE_STORAGE_KEY = 'mlc_last_route_v1';
+
 const ATTACHMENTS_MAX_FILES = 10;
 const ATTACHMENTS_MAX_FILE_BYTES = 10 * 1024 * 1024;
 const ATTACHMENTS_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
@@ -40,21 +45,571 @@ const ATTACHMENTS_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 let attachmentsModalResolver = null;
 let passphrasePrompt = null;
 
-document.addEventListener('DOMContentLoaded', () => {
+function storageGet(keys) {
+    return new Promise((resolve) => {
+        try {
+            chrome.storage.local.get(keys, (result) => {
+                if (chrome.runtime?.lastError) {
+                    console.warn('[MLC UI] storage.get failed:', chrome.runtime.lastError.message);
+                    resolve({});
+                    return;
+                }
+                resolve(result || {});
+            });
+        } catch (error) {
+            console.warn('[MLC UI] storage.get failed:', error);
+            resolve({});
+        }
+    });
+}
+
+function storageSet(items) {
+    return new Promise((resolve) => {
+        try {
+            chrome.storage.local.set(items, () => {
+                if (chrome.runtime?.lastError) {
+                    console.warn('[MLC UI] storage.set failed:', chrome.runtime.lastError.message);
+                }
+                resolve();
+            });
+        } catch (error) {
+            console.warn('[MLC UI] storage.set failed:', error);
+            resolve();
+        }
+    });
+}
+
+function normalizeProviderId(provider) {
+    const value = String(provider || '').trim().toLowerCase();
+    if (value === 'gemini') return 'gemini';
+    if (value === 'chatgpt') return 'chatgpt';
+    return null;
+}
+
+function sanitizeRoute(input) {
+    const route = input && typeof input === 'object' ? input : {};
+    const providers = [];
+    const rawProviders = Array.isArray(route.providers) ? route.providers : [];
+    for (const item of rawProviders) {
+        const normalized = normalizeProviderId(item);
+        if (!normalized) continue;
+        if (!providers.includes(normalized)) providers.push(normalized);
+    }
+
+    const requestedKind = String(route.kind || '').trim().toLowerCase();
+    const roundsValue = route.rounds == null ? 3 : route.rounds;
+    const rounds = clampInt(roundsValue, 1, 12);
+
+    let kind = 'single';
+    if (providers.length >= 2) {
+        if (requestedKind === 'debate' && providers.length === 2) kind = 'debate';
+        else kind = 'parallel';
+    }
+
+    return {
+        kind,
+        providers,
+        rounds
+    };
+}
+
+function getDefaultRoute() {
+    return { kind: 'single', providers: [], rounds: 3 };
+}
+
+function routeFromRunConfig(runConfig) {
+    if (!runConfig || typeof runConfig !== 'object') return null;
+    if (runConfig.route && typeof runConfig.route === 'object') {
+        return sanitizeRoute(runConfig.route);
+    }
+    const runType = runConfig.runType || runConfig.mode || null;
+    if (runType === 'debate') {
+        const first = normalizeProviderId(runConfig.firstLLM) || 'chatgpt';
+        const second = first === 'chatgpt' ? 'gemini' : 'chatgpt';
+        return sanitizeRoute({ kind: 'debate', providers: [first, second], rounds: runConfig.rounds });
+    }
+    if (runType === 'direct') {
+        const target = normalizeProviderId(runConfig.target);
+        if (runConfig.target === 'both') {
+            return sanitizeRoute({ kind: 'parallel', providers: ['chatgpt', 'gemini'] });
+        }
+        return sanitizeRoute({ kind: 'single', providers: [target || 'chatgpt'] });
+    }
+    if (runType === 'single') {
+        const llm = normalizeProviderId(runConfig.llm) || 'chatgpt';
+        return sanitizeRoute({ kind: 'single', providers: [llm] });
+    }
+    return null;
+}
+
+async function loadRoutePreference() {
+    const stored = await storageGet([ROUTE_STORAGE_KEY]);
+    const savedRoute = stored?.[ROUTE_STORAGE_KEY];
+    state.route = savedRoute ? sanitizeRoute(savedRoute) : getDefaultRoute();
+    state.routeLoaded = true;
+}
+
+function saveRoutePreference(route) {
+    const next = sanitizeRoute(route);
+    state.route = next;
+    return storageSet({ [ROUTE_STORAGE_KEY]: next });
+}
+
+let routeDragProvider = null;
+let routeOutsideClickHandler = null;
+let routeEscapeHandler = null;
+
+function isRoutePopoverOpen() {
+    return Boolean(elements.routePopover && !elements.routePopover.hidden);
+}
+
+function openRoutePopover() {
+    if (!elements.routePopover || !elements.routeButton) return;
+    if (state.running || state.paused) return;
+    elements.routePopover.hidden = false;
+    elements.routePopover.setAttribute('aria-hidden', 'false');
+    elements.routeButton.setAttribute('aria-expanded', 'true');
+
+    routeOutsideClickHandler = (event) => {
+        const target = event.target;
+        if (!(target instanceof Node)) return;
+        if (elements.routePopover.contains(target)
+            || elements.routeButton.contains(target)
+            || (elements.providersButton && elements.providersButton.contains(target))) {
+            return;
+        }
+        closeRoutePopover();
+    };
+    routeEscapeHandler = (event) => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            closeRoutePopover();
+        }
+    };
+    document.addEventListener('mousedown', routeOutsideClickHandler, true);
+    document.addEventListener('keydown', routeEscapeHandler, true);
+    renderRouteUi();
+}
+
+function closeRoutePopover() {
+    if (!elements.routePopover || !elements.routeButton) return;
+    elements.routePopover.hidden = true;
+    elements.routePopover.setAttribute('aria-hidden', 'true');
+    elements.routeButton.setAttribute('aria-expanded', 'false');
+    if (routeOutsideClickHandler) {
+        document.removeEventListener('mousedown', routeOutsideClickHandler, true);
+        routeOutsideClickHandler = null;
+    }
+    if (routeEscapeHandler) {
+        document.removeEventListener('keydown', routeEscapeHandler, true);
+        routeEscapeHandler = null;
+    }
+}
+
+function toggleRoutePopover() {
+    if (isRoutePopoverOpen()) closeRoutePopover();
+    else openRoutePopover();
+}
+
+function getSupportedProviders() {
+    const capabilities = state.providerCapabilities && typeof state.providerCapabilities === 'object'
+        ? Object.keys(state.providerCapabilities)
+        : [];
+    const normalized = capabilities.map(normalizeProviderId).filter(Boolean);
+    const unique = [...new Set(normalized)];
+    if (unique.length > 0) return unique;
+    return ['chatgpt', 'gemini'];
+}
+
+function isRouteProviderSelected(provider) {
+    const route = state.route || getDefaultRoute();
+    return route.providers.includes(provider);
+}
+
+function setRoute(route, { persist = true } = {}) {
+    const next = sanitizeRoute(route);
+    state.route = next;
+    if (persist) {
+        storageSet({ [ROUTE_STORAGE_KEY]: next }).catch(() => {});
+    }
+    renderRouteUi();
+    updateSendState();
+}
+
+function setRouteKind(kind) {
+    const route = state.route || getDefaultRoute();
+    const providers = route.providers || [];
+    if (providers.length < 2) return;
+    const normalizedKind = String(kind || '').trim().toLowerCase();
+    if (normalizedKind === 'debate' && providers.length !== 2) return;
+    if (normalizedKind !== 'parallel' && normalizedKind !== 'debate') return;
+    setRoute({ ...route, kind: normalizedKind });
+}
+
+function applyRoutePreset(preset) {
+    const route = state.route || getDefaultRoute();
+    const kind = String(preset || '').trim().toLowerCase();
+    if (kind === 'single') {
+        const provider = normalizeProviderId(route.providers?.[0]) || 'chatgpt';
+        setRoute({ kind: 'single', providers: [provider], rounds: route.rounds });
+        return;
+    }
+    if (kind === 'compare') {
+        setRoute({ kind: 'parallel', providers: ['chatgpt', 'gemini'], rounds: route.rounds });
+        return;
+    }
+    if (kind === 'debate') {
+        const providers = route.providers.length === 2 ? route.providers : ['chatgpt', 'gemini'];
+        setRoute({ kind: 'debate', providers, rounds: route.rounds || 3 });
+    }
+}
+
+function swapRouteProviders() {
+    const route = state.route || getDefaultRoute();
+    if (!Array.isArray(route.providers) || route.providers.length < 2) return;
+    const next = [...route.providers].reverse();
+    setRoute({ ...route, providers: next });
+}
+
+function formatRouteSummary(route) {
+    const providers = Array.isArray(route?.providers) ? route.providers : [];
+    if (providers.length === 0) return 'Select providers…';
+    if (providers.length === 1) return formatProviderLabel(providers[0]);
+    const names = providers.map(formatProviderLabel);
+    if (route?.kind === 'debate' && providers.length === 2) {
+        return `Debate (${names[0]} ↔ ${names[1]}, ${route.rounds || 1})`;
+    }
+    return names.join(' + ');
+}
+
+function renderRouteUi() {
+    const route = state.route || getDefaultRoute();
+
+    if (elements.routePillText) {
+        elements.routePillText.textContent = formatRouteSummary(route);
+    }
+
+    const providerCount = route.providers.length;
+    if (elements.routeModeSection) {
+        elements.routeModeSection.hidden = providerCount < 2;
+    }
+
+    if (elements.routeModeDebate) {
+        elements.routeModeDebate.hidden = providerCount !== 2;
+    }
+
+    if (elements.routeModeParallel) {
+        elements.routeModeParallel.classList.toggle('is-active', providerCount >= 2 && route.kind === 'parallel');
+    }
+    if (elements.routeModeDebate) {
+        elements.routeModeDebate.classList.toggle('is-active', providerCount === 2 && route.kind === 'debate');
+    }
+
+    const debateEnabled = providerCount === 2 && route.kind === 'debate';
+    if (elements.routeDebateSettings) {
+        elements.routeDebateSettings.hidden = !debateEnabled;
+    }
+    if (elements.routeRounds) {
+        elements.routeRounds.value = String(clampInt(route.rounds || 3, 1, 12));
+    }
+
+    renderRouteSelectedChips(route);
+    renderRouteProviderList(route);
+    updateRouteConnectAllUi();
+}
+
+function updateRouteConnectAllUi() {
+    if (!elements.routeConnectAll) return;
+    const supported = getSupportedProviders();
+    const anyConnecting = supported.some((provider) => Boolean(state.connecting?.[provider]));
+    const anyNeedsConnect = supported.some((provider) => !Boolean(state.connectionStatus?.[provider]));
+    if (anyConnecting) {
+        elements.routeConnectAll.textContent = 'Connecting…';
+        elements.routeConnectAll.disabled = true;
+        return;
+    }
+    if (!anyNeedsConnect) {
+        elements.routeConnectAll.textContent = 'All connected';
+        elements.routeConnectAll.disabled = true;
+        return;
+    }
+    elements.routeConnectAll.textContent = 'Connect all';
+    elements.routeConnectAll.disabled = false;
+}
+
+function renderRouteSelectedChips(route) {
+    if (!elements.routeSelected) return;
+    elements.routeSelected.innerHTML = '';
+    const providers = Array.isArray(route?.providers) ? route.providers : [];
+    if (providers.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'route-help';
+        empty.textContent = 'No providers selected.';
+        elements.routeSelected.appendChild(empty);
+        return;
+    }
+
+    providers.forEach((provider) => {
+        const chip = document.createElement('div');
+        chip.className = 'route-chip';
+        chip.draggable = true;
+        chip.dataset.provider = provider;
+        chip.textContent = formatProviderLabel(provider);
+
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'route-chip-remove';
+        remove.dataset.action = 'remove-route-provider';
+        remove.dataset.provider = provider;
+        remove.setAttribute('aria-label', `Remove ${formatProviderLabel(provider)}`);
+
+        const icon = document.createElement('span');
+        icon.className = 'material-symbols-rounded';
+        icon.textContent = 'close';
+        remove.appendChild(icon);
+
+        chip.appendChild(remove);
+        elements.routeSelected.appendChild(chip);
+    });
+}
+
+function renderRouteProviderList(route) {
+    if (!elements.routeProviderList) return;
+    elements.routeProviderList.innerHTML = '';
+    const supported = getSupportedProviders();
+    supported.forEach((provider) => {
+        const selected = isRouteProviderSelected(provider);
+        const ready = Boolean(state.connectionStatus?.[provider]);
+        const connecting = Boolean(state.connecting?.[provider]);
+        const profile = getDefaultProfile(provider);
+        const connected = Boolean(profile?.tabId && ready);
+        const modelHint = profile?.modelHint ? ` • ${profile.modelHint}` : '';
+
+        let statusText = 'Not connected';
+        if (connecting) statusText = 'Connecting…';
+        else if (ready) statusText = 'Ready';
+        else if (profile?.status === 'wrong_host') statusText = 'Wrong host';
+        else if (profile?.status === 'unknown') statusText = 'Loading…';
+        else if (profile?.status === 'ok') statusText = 'Waiting…';
+
+        const usingText = connected
+            ? `Using: ${profile.label || formatProviderLabel(provider)}${modelHint}`
+            : (profile?.label ? `Last: ${profile.label}${modelHint}` : 'No tab yet');
+
+        const item = document.createElement('div');
+        item.className = 'route-provider-item';
+        item.classList.toggle('is-active', provider === state.lastFocusedProvider);
+        item.dataset.provider = provider;
+
+        const meta = document.createElement('div');
+        meta.className = 'route-provider-meta';
+
+        const name = document.createElement('div');
+        name.className = 'route-provider-name';
+
+        const dot = document.createElement('span');
+        dot.className = 'route-provider-dot';
+        dot.classList.toggle('is-ready', ready);
+        dot.classList.toggle('is-connecting', connecting);
+        name.appendChild(dot);
+
+        const nameText = document.createElement('span');
+        nameText.textContent = formatProviderLabel(provider);
+        name.appendChild(nameText);
+
+        meta.appendChild(name);
+
+        const status = document.createElement('div');
+        status.className = 'route-provider-status';
+        status.textContent = `${statusText} • ${usingText}`;
+        meta.appendChild(status);
+
+        const actions = document.createElement('div');
+        actions.className = 'route-provider-actions';
+
+        if (!connected) {
+            const connect = document.createElement('button');
+            connect.type = 'button';
+            connect.className = 'ghost-button';
+            connect.dataset.action = 'connect-provider';
+            connect.dataset.provider = provider;
+            connect.textContent = connecting ? 'Connecting…' : 'Connect';
+            connect.disabled = connecting;
+            actions.appendChild(connect);
+        } else {
+            const toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.className = 'ghost-button';
+            toggle.dataset.action = 'toggle-provider';
+            toggle.dataset.provider = provider;
+            toggle.textContent = selected ? 'Remove' : 'Add';
+            toggle.setAttribute('aria-pressed', selected ? 'true' : 'false');
+
+            const focus = document.createElement('button');
+            focus.type = 'button';
+            focus.className = 'ghost-button';
+            focus.dataset.provider = provider;
+            focus.dataset.action = 'focus-provider';
+            focus.textContent = 'Focus';
+            focus.disabled = connecting || !profile?.tabId;
+
+            const newTab = document.createElement('button');
+            newTab.type = 'button';
+            newTab.className = 'ghost-button';
+            newTab.dataset.provider = provider;
+            newTab.dataset.action = 'new-tab';
+            newTab.textContent = connecting ? 'Opening…' : 'New tab';
+            newTab.disabled = connecting;
+
+            actions.appendChild(toggle);
+            actions.appendChild(focus);
+            actions.appendChild(newTab);
+        }
+
+        item.appendChild(meta);
+        item.appendChild(actions);
+        elements.routeProviderList.appendChild(item);
+    });
+}
+
+function handleRouteProviderListClick(event) {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const button = target.closest('button');
+    const providerFromButton = button?.dataset.provider;
+    const action = button?.dataset.action || '';
+    const provider = normalizeProviderId(providerFromButton || target.closest('[data-provider]')?.dataset.provider);
+    if (!provider) return;
+
+    const connectAndAdd = () => {
+        const route = state.route || getDefaultRoute();
+        const providers = [...(route.providers || [])];
+        if (!providers.includes(provider)) {
+            providers.push(provider);
+            setRoute({ ...route, providers });
+        }
+        connectProvider(provider);
+    };
+
+    if (action === 'focus-provider') {
+        focusProvider(provider);
+        return;
+    }
+    if (action === 'new-tab') {
+        connectProvider(provider);
+        return;
+    }
+    if (action === 'connect-provider') {
+        connectAndAdd();
+        return;
+    }
+    if (action === 'toggle-provider' || !action) {
+        const profile = getDefaultProfile(provider);
+        const connected = Boolean(profile?.tabId && Boolean(state.connectionStatus?.[provider]));
+        if (!action && !connected) {
+            connectAndAdd();
+            return;
+        }
+        const route = state.route || getDefaultRoute();
+        const providers = [...(route.providers || [])];
+        const existingIndex = providers.indexOf(provider);
+        if (existingIndex >= 0) {
+            providers.splice(existingIndex, 1);
+        } else {
+            providers.push(provider);
+        }
+        setRoute({ ...route, providers });
+    }
+}
+
+function handleRouteSelectedClick(event) {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const removeButton = target.closest('button[data-action="remove-route-provider"]');
+    if (!removeButton) return;
+    const provider = normalizeProviderId(removeButton.dataset.provider);
+    if (!provider) return;
+    const route = state.route || getDefaultRoute();
+    const providers = [...(route.providers || [])].filter((item) => item !== provider);
+    setRoute({ ...route, providers });
+}
+
+function handleRouteChipDragStart(event) {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const chip = target.closest('.route-chip');
+    const provider = normalizeProviderId(chip?.dataset.provider);
+    if (!chip || !provider) return;
+    routeDragProvider = provider;
+    try {
+        event.dataTransfer?.setData('text/plain', provider);
+        event.dataTransfer?.setDragImage(chip, 10, 10);
+    } catch (error) {
+        // Ignore DataTransfer restrictions.
+    }
+}
+
+function handleRouteChipDragOver(event) {
+    if (!routeDragProvider) return;
+    event.preventDefault();
+}
+
+function handleRouteChipDrop(event) {
+    if (!routeDragProvider) return;
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const chip = target.closest('.route-chip');
+    const dropProvider = normalizeProviderId(chip?.dataset.provider);
+    if (!dropProvider || dropProvider === routeDragProvider) return;
+    const route = state.route || getDefaultRoute();
+    const providers = [...(route.providers || [])];
+    const fromIndex = providers.indexOf(routeDragProvider);
+    const toIndex = providers.indexOf(dropProvider);
+    if (fromIndex === -1 || toIndex === -1) return;
+    providers.splice(fromIndex, 1);
+    providers.splice(toIndex, 0, routeDragProvider);
+    setRoute({ ...route, providers });
+}
+
+function handleRouteChipDragEnd() {
+    routeDragProvider = null;
+}
+
+document.addEventListener('DOMContentLoaded', async () => {
     elements.promptInput = document.getElementById('prompt-input');
     elements.sendButton = document.getElementById('send-button');
     elements.charCount = document.getElementById('char-count');
-    elements.runTarget = document.getElementById('run-target');
-    elements.iterations = document.getElementById('iterations');
     elements.refreshProfiles = document.getElementById('refresh-profiles');
     elements.autoScroll = document.getElementById('auto-scroll');
     elements.timeline = document.getElementById('timeline');
     elements.emptyState = document.getElementById('empty-state');
-    elements.statusChatGPT = document.getElementById('status-chatgpt');
-    elements.statusGemini = document.getElementById('status-gemini');
+    elements.providersButton = document.getElementById('providers-button');
     elements.sessionStatus = document.getElementById('session-status');
     elements.sessionBanner = document.getElementById('session-banner');
     elements.composerHint = document.getElementById('composer-hint');
+
+    elements.routeButton = document.getElementById('route-button');
+    elements.routePillText = document.getElementById('route-pill-text');
+    elements.routePopover = document.getElementById('route-popover');
+    elements.routeClose = document.getElementById('route-close');
+    elements.routeSelected = document.getElementById('route-selected');
+    elements.routeSelectedHelp = document.getElementById('route-selected-help');
+    elements.routeProviderList = document.getElementById('route-provider-list');
+    elements.routeModeSection = document.getElementById('route-mode-section');
+    elements.routeModeParallel = document.getElementById('route-mode-parallel');
+    elements.routeModeDebate = document.getElementById('route-mode-debate');
+    elements.routeDebateSettings = document.getElementById('route-debate-settings');
+    elements.routeRounds = document.getElementById('route-rounds');
+    elements.routeSwap = document.getElementById('route-swap');
+    elements.routePresetSingle = document.getElementById('route-preset-single');
+    elements.routePresetCompare = document.getElementById('route-preset-compare');
+    elements.routePresetDebate = document.getElementById('route-preset-debate');
+    elements.routeConnectAll = document.getElementById('route-connect-all');
+    elements.routeManageProviders = document.getElementById('route-manage-providers');
+    elements.routeDone = document.getElementById('route-done');
+
+    elements.emptyOpenRoute = document.getElementById('empty-open-route');
+    elements.emptyOpenSettings = document.getElementById('empty-open-settings');
 
     elements.attachmentInput = document.getElementById('attachment-input');
     elements.attachmentButton = document.getElementById('attachment-button');
@@ -84,10 +639,6 @@ document.addEventListener('DOMContentLoaded', () => {
     elements.settingsConnectGemini = document.getElementById('settings-connect-gemini');
     elements.settingsFocusChatgpt = document.getElementById('settings-focus-chatgpt');
     elements.settingsFocusGemini = document.getElementById('settings-focus-gemini');
-
-    elements.connectChatgpt = document.getElementById('connect-chatgpt');
-    elements.connectGemini = document.getElementById('connect-gemini');
-    elements.connectBoth = document.getElementById('connect-both');
 
     elements.pausedActions = document.getElementById('paused-actions');
     elements.resumeButton = document.getElementById('resume-session');
@@ -130,10 +681,12 @@ document.addEventListener('DOMContentLoaded', () => {
 	    elements.attachmentsModalClose = document.getElementById('attachments-modal-close');
 
 	    bindEvents();
+        await loadRoutePreference();
+        renderRouteUi();
 	    updateHistoryUi();
 	    updateCharCount();
-    updateAttachmentsUi();
-    updateSendState();
+        updateAttachmentsUi();
+        updateSendState();
 
     requestProfiles();
     requestConnectionStatus();
@@ -203,12 +756,74 @@ function bindEvents() {
         elements.refreshProfiles.addEventListener('click', requestProfiles);
     }
 
-    if (elements.runTarget) {
-        elements.runTarget.addEventListener('change', updateSendState);
+    if (elements.routeButton) {
+        elements.routeButton.addEventListener('click', () => {
+            if (state.running || state.paused) return;
+            toggleRoutePopover();
+        });
     }
 
-    if (elements.iterations) {
-        elements.iterations.addEventListener('change', updateSendState);
+    if (elements.routeClose) {
+        elements.routeClose.addEventListener('click', closeRoutePopover);
+    }
+
+    if (elements.routeDone) {
+        elements.routeDone.addEventListener('click', closeRoutePopover);
+    }
+
+    if (elements.routeConnectAll) {
+        elements.routeConnectAll.addEventListener('click', connectAllProviders);
+    }
+
+    if (elements.routeManageProviders) {
+        elements.routeManageProviders.addEventListener('click', () => {
+            closeRoutePopover();
+            openSettingsDrawer();
+        });
+    }
+
+    if (elements.routePresetSingle) {
+        elements.routePresetSingle.addEventListener('click', () => applyRoutePreset('single'));
+    }
+
+    if (elements.routePresetCompare) {
+        elements.routePresetCompare.addEventListener('click', () => applyRoutePreset('compare'));
+    }
+
+    if (elements.routePresetDebate) {
+        elements.routePresetDebate.addEventListener('click', () => applyRoutePreset('debate'));
+    }
+
+    if (elements.routeProviderList) {
+        elements.routeProviderList.addEventListener('click', handleRouteProviderListClick);
+    }
+
+    if (elements.routeSelected) {
+        elements.routeSelected.addEventListener('click', handleRouteSelectedClick);
+        elements.routeSelected.addEventListener('dragstart', handleRouteChipDragStart);
+        elements.routeSelected.addEventListener('dragover', handleRouteChipDragOver);
+        elements.routeSelected.addEventListener('drop', handleRouteChipDrop);
+        elements.routeSelected.addEventListener('dragend', handleRouteChipDragEnd);
+    }
+
+    if (elements.routeModeParallel) {
+        elements.routeModeParallel.addEventListener('click', () => setRouteKind('parallel'));
+    }
+
+    if (elements.routeModeDebate) {
+        elements.routeModeDebate.addEventListener('click', () => setRouteKind('debate'));
+    }
+
+    if (elements.routeRounds) {
+        elements.routeRounds.addEventListener('change', () => {
+            const nextRounds = clampInt(elements.routeRounds.value, 1, 12);
+            elements.routeRounds.value = String(nextRounds);
+            setRoute({ ...state.route, rounds: nextRounds });
+        });
+    }
+
+    if (elements.routeSwap) {
+        elements.routeSwap.addEventListener('click', swapRouteProviders);
     }
 
     if (elements.autoScroll) {
@@ -217,12 +832,14 @@ function bindEvents() {
         });
     }
 
-    if (elements.statusChatGPT) {
-        elements.statusChatGPT.addEventListener('click', () => handleProviderPillClick('chatgpt'));
-    }
-
-    if (elements.statusGemini) {
-        elements.statusGemini.addEventListener('click', () => handleProviderPillClick('gemini'));
+    if (elements.providersButton) {
+        elements.providersButton.addEventListener('click', () => {
+            if (state.running || state.paused) {
+                openSettingsDrawer();
+                return;
+            }
+            toggleRoutePopover();
+        });
     }
 
     if (elements.chatsButton) {
@@ -264,16 +881,15 @@ function bindEvents() {
         elements.closeSettingsButton.addEventListener('click', closeSettingsDrawer);
     }
 
-    if (elements.connectChatgpt) {
-        elements.connectChatgpt.addEventListener('click', () => connectProvider('chatgpt'));
+    if (elements.emptyOpenRoute) {
+        elements.emptyOpenRoute.addEventListener('click', () => {
+            openRoutePopover();
+            elements.routeButton?.focus();
+        });
     }
 
-    if (elements.connectGemini) {
-        elements.connectGemini.addEventListener('click', () => connectProvider('gemini'));
-    }
-
-    if (elements.connectBoth) {
-        elements.connectBoth.addEventListener('click', connectBothProviders);
+    if (elements.emptyOpenSettings) {
+        elements.emptyOpenSettings.addEventListener('click', openSettingsDrawer);
     }
 
     if (elements.settingsConnectChatgpt) {
@@ -1049,37 +1665,32 @@ async function addAttachments(files) {
     updateSendState();
 }
 
-function getRunTarget() {
-    const value = String(elements.runTarget?.value || '').trim();
-    switch (value) {
-        case 'debate_chatgpt':
-        case 'debate_gemini':
-        case 'chatgpt':
-        case 'gemini':
-        case 'both':
-            return value;
-        default:
-            return 'debate_chatgpt';
+function getRoute() {
+    return state.route || getDefaultRoute();
+}
+
+function isRouteValid(route) {
+    const providers = Array.isArray(route?.providers) ? route.providers : [];
+    return providers.length > 0;
+}
+
+function isRouteSupported(route) {
+    if (!isRouteValid(route)) return false;
+    const providers = Array.isArray(route?.providers) ? route.providers : [];
+    if (route.kind === 'single') return providers.length === 1;
+    if (route.kind === 'debate') return providers.length === 2 && providers.every((p) => p === 'chatgpt' || p === 'gemini');
+    if (route.kind === 'parallel') {
+        const set = new Set(providers);
+        return set.size === 2 && set.has('chatgpt') && set.has('gemini');
     }
+    return false;
 }
 
-function isDebateTarget(runTarget) {
-    return runTarget === 'debate_chatgpt' || runTarget === 'debate_gemini';
-}
-
-function getDebateFirstLLM(runTarget) {
-    return runTarget === 'debate_gemini' ? 'gemini' : 'chatgpt';
-}
-
-function getDirectTarget(runTarget) {
-    if (runTarget === 'both') return 'both';
-    if (runTarget === 'gemini') return 'gemini';
-    return 'chatgpt';
-}
-
-function getRequiredProvidersForRun(runTarget) {
-    if (isDebateTarget(runTarget) || runTarget === 'both') return ['chatgpt', 'gemini'];
-    return [getDirectTarget(runTarget)];
+function getRouteRequiredProviders(route) {
+    if (!isRouteValid(route)) return [];
+    const providers = Array.isArray(route?.providers) ? route.providers : [];
+    if (route.kind === 'single') return [providers[0]];
+    return [...providers];
 }
 
 function getProviderAttachmentMode(provider) {
@@ -1089,39 +1700,25 @@ function getProviderAttachmentMode(provider) {
     return provider === 'chatgpt' ? 'auto' : 'manual';
 }
 
-function buildManualUploadAckKey(runTarget, attachments, manualProviders) {
+function buildManualUploadAckKey(route, attachments, manualProviders) {
+    const roundsKey = route?.kind === 'debate' ? (route?.rounds || 1) : 1;
+    const routeKey = `${route?.kind || 'single'}|${Array.isArray(route?.providers) ? route.providers.join('>') : ''}|${roundsKey}`;
     const providersKey = Array.isArray(manualProviders) ? [...manualProviders].sort().join(',') : '';
     const attachmentKey = Array.isArray(attachments)
         ? attachments.map((item) => String(item?.id || '')).filter(Boolean).join(',')
         : '';
-    return `${runTarget}|${providersKey}|${attachmentKey}`;
+    return `${routeKey}|${providersKey}|${attachmentKey}`;
 }
 
-function getAttachmentProviderPlan(runTarget) {
-    const required = getRequiredProvidersForRun(runTarget);
+function getAttachmentProviderPlan(route) {
+    const required = getRouteRequiredProviders(route);
     const autoProviders = required.filter((provider) => getProviderAttachmentMode(provider) === 'auto');
     const manualProviders = required.filter((provider) => getProviderAttachmentMode(provider) !== 'auto');
     return { required, autoProviders, manualProviders };
 }
 
-function isRunConnected() {
-    const runTarget = getRunTarget();
-    return getRequiredProvidersForRun(runTarget).every((provider) => Boolean(state.connectionStatus?.[provider]));
-}
-
-function updateRunUi() {
-    const runTarget = getRunTarget();
-    const locked = state.running || state.paused;
-    const debate = isDebateTarget(runTarget);
-    if (elements.iterations) {
-        if (!debate) {
-            elements.iterations.value = '1';
-        }
-        elements.iterations.disabled = locked || !debate;
-    }
-    if (elements.runTarget) {
-        elements.runTarget.disabled = locked;
-    }
+function isRouteConnected(route) {
+    return getRouteRequiredProviders(route).every((provider) => Boolean(state.connectionStatus?.[provider]));
 }
 
 function clampInt(value, min, max) {
@@ -1143,36 +1740,11 @@ function findLastUserRunConfig(chat) {
 }
 
 function applyRunConfigDefaults(runConfig) {
-    if (!runConfig || typeof runConfig !== 'object') return;
-    const runType = runConfig.runType || runConfig.mode || null;
-    if (runType === 'debate') {
-        const firstLLM = runConfig.firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
-        if (elements.runTarget) {
-            elements.runTarget.value = firstLLM === 'gemini' ? 'debate_gemini' : 'debate_chatgpt';
-        }
-        if (elements.iterations && runConfig.rounds) {
-            elements.iterations.value = String(clampInt(runConfig.rounds, 1, 12));
-        }
-    } else if (runType === 'direct') {
-        const target = runConfig.target;
-        if (elements.runTarget) {
-            if (target === 'both') elements.runTarget.value = 'both';
-            else if (target === 'gemini') elements.runTarget.value = 'gemini';
-            else elements.runTarget.value = 'chatgpt';
-        }
-        if (elements.iterations) {
-            elements.iterations.value = '1';
-        }
-    } else if (runType === 'single') {
-        const llm = runConfig.llm === 'gemini' ? 'gemini' : 'chatgpt';
-        if (elements.runTarget) {
-            elements.runTarget.value = llm;
-        }
-        if (elements.iterations) {
-            elements.iterations.value = '1';
-        }
-    }
-    updateRunUi();
+    const derived = routeFromRunConfig(runConfig);
+    if (!derived) return;
+    const currentRounds = clampInt(state.route?.rounds || 3, 1, 12);
+    const merged = derived.kind === 'debate' ? derived : { ...derived, rounds: currentRounds };
+    setRoute(merged);
 }
 
 function applyRunDefaultsFromActiveChat() {
@@ -1180,13 +1752,12 @@ function applyRunDefaultsFromActiveChat() {
     if (runConfig) {
         applyRunConfigDefaults(runConfig);
     } else {
-        updateRunUi();
+        renderRouteUi();
     }
 }
 
 function updateSendState() {
-    if (!elements.sendButton || !elements.promptInput || !elements.iterations) return;
-    updateRunUi();
+    if (!elements.sendButton || !elements.promptInput) return;
     const locked = state.running || state.paused;
     if (locked) {
         elements.sendButton.textContent = 'Stop';
@@ -1196,29 +1767,31 @@ function updateSendState() {
     }
     const hasPrompt = elements.promptInput.value.trim().length > 0;
     const attachmentsReady = !state.attachmentsLoading;
-    const runTarget = getRunTarget();
-    const debate = isDebateTarget(runTarget);
-	    const iterations = debate ? (parseInt(elements.iterations.value, 10) || 0) : 1;
-	    const connected = isRunConnected();
-	    elements.sendButton.textContent = 'Send';
-	    elements.sendButton.disabled = !hasPrompt || !attachmentsReady || iterations <= 0 || !connected || isHistoryBlocked();
-	    updateComposerHint();
-	    updateEmptyState();
-	}
+    const route = getRoute();
+    const validRoute = isRouteValid(route);
+    const supportedRoute = isRouteSupported(route);
+    const connected = validRoute && supportedRoute && isRouteConnected(route);
+    const historyBlocked = isHistoryBlocked();
+    const readyForPrimaryAction = hasPrompt && attachmentsReady && validRoute && supportedRoute && !historyBlocked;
+    elements.sendButton.textContent = connected ? 'Send' : (validRoute && supportedRoute ? 'Connect' : 'Send');
+    elements.sendButton.disabled = !readyForPrimaryAction;
+    updateComposerHint();
+    updateEmptyState();
+}
 
 function setSessionState({ running, paused }) {
     state.running = running;
     state.paused = paused;
     const locked = running || paused;
 
-    if (elements.runTarget) elements.runTarget.disabled = locked;
-    if (elements.iterations) elements.iterations.disabled = locked || !isDebateTarget(getRunTarget());
+    if (elements.routeButton) elements.routeButton.disabled = locked;
+    if (locked && isRoutePopoverOpen()) closeRoutePopover();
     if (elements.refreshProfiles) elements.refreshProfiles.disabled = locked;
     if (elements.newChatButton) elements.newChatButton.disabled = locked;
     if (elements.drawerNewChatButton) elements.drawerNewChatButton.disabled = locked;
     if (elements.attachmentButton) elements.attachmentButton.disabled = locked || state.attachmentsLoading;
     if (elements.attachmentInput) elements.attachmentInput.disabled = locked || state.attachmentsLoading;
-    updateRunUi();
+    renderRouteUi();
     updateAttachmentsUi();
     updatePausedActions();
     updateSendState();
@@ -1247,6 +1820,7 @@ function requestProviderCapabilities() {
     sendMessage({ type: 'GET_PROVIDER_CAPABILITIES' }, (response) => {
         if (!response || response.ok === false) return;
         state.providerCapabilities = response.capabilities || null;
+        renderRouteUi();
         updateAttachmentsUi();
         updateSendState();
     });
@@ -1528,6 +2102,8 @@ function getDefaultProfile(provider) {
 }
 
 function focusProvider(provider) {
+    state.lastFocusedProvider = provider;
+    renderRouteUi();
     const profile = getDefaultProfile(provider);
     if (profile?.tabId) {
         sendMessage({ type: 'FOCUS_TAB', tabId: profile.tabId }, handleActionResponse);
@@ -1536,19 +2112,10 @@ function focusProvider(provider) {
     connectProvider(provider);
 }
 
-function handleProviderPillClick(provider) {
-    const ready = Boolean(state.connectionStatus?.[provider]);
-    const profile = getDefaultProfile(provider);
-    if (ready && profile?.tabId) {
-        focusProvider(provider);
-        return;
-    }
-    connectProvider(provider);
-}
-
 function connectProvider(provider) {
     if (!provider) return;
     if (state.connecting[provider]) return;
+    state.lastFocusedProvider = provider;
     state.connecting[provider] = true;
     updateProviderUi();
     sendMessage({ type: 'CONNECT_PROVIDER', provider }, (response) => {
@@ -1565,54 +2132,80 @@ function connectProvider(provider) {
     });
 }
 
-async function connectBothProviders() {
-    connectProvider('chatgpt');
-    connectProvider('gemini');
+function connectAllProviders() {
+    const supported = getSupportedProviders();
+    if (supported.length === 0) return;
+
+    const route = state.route || getDefaultRoute();
+    const providers = [...(route.providers || [])];
+    let didChangeRoute = false;
+
+    supported.forEach((provider) => {
+        if (!providers.includes(provider)) {
+            providers.push(provider);
+            didChangeRoute = true;
+        }
+    });
+
+    if (didChangeRoute) {
+        setRoute({ ...route, providers });
+    }
+
+    supported.forEach((provider) => {
+        const profile = getDefaultProfile(provider);
+        const connected = Boolean(profile?.tabId && Boolean(state.connectionStatus?.[provider]));
+        if (connected) return;
+        connectProvider(provider);
+    });
 }
 
 function updateProviderUi() {
-    const providers = [
-        ['chatgpt', elements.statusChatGPT, elements.connectionLabelChatgpt],
-        ['gemini', elements.statusGemini, elements.connectionLabelGemini]
-    ];
+    const providers = ['chatgpt', 'gemini'];
+    let readyCount = 0;
+    let connectingCount = 0;
 
-    providers.forEach(([provider, pill, label]) => {
-        if (!pill) return;
+    providers.forEach((provider) => {
         const ready = Boolean(state.connectionStatus?.[provider]);
         const connecting = Boolean(state.connecting?.[provider]);
         const profile = getDefaultProfile(provider);
         const modelHint = profile?.modelHint ? ` • ${profile.modelHint}` : '';
 
-        pill.classList.toggle('is-ready', ready);
-        pill.classList.toggle('is-offline', !ready && !connecting);
-        pill.classList.toggle('is-connecting', connecting);
+        if (ready) readyCount += 1;
+        if (connecting) connectingCount += 1;
 
-        const baseLabel = formatProviderLabel(provider);
-        let statusText = 'offline';
         let labelText = 'Not connected';
-
         if (connecting) {
-            statusText = 'connecting…';
             labelText = 'Connecting…';
         } else if (ready) {
-            statusText = 'ready';
             labelText = `Connected${modelHint}`;
         } else if (profile?.status === 'wrong_host') {
-            statusText = 'wrong host';
             labelText = 'Wrong host';
         } else if (profile?.status === 'unknown') {
-            statusText = 'loading…';
             labelText = 'Loading…';
         } else if (profile?.status === 'ok') {
-            statusText = 'waiting…';
             labelText = 'Waiting…';
         }
-        pill.textContent = `${baseLabel}: ${statusText}`;
 
-        if (label) {
-            label.textContent = labelText;
+        if (provider === 'chatgpt' && elements.connectionLabelChatgpt) {
+            elements.connectionLabelChatgpt.textContent = labelText;
+        }
+        if (provider === 'gemini' && elements.connectionLabelGemini) {
+            elements.connectionLabelGemini.textContent = labelText;
         }
     });
+
+    if (elements.providersButton) {
+        let text = 'Providers';
+        if (connectingCount > 0) {
+            text = 'Providers: connecting…';
+        } else {
+            text = `Providers: ${readyCount}/${providers.length} ready`;
+        }
+        elements.providersButton.textContent = text;
+        elements.providersButton.classList.toggle('is-ready', readyCount > 0 && connectingCount === 0);
+        elements.providersButton.classList.toggle('is-offline', readyCount === 0 && connectingCount === 0);
+        elements.providersButton.classList.toggle('is-connecting', connectingCount > 0);
+    }
 
     if (elements.settingsFocusChatgpt) {
         elements.settingsFocusChatgpt.disabled = !getDefaultProfile('chatgpt')?.tabId;
@@ -1620,6 +2213,8 @@ function updateProviderUi() {
     if (elements.settingsFocusGemini) {
         elements.settingsFocusGemini.disabled = !getDefaultProfile('gemini')?.tabId;
     }
+
+    renderRouteUi();
 }
 
 function updateComposerHint() {
@@ -1630,26 +2225,28 @@ function updateComposerHint() {
         return;
     }
 
-    const runTarget = getRunTarget();
-    const requiredProviders = getRequiredProvidersForRun(runTarget);
-    const requiredLabel = requiredProviders.length === 2
-        ? 'ChatGPT + Gemini'
-        : formatProviderLabel(requiredProviders[0]);
-    const connected = isRunConnected();
+    const route = getRoute();
+    const validRoute = isRouteValid(route);
+    const supportedRoute = isRouteSupported(route);
+    const requiredProviders = getRouteRequiredProviders(route);
+    const requiredLabel = requiredProviders.length > 0
+        ? requiredProviders.map(formatProviderLabel).join(' + ')
+        : '';
+    const connected = validRoute && supportedRoute && isRouteConnected(route);
     const historyBlocked = isHistoryBlocked();
     const hasPrompt = elements.promptInput.value.trim().length > 0;
-    const debate = isDebateTarget(runTarget);
-    const iterations = debate ? (parseInt(elements.iterations?.value, 10) || 0) : 1;
 
     let hint = '';
-    if (!connected) {
+    if (!validRoute) {
+        hint = 'Choose a provider in To to start.';
+    } else if (!supportedRoute) {
+        hint = 'This route is not supported yet.';
+    } else if (!connected) {
         hint = `Connect ${requiredLabel} to start.`;
     } else if (historyBlocked) {
         hint = 'Unlock history to continue.';
     } else if (!hasPrompt) {
         hint = '';
-    } else if (debate && iterations <= 0) {
-        hint = 'Iterations must be at least 1.';
     }
 
     if (!hint) {
@@ -1658,7 +2255,7 @@ function updateComposerHint() {
         } else if (state.attachmentsWarning) {
             hint = state.attachmentsWarning;
         } else if (Array.isArray(state.attachments) && state.attachments.length > 0) {
-            const { manualProviders } = getAttachmentProviderPlan(runTarget);
+            const { manualProviders } = getAttachmentProviderPlan(route);
             if (manualProviders.length > 0) {
                 const label = manualProviders.map(formatProviderLabel).join(' + ');
                 hint = `${label} will receive text only (attachments are not auto-uploaded).`;
@@ -1668,9 +2265,13 @@ function updateComposerHint() {
 
     elements.composerHint.textContent = hint;
     elements.composerHint.hidden = !hint;
-    elements.promptInput.placeholder = !connected
-        ? `Connect ${requiredLabel} to start...`
-        : (historyBlocked ? 'Unlock history to continue...' : 'Send a message...');
+    elements.promptInput.placeholder = !validRoute
+        ? 'Choose a provider in To…'
+        : (!supportedRoute
+            ? 'Choose a supported route…'
+            : (!connected
+                ? `Connect ${requiredLabel} to start...`
+                : (historyBlocked ? 'Unlock history to continue...' : 'Send a message...')));
 }
 
 function updateEmptyState() {
@@ -1687,13 +2288,14 @@ function updateEmptyState() {
         elements.timeline.appendChild(elements.emptyState);
     }
 
-    const connected = isRunConnected();
+    const route = getRoute();
+    const ready = isRouteValid(route) && isRouteSupported(route) && isRouteConnected(route);
     const historyBlocked = isHistoryBlocked();
     const titleEl = elements.emptyState.querySelector('.empty-title');
     const subtitleEl = elements.emptyState.querySelector('.empty-subtitle');
     const actionsEl = elements.emptyState.querySelector('.empty-actions');
 
-    if (connected && historyBlocked) {
+    if (ready && historyBlocked) {
         if (titleEl) titleEl.textContent = 'Unlock history';
         if (subtitleEl) subtitleEl.textContent = 'Enter your passphrase to unlock encrypted history.';
         if (actionsEl) {
@@ -1702,15 +2304,31 @@ function updateEmptyState() {
         return;
     }
 
-    if (titleEl) titleEl.textContent = connected ? 'New chat' : 'Connect to start';
-    if (subtitleEl) {
-        subtitleEl.textContent = connected
-            ? 'Write a message below to start.'
-            : 'Open ChatGPT and/or Gemini once. Then send messages from this panel.';
+    if (!isRouteValid(route)) {
+        if (titleEl) titleEl.textContent = 'New chat';
+        if (subtitleEl) subtitleEl.textContent = 'Choose where to send your message.';
+        if (actionsEl) actionsEl.hidden = false;
+        return;
     }
-    if (actionsEl) {
-        actionsEl.hidden = connected;
+
+    if (!isRouteSupported(route)) {
+        if (titleEl) titleEl.textContent = 'Route not supported';
+        if (subtitleEl) subtitleEl.textContent = 'This route is not supported yet.';
+        if (actionsEl) actionsEl.hidden = false;
+        return;
     }
+
+    if (!ready) {
+        const label = getRouteRequiredProviders(route).map(formatProviderLabel).join(' + ');
+        if (titleEl) titleEl.textContent = 'Connect to start';
+        if (subtitleEl) subtitleEl.textContent = `Connect ${label} to start.`;
+        if (actionsEl) actionsEl.hidden = false;
+        return;
+    }
+
+    if (titleEl) titleEl.textContent = 'New chat';
+    if (subtitleEl) subtitleEl.textContent = 'Write a message below to start.';
+    if (actionsEl) actionsEl.hidden = true;
 }
 
 async function handlePrimaryAction() {
@@ -1740,23 +2358,29 @@ async function startSession() {
     const prompt = elements.promptInput.value.trim();
     if (!prompt) return;
 
-    const runTarget = getRunTarget();
-    const debate = isDebateTarget(runTarget);
-    const rounds = debate ? (parseInt(elements.iterations?.value, 10) || 0) : 1;
-    if (rounds <= 0) return;
-
-    if (!isRunConnected()) {
-        const required = getRequiredProvidersForRun(runTarget);
-        if (required.length === 2) {
-            setSessionStatus('Connect ChatGPT and Gemini to start.');
-        } else {
-            setSessionStatus(`Connect ${formatProviderLabel(required[0])} to start.`);
-        }
+    const route = getRoute();
+    if (!isRouteValid(route)) {
+        setSessionStatus('Choose a provider to start.');
+        openRoutePopover();
+        return;
+    }
+    if (!isRouteSupported(route)) {
+        setSessionStatus('This route is not supported yet.');
+        openRoutePopover();
         return;
     }
 
+    const required = getRouteRequiredProviders(route);
+    if (!isRouteConnected(route)) {
+        required.forEach((provider) => connectProvider(provider));
+        setSessionStatus(`Connect ${required.map(formatProviderLabel).join(' + ')} to start.`);
+        return;
+    }
+
+    const rounds = route.kind === 'debate' ? clampInt(route.rounds || 3, 1, 12) : 1;
+
 	    const attachments = Array.isArray(state.attachments) ? state.attachments : [];
-	    const attachmentPlan = attachments.length > 0 ? getAttachmentProviderPlan(runTarget) : null;
+	    const attachmentPlan = attachments.length > 0 ? getAttachmentProviderPlan(route) : null;
 
 	    if (attachmentPlan && attachmentPlan.manualProviders.length > 0) {
 	        const { autoProviders, manualProviders } = attachmentPlan;
@@ -1765,7 +2389,7 @@ async function startSession() {
 	        const countLabel = count === 1 ? '1 attachment' : `${count} attachments`;
 	        const manualLabel = manualProviders.map(formatProviderLabel).join(' + ');
 	        const autoLabel = autoProviders.length > 0 ? autoProviders.map(formatProviderLabel).join(' + ') : 'none';
-	        const ackKey = buildManualUploadAckKey(runTarget, attachments, manualProviders);
+	        const ackKey = buildManualUploadAckKey(route, attachments, manualProviders);
 	        const alreadyAcknowledged = state.manualUploadAckKey === ackKey;
 	
 	        if (!alreadyAcknowledged) {
@@ -1814,12 +2438,13 @@ async function startSession() {
         }));
     }
 
-    if (debate) {
+    payload.route = { kind: route.kind, providers: route.providers, rounds };
+    if (route.kind === 'debate') {
         payload.mode = 'debate';
-        payload.firstLLM = getDebateFirstLLM(runTarget);
+        payload.firstLLM = route.providers[0] === 'gemini' ? 'gemini' : 'chatgpt';
     } else {
         payload.mode = 'direct';
-        payload.target = getDirectTarget(runTarget);
+        payload.target = route.kind === 'parallel' ? 'both' : (route.providers[0] === 'gemini' ? 'gemini' : 'chatgpt');
     }
     sendMessage(payload);
 
@@ -1856,6 +2481,7 @@ function handleBackgroundMessage(message) {
     switch (message.type) {
         case 'PROVIDER_CAPABILITIES':
             state.providerCapabilities = message.capabilities || null;
+            renderRouteUi();
             updateAttachmentsUi();
             updateSendState();
             break;
@@ -2161,10 +2787,13 @@ function hydrateSession(session) {
 
 function handleProgress(message) {
     if (!message) return;
+    const waitingFor = Array.isArray(message.waitingFor)
+        ? message.waitingFor.map(formatProviderLabel).join(' + ')
+        : String(message.waitingFor || message.waitingForLabel || '').trim();
     if (message.roundIndex && message.totalRounds) {
-        setSessionStatus(`Running round ${message.roundIndex} of ${message.totalRounds} - waiting for ${message.waitingFor}`);
-    } else if (message.waitingFor) {
-        setSessionStatus(`Waiting for ${message.waitingFor}`);
+        setSessionStatus(`Running round ${message.roundIndex} of ${message.totalRounds} - waiting for ${waitingFor}`);
+    } else if (waitingFor) {
+        setSessionStatus(`Waiting for ${waitingFor}`);
     }
 }
 
@@ -2583,7 +3212,11 @@ function formatRoleLabel(role) {
 }
 
 function formatProviderLabel(provider) {
-    return provider === 'gemini' ? 'Gemini' : 'ChatGPT';
+    if (!provider) return 'Provider';
+    const normalized = String(provider).toLowerCase();
+    if (normalized === 'gemini') return 'Gemini';
+    if (normalized === 'chatgpt') return 'ChatGPT';
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
 function normalizeInlineText(value) {

@@ -85,3 +85,26 @@ runTest('chooseBestTextCandidate: returns sources list when it is the only candi
   const result = CaptureUtils.chooseBestTextCandidate([sourcesOnly], { provider: 'chatgpt' });
   assert.strictEqual(result.bestIndex, 0);
 });
+
+runTest('looksLikeReferenceList: does not flag answer-like link list with intro line', () => {
+  const text = [
+    'Here are some links:',
+    'https://example.com/a',
+    'https://example.org/b',
+    'https://example.net/c'
+  ].join('\n');
+  assert.strictEqual(CaptureUtils.looksLikeReferenceList(text, { provider: 'chatgpt' }), false);
+});
+
+runTest('chooseBestTextCandidate: prefers full link list answer over intro fragment', () => {
+  const introOnly = 'Here are some links:';
+  const full = [
+    'Here are some links:',
+    'https://example.com/a',
+    'https://example.org/b',
+    'https://example.net/c'
+  ].join('\n');
+
+  const result = CaptureUtils.chooseBestTextCandidate([introOnly, full], { provider: 'chatgpt' });
+  assert.strictEqual(result.bestIndex, 1);
+});

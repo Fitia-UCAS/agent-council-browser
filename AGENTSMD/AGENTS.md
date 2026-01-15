@@ -4,9 +4,10 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 ## 1) What this extension does (current behavior)
 
-- Chrome extension that runs a **side panel chat UI** with either:
-  - a multi‑iteration debate between ChatGPT and Gemini, or
-  - a direct send to ChatGPT, Gemini, or both (no debate scaffolding).
+- Chrome extension that runs a **side panel chat UI** where each message is sent via a **Route**:
+  - **Single**: send to one provider (ChatGPT or Gemini).
+  - **Compare (Parallel)**: send the same prompt to both providers (no debate scaffolding).
+  - **Debate**: multi‑round ping‑pong between two providers.
 - Side panel supports **attachments** (files/images) that are delivered via provider web UI automation (no official APIs).
   - ChatGPT: attachments are auto-uploaded when possible (best-effort pre-upload may start while another provider is answering).
   - Gemini: attachments are **not auto-uploaded**; Gemini receives text-only when files are attached in the side panel (UI warns before sending).
@@ -17,11 +18,11 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 1. User creates **Tab Profiles** for ChatGPT and Gemini in the Provider Manager:
    - Use the current tab, or open a new provider tab and claim it after manual model selection.
-2. In the side panel composer, user selects:
-   - **Send to**: Debate (ChatGPT→Gemini), Debate (Gemini→ChatGPT), ChatGPT, Gemini, or Both
-   - **Iterations** (enabled only for Debate; forced to 1 for direct sends)
+2. In the side panel composer, user selects a **Route** from the `To` pill:
+   - Pick providers (chips), drag to reorder, and choose mode (**Parallel** / **Debate**) when applicable.
+   - Set **Rounds** only for Debate.
 3. User writes a message and clicks **Send**.
-4. The extension runs a debate (when Send to = Debate):
+4. The extension runs a debate (when Route = Debate):
    - **Round 1**: first LLM gets full context + user query.
    - **Round 1**: second LLM gets full context + user query + first LLM answer.
    - **Rounds 2..N**: each new prompt contains only the previous model’s latest answer (the tab thread holds history).
@@ -35,7 +36,8 @@ This file is the durable memory for the repo. It is the canonical reference for 
 6. Sending again in the same chat is treated as a **continuation**:
    - Run settings are prefilled from the previous user message’s stored `meta`.
    - The first turns can wrap the new user message with a follow-up template to avoid “resetting” the context.
-  - Direct sends (ChatGPT/Gemini/Both) backfill the target model with the missing transcript it has not been shown yet (tracked per chat via per-provider delivery cursors), so switching providers retains continuity in both directions.
+  - Direct sends (Single) can backfill missing transcript history (tracked per chat via per-provider delivery cursors).
+  - Parallel runs currently send the raw user prompt to each provider (no prompt wrapper/history injection) for fair comparison.
 
 ### Provider Manager (Tab Profiles) UX
 
@@ -67,21 +69,22 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Claiming does not depend on model detection.
 - Wizard is dismissed on claim or cancel; cancel does not close the tab.
 
-### Quick connect buttons (side panel)
+### Quick connect (side panel)
 
-- Side panel includes "Connect ChatGPT", "Connect Gemini", and "Connect both" buttons.
+- The Route builder shows a per‑provider **Connect** button when a required provider is not ready, plus a **Connect all** button.
 - These send `CONNECT_PROVIDER` to the background, which:
   - opens the provider homepage tab, then
   - immediately claims the tab into a Tab Profile and sets it as the default for that provider.
 - Connection “ready” is still determined by a successful `PING`/`PONG` to the content script (login/redirect pages may delay readiness).
-- Profile writes are serialized in the background to avoid connect-both lost-update races.
+- Profile writes are serialized in the background to avoid lost-update races.
 
 ### Session gating and safety
 
 - Send is disabled until:
   - Prompt is non-empty
-  - Iterations > 0 (Debate only)
-  - Selected profiles are valid (status OK, tab exists) for the providers required by the selected Send-to target
+  - Route is valid/supported
+  - Required providers are connected (content script responds to `PING`)
+  - Rounds is valid (Debate only)
 - The background still validates profiles before every prompt injection.
 - If a profile goes offline or navigates away, the session pauses with a clear reason and fix actions.
 - Attachments:
@@ -416,13 +419,20 @@ Current force‑capture thresholds:
 
 ## 6) UI and message protocol
 
+The side panel’s primary run control is the **Route Builder** (`To` pill). See `AGENTSMD/AGENTS_ROUTE_BUILDER.md` for the full UX + state model.
+
 ### Side panel -> background
 
-- `START_DEBATE_SESSION`:
+- `START_RUN` (primary):
+  - `{ prompt, chatId, rounds, route, mode, target, firstLLM?, attachments? }`
+- `START_DEBATE_SESSION` (legacy; still accepted by background):
   - `{ prompt, firstLLM, rounds, profileIds: { chatgpt, gemini } }` (tabIds still accepted for backward compat)
 - `STOP_SESSION`:
   - `{ sessionId }`
 - `RESUME_SESSION`
+- `CONNECT_PROVIDER` `{ provider }`
+- `CHECK_CONNECTION`
+- `GET_PROVIDER_CAPABILITIES`
 - `GET_TAB_PROFILES`
 - `CREATE_PROFILE_FROM_ACTIVE_TAB` `{ provider, label?, profileId? }`
 - `CLAIM_TAB_AS_PROFILE` `{ provider, tabId, label?, profileId? }`
@@ -435,7 +445,7 @@ Current force‑capture thresholds:
 - `GET_DEBATE_PROMPTS`
 - `SET_DEBATE_PROMPTS` `{ config }`
 - `RESET_DEBATE_PROMPTS`
-- `SEND_PROMPT`:
+- `SEND_PROMPT` (legacy; non-session direct send):
   - `{ prompt, targets:{chatgpt, gemini}, multiAgent:{enabled, maxIterations} }`
 - Legacy (still supported by background):
   - `LIST_LLM_TABS`
@@ -455,6 +465,7 @@ Responses (for profile actions):
 - `UI_SESSION_STARTED` `{ sessionId, rounds, firstLLM, tabIds, profileIds }`
 - `UI_MESSAGE_ADD` `{ role, content, timestamp, turnIndex, roundIndex }`
 - `UI_SESSION_PROGRESS` `{ sessionId, waitingFor, roundIndex, totalRounds }`
+  - `waitingFor` may be a string or an array (parallel mode).
 - `UI_SESSION_PAUSED` `{ sessionId, provider, reason }`
 - `UI_SESSION_RESUMED` `{ sessionId }`
 - `UI_SESSION_ENDED` `{ sessionId, reason }`
@@ -484,14 +495,13 @@ TAB_PROFILES updates:
 
 ### Side panel behavior details
 
-- Profile dropdown values are `default` or a concrete `profileId`.
-- "Default" entry resolves to `defaults[provider]` in storage.
-- Start button is disabled unless both resolved profiles exist and have status `ok`.
+- Routes are selected via the `To` pill (Route Builder) and persisted as `mlc_last_route_v1`.
+- Runs always use the **default profile** for each provider (set in the Provider Manager); there is no per-message profile dropdown.
+- Send is disabled unless the route is valid/supported and the route’s required providers are ready (PING/PONG).
 - Paused sessions show a "Paused" state with actions:
   - Focus tab (uses profile tabId)
   - Rebind to current tab (calls CREATE_PROFILE_FROM_ACTIVE_TAB with profileId)
   - Resume session (RESUME_SESSION)
-- Dropdown entries show profile label plus status and in-use hints when applicable.
 - Prompt templates can be edited in the side panel (3-field editor; optional advanced raw JSON) and saved to `mlc_debate_prompts_override_v1`.
 - The composer prompt input has no extension-enforced character limit (provider UIs may still impose their own).
 

@@ -21,8 +21,7 @@
                 <div class="topbar-title">Multi-LLM</div>
             </div>
             <div class="topbar-right">
-                <button class="provider-pill provider-pill-chatgpt" id="status-chatgpt" type="button" aria-label="ChatGPT connection">ChatGPT</button>
-                <button class="provider-pill provider-pill-gemini" id="status-gemini" type="button" aria-label="Gemini connection">Gemini</button>
+                <button class="provider-pill" id="providers-button" type="button" aria-label="Providers">Providers</button>
                 <button class="icon-button" id="settings-button" type="button" aria-label="Settings" title="Settings">
                     <span class="material-symbols-rounded">settings</span>
                 </button>
@@ -40,12 +39,11 @@
 
         <main class="timeline" id="timeline">
             <div class="empty-state" id="empty-state">
-                <div class="empty-title">Connect to start</div>
-                <div class="empty-subtitle">Open ChatGPT and/or Gemini once. Then send messages from this panel.</div>
+                <div class="empty-title">New chat</div>
+                <div class="empty-subtitle">Choose where to send your message. We’ll connect only when needed.</div>
                 <div class="empty-actions">
-                    <button class="primary-button" id="connect-chatgpt" type="button">Connect ChatGPT</button>
-                    <button class="primary-button" id="connect-gemini" type="button">Connect Gemini</button>
-                    <button class="ghost-button" id="connect-both" type="button">Connect both</button>
+                    <button class="primary-button" id="empty-open-route" type="button">Choose providers</button>
+                    <button class="ghost-button" id="empty-open-settings" type="button">Manage providers</button>
                 </div>
             </div>
         </main>
@@ -56,20 +54,63 @@
             <div class="composer-hint" id="composer-hint" hidden></div>
             <div class="composer-run-settings" id="composer-run-settings">
                 <div class="composer-run-row">
-                    <label class="field">
-                        <span class="field-label">Send to</span>
-                        <select id="run-target">
-                            <option value="debate_chatgpt">Debate (ChatGPT → Gemini)</option>
-                            <option value="debate_gemini">Debate (Gemini → ChatGPT)</option>
-                            <option value="chatgpt">ChatGPT</option>
-                            <option value="gemini">Gemini</option>
-                            <option value="both">Both</option>
-                        </select>
-                    </label>
-                    <label class="field">
-                        <span class="field-label">Iterations</span>
-                        <input id="iterations" type="number" min="1" max="12" value="3">
-                    </label>
+                    <div class="field">
+                        <span class="field-label">To</span>
+                        <button class="route-pill" id="route-button" type="button" aria-haspopup="dialog" aria-expanded="false">
+                            <span class="route-pill-text" id="route-pill-text">Select providers…</span>
+                            <span class="material-symbols-rounded">expand_more</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="route-popover" id="route-popover" role="dialog" aria-label="Route builder" aria-hidden="true" hidden>
+                    <div class="route-popover-header">
+                        <div class="route-popover-title">Route</div>
+                        <button class="icon-button route-popover-close" id="route-close" type="button" aria-label="Close route builder">
+                            <span class="material-symbols-rounded">close</span>
+                        </button>
+                    </div>
+                    <div class="route-popover-body">
+                        <div class="route-section">
+                            <div class="route-section-title">Presets</div>
+                            <div class="route-presets">
+                                <button class="ghost-button route-preset" id="route-preset-single" type="button">Single</button>
+                                <button class="ghost-button route-preset" id="route-preset-compare" type="button">Compare</button>
+                                <button class="ghost-button route-preset" id="route-preset-debate" type="button">Debate</button>
+                            </div>
+                        </div>
+
+                        <div class="route-section">
+                            <div class="route-section-title">Selected</div>
+                            <div class="route-selected" id="route-selected"></div>
+                            <div class="route-help" id="route-selected-help">Click providers below or drag to reorder.</div>
+                        </div>
+
+                        <div class="route-section" id="route-mode-section" hidden>
+                            <div class="route-section-title">Mode</div>
+                            <div class="route-modes" role="group" aria-label="Route mode">
+                                <button class="route-mode" id="route-mode-parallel" type="button">Parallel</button>
+                                <button class="route-mode" id="route-mode-debate" type="button">Debate</button>
+                            </div>
+                            <div class="route-debate-settings" id="route-debate-settings" hidden>
+                                <label class="field route-rounds-field">
+                                    <span class="field-label">Rounds</span>
+                                    <input id="route-rounds" type="number" min="1" max="12" value="3">
+                                </label>
+                                <button class="ghost-button route-swap" id="route-swap" type="button" title="Swap order">Swap order</button>
+                            </div>
+                        </div>
+
+	                        <div class="route-section">
+	                            <div class="route-section-title">Providers</div>
+	                            <button class="secondary-button route-connect-all" id="route-connect-all" type="button">Connect all</button>
+	                            <div class="route-provider-list" id="route-provider-list"></div>
+	                        </div>
+
+	                        <div class="route-footer">
+	                            <button class="ghost-button" id="route-manage-providers" type="button">Manage providers</button>
+	                            <button class="primary-button" id="route-done" type="button">Done</button>
+	                        </div>
+                    </div>
                 </div>
             </div>
             <div class="composer-attachments" id="composer-attachments">

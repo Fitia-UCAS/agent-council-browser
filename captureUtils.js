@@ -106,7 +106,7 @@
     if (analysis.plusLineCount >= 1 && lineCount >= 4 && sentenceEndPunctCount === 0) return true;
 
     // Weaker, structure-based signals.
-    if (lineCount >= 4 && urlishRatio >= 0.6 && sentenceEndPunctCount === 0) return true;
+    if (lineCount >= 4 && urlishRatio >= 0.85 && sentenceEndPunctCount === 0) return true;
     if (lineCount >= 6 && bulletRatio >= 0.6 && urlishRatio >= 0.3 && sentenceEndPunctCount === 0) return true;
     if (lineCount >= 8 && urlishRatio >= 0.5 && analysis.avgLineLen <= 80 && sentenceEndPunctCount === 0) return true;
 
@@ -136,7 +136,7 @@
     const codeScore = analysis.codeFenceCount ? 4 : 0;
 
     // Penalties for reference-like structure.
-    const urlPenalty = Math.min(30, analysis.urlCount * 2) + Math.min(20, analysis.domainCount);
+    const urlPenalty = Math.min(30, analysis.urlCount * 2) + Math.min(12, Math.floor(analysis.domainCount / 2));
     const bulletPenalty = analysis.bulletLikeCount >= 8 && analysis.sentenceEndPunctCount === 0 ? 8 : 0;
     const referencePenalty = isReferenceList ? 60 : 0;
 

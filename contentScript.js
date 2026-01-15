@@ -364,7 +364,9 @@
 	    }
 
     function isChatGPTGenerating() {
-        const stopButton = document.querySelector('button[data-testid=\"stop-button\"], button[aria-label*=\"Stop\" i]');
+        const stopButton = document.querySelector(
+            'button[data-testid="stop-button"], button[data-testid="fruitjuice-stop-button"], button[aria-label*="Stop generating" i], button[aria-label*="Stop" i]'
+        );
         return !!(stopButton && stopButton.offsetParent !== null);
     }
 
@@ -450,6 +452,80 @@
 	        return avgLen <= 32;
 	    }
 
+        function normalizeCaptureCandidateText(text) {
+            const normalized = CaptureUtils?.normalizeWhitespace
+                ? CaptureUtils.normalizeWhitespace(text)
+                : String(text).replace(/\s+/g, ' ').trim();
+            return normalized;
+        }
+
+        function getTopLevelNodes(nodes) {
+            const arr = Array.from(nodes || []).filter(Boolean);
+            if (arr.length <= 1) return arr;
+            return arr.filter(node => !arr.some(other => other !== node && other.contains(node)));
+        }
+
+        function buildChatGPTAssistantCandidate(messageRoot, assistantIndex, options = {}) {
+            if (!messageRoot) {
+                return {
+                    text: '',
+                    html: '',
+                    assistantIndex,
+                    origin: null,
+                    partCount: 0,
+                    nodeCount: 0
+                };
+            }
+
+            const contentNodes = (() => {
+                const primary = getTopLevelNodes(messageRoot.querySelectorAll('[data-testid="message-content"]'));
+                if (primary.length) return primary;
+
+                const secondary = getTopLevelNodes(messageRoot.querySelectorAll('.markdown, .prose'));
+                if (secondary.length) return secondary;
+
+                return [messageRoot];
+            })();
+
+            const seenText = new Set();
+            const parts = [];
+            const htmlParts = [];
+            for (const node of contentNodes) {
+                const text = getTrimmedText(node);
+                if (!text) continue;
+                const normalized = normalizeCaptureCandidateText(text);
+                if (!normalized) continue;
+                if (seenText.has(normalized)) continue;
+                seenText.add(normalized);
+                parts.push(text);
+                if (options.withHtml) {
+                    const html = extractCleanHtmlFromNode(node);
+                    if (html) htmlParts.push(html);
+                }
+            }
+
+            const combinedText = parts.join('\n\n').trim();
+            let combinedHtml = '';
+            if (options.withHtml) {
+                combinedHtml = htmlParts.join('\n').trim();
+                const MAX_HTML_CHARS = 120000;
+                if (combinedHtml.length > MAX_HTML_CHARS) combinedHtml = '';
+            }
+
+            const origin = Number.isFinite(assistantIndex)
+                ? `assistant[${assistantIndex}] aggregated(${parts.length}/${contentNodes.length})`
+                : 'assistant aggregated';
+
+            return {
+                text: combinedText,
+                html: combinedHtml,
+                assistantIndex,
+                origin,
+                partCount: parts.length,
+                nodeCount: contentNodes.length
+            };
+        }
+
 	    function extractChatGPTResponse(options = {}) {
 	        const assistantNodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
 	        const baselineCount = Number.isFinite(captureState.baselineAssistantCount)
@@ -461,12 +537,12 @@
 	            : 0;
 
             const roots = [];
-            for (let i = assistantNodes.length - 1; i >= preferredStart; i--) {
+            const startIndex = Math.max(0, Math.max(preferredStart, assistantNodes.length - 4));
+            for (let i = startIndex; i < assistantNodes.length; i++) {
                 const node = assistantNodes[i];
                 if (!node) continue;
                 if (node.querySelector('[data-testid="message-content"], .markdown, .prose') || getTrimmedText(node)) {
                     roots.push({ node, assistantIndex: i });
-                    if (roots.length >= 4) break;
                 }
             }
             if (roots.length === 0) {
@@ -474,59 +550,47 @@
                     const node = assistantNodes[i];
                     if (!node) continue;
                     if (node.querySelector('[data-testid="message-content"], .markdown, .prose') || getTrimmedText(node)) {
-                        roots.push({ node, assistantIndex: i });
+                        roots.unshift({ node, assistantIndex: i });
                     }
                     if (roots.length >= 4) break;
                 }
             }
 
-	        const candidateNodes = [];
-            const selectors = [
-                '[data-testid="message-content"]',
-                '.prose',
-                '.markdown'
-            ];
-	        if (roots.length) {
-                for (const rootEntry of roots) {
-                    const messageRoot = rootEntry.node;
-                    for (const sel of selectors) {
-                        messageRoot.querySelectorAll(sel).forEach(node => {
-                            candidateNodes.push({ node, assistantIndex: rootEntry.assistantIndex, selector: sel });
-                        });
-                    }
-                    candidateNodes.push({ node: messageRoot, assistantIndex: rootEntry.assistantIndex, selector: 'root' });
-                }
-	        }
-
-	        // Fallback: scan for content nodes outside of the assistant root (best effort).
-	        if (candidateNodes.length === 0) {
-	            document.querySelectorAll(selectors.join(', ')).forEach(node => candidateNodes.push({ node, assistantIndex: null, selector: 'global' }));
-	        }
-
-	        const seenNodes = new Set();
-	        const seenText = new Set();
+            const seenText = new Set();
 	        const candidates = [];
-	        for (const entry of candidateNodes) {
-                const node = entry?.node;
-	            if (!node || seenNodes.has(node)) continue;
-	            seenNodes.add(node);
-	            const isUser = node.closest?.('[data-message-author-role="user"], .user-message');
-	            if (isUser) continue;
-	            const text = getTrimmedText(node);
-	            if (!text) continue;
-	            const normalized = CaptureUtils?.normalizeWhitespace
-	                ? CaptureUtils.normalizeWhitespace(text)
-	                : String(text).replace(/\s+/g, ' ').trim();
-	            if (!normalized) continue;
-	            if (seenText.has(normalized)) continue;
-	            seenText.add(normalized);
-                const origin = entry.selector === 'root'
-                    ? `assistant[${entry.assistantIndex}] root`
-                    : (entry.assistantIndex !== null && entry.assistantIndex !== undefined)
-                        ? `assistant[${entry.assistantIndex}] ${entry.selector}`
-                        : entry.selector;
-	            candidates.push({ node, text, origin, assistantIndex: entry.assistantIndex, selector: entry.selector });
-	        }
+            for (const rootEntry of roots) {
+                const candidate = buildChatGPTAssistantCandidate(rootEntry.node, rootEntry.assistantIndex, options);
+                if (!candidate?.text) continue;
+                const normalized = normalizeCaptureCandidateText(candidate.text);
+                if (!normalized) continue;
+                if (seenText.has(normalized)) continue;
+                seenText.add(normalized);
+                candidates.push(candidate);
+            }
+
+            // Fallback: scan for recent content nodes outside of assistant roots (best effort).
+            if (candidates.length === 0) {
+                const selector = '[data-testid="message-content"], .prose, .markdown';
+                const nodes = Array.from(document.querySelectorAll(selector));
+                const recent = nodes.slice(Math.max(0, nodes.length - 8));
+                for (let i = 0; i < recent.length; i++) {
+                    const node = recent[i];
+                    const text = getTrimmedText(node);
+                    if (!text) continue;
+                    const normalized = normalizeCaptureCandidateText(text);
+                    if (!normalized) continue;
+                    if (seenText.has(normalized)) continue;
+                    seenText.add(normalized);
+                    candidates.push({
+                        text,
+                        html: options.withHtml ? extractCleanHtmlFromNode(node) : '',
+                        assistantIndex: null,
+                        origin: `global[${i}]`,
+                        partCount: 1,
+                        nodeCount: 1
+                    });
+                }
+            }
 
 	        if (candidates.length === 0) {
 	            return options.withMeta ? { text: '', meta: null } : { text: '' };
@@ -541,24 +605,120 @@
 	            ? ranking.bestIndex
 	            : 0;
             let chosenIndex = rankingBestIndex;
-            if (ranking.best?.isReferenceList && Array.isArray(ranking.ranked)) {
-                const alt = ranking.ranked.find(r => {
-                    if (r.isReferenceList) return false;
-                    const analysis = r.analysis || {};
+
+            const analysisByIndex = new Map();
+            const referenceByIndex = new Map();
+            if (Array.isArray(ranking.ranked)) {
+                ranking.ranked.forEach(item => {
+                    analysisByIndex.set(item.index, item.analysis || null);
+                    referenceByIndex.set(item.index, Boolean(item.isReferenceList));
+                });
+            }
+
+            const getAnalysisForIndex = (index) => {
+                if (analysisByIndex.has(index)) return analysisByIndex.get(index);
+                if (CaptureUtils && typeof CaptureUtils.analyzeText === 'function') {
+                    try {
+                        return CaptureUtils.analyzeText(texts[index]);
+                    } catch (error) {
+                        // ignore
+                    }
+                }
+                const raw = String(texts[index] || '').trim();
+                const lines = raw.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+                return {
+                    raw,
+                    lines,
+                    lineCount: lines.length,
+                    wordCount: raw ? raw.split(/\s+/).filter(Boolean).length : 0,
+                    urlishLineCount: lines.filter(line => /\bhttps?:\/\/\S+|\bwww\.\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,24}\b/i.test(line)).length,
+                    sentenceEndPunctCount: (raw.match(/[.!?](?:\s|$)/g) || []).length,
+                    codeFenceCount: (raw.match(/```/g) || []).length,
+                    startsWithSourcesHeading: /^(sources?|references?|citations?)\b[:\s-]*/i.test(lines[0] || '')
+                };
+            };
+
+            const getWordCount = (index) => {
+                const analysis = getAnalysisForIndex(index) || {};
+                const wordCount = Number.isFinite(analysis.wordCount) ? analysis.wordCount : 0;
+                return wordCount;
+            };
+
+            const getUrlishRatio = (index) => {
+                const analysis = getAnalysisForIndex(index) || {};
+                const lineCount = Number.isFinite(analysis.lineCount) ? analysis.lineCount : 0;
+                const urlishLineCount = Number.isFinite(analysis.urlishLineCount) ? analysis.urlishLineCount : 0;
+                return lineCount ? (urlishLineCount / Math.max(1, lineCount)) : 0;
+            };
+
+            const isReferenceCandidate = (index) => {
+                if (referenceByIndex.has(index)) return referenceByIndex.get(index);
+                return looksLikeChatGPTSourcesOnly(texts[index]);
+            };
+
+            // Guardrail: avoid selecting sources-only blocks when a real answer exists.
+            const bestIsReference = isReferenceCandidate(chosenIndex);
+            if (bestIsReference && Array.isArray(ranking.ranked)) {
+                const alt = ranking.ranked.find(item => {
+                    if (item.index === chosenIndex) return false;
+                    if (item.isReferenceList) return false;
+                    const analysis = item.analysis || {};
                     const wordCount = analysis.wordCount || 0;
                     const sentenceEndPunctCount = analysis.sentenceEndPunctCount || 0;
                     const codeFenceCount = analysis.codeFenceCount || 0;
                     const lineCount = analysis.lineCount || 0;
-                    return wordCount >= 6 || sentenceEndPunctCount >= 1 || codeFenceCount >= 1 || lineCount >= 3;
+                    return wordCount >= 18 || sentenceEndPunctCount >= 2 || codeFenceCount >= 1 || lineCount >= 4;
                 });
                 if (alt && Number.isFinite(alt.index) && alt.index >= 0) {
                     chosenIndex = alt.index;
                 }
             }
 
+            // Guardrail: avoid capturing tiny fragments (often a lone hyperlink) when longer candidates exist.
+            const chosenWordCount = getWordCount(chosenIndex);
+            if (chosenWordCount > 0 && chosenWordCount < 12) {
+                let bestAltIndex = chosenIndex;
+                let bestAltWordCount = chosenWordCount;
+                for (let i = 0; i < texts.length; i++) {
+                    if (i === chosenIndex) continue;
+                    const wc = getWordCount(i);
+                    if (wc <= bestAltWordCount + 10) continue;
+                    if (isReferenceCandidate(i) && !isReferenceCandidate(chosenIndex)) continue;
+                    const urlishRatio = getUrlishRatio(i);
+                    if (urlishRatio >= 0.95 && wc < 24) continue;
+                    bestAltIndex = i;
+                    bestAltWordCount = wc;
+                }
+                if (bestAltIndex !== chosenIndex) {
+                    chosenIndex = bestAltIndex;
+                }
+            }
+
+            // Guardrail: if the chosen text is a strict substring of another non-reference candidate, prefer the longer one.
+            const chosenNormalized = normalizeCaptureCandidateText(texts[chosenIndex]);
+            if (chosenNormalized) {
+                let substringAltIndex = null;
+                const chosenWc = getWordCount(chosenIndex);
+                for (let i = 0; i < texts.length; i++) {
+                    if (i === chosenIndex) continue;
+                    const otherNormalized = normalizeCaptureCandidateText(texts[i]);
+                    if (!otherNormalized) continue;
+                    if (otherNormalized === chosenNormalized) continue;
+                    if (!otherNormalized.includes(chosenNormalized)) continue;
+                    const otherWc = getWordCount(i);
+                    if (otherWc <= chosenWc + 8) continue;
+                    if (isReferenceCandidate(i) && !isReferenceCandidate(chosenIndex)) continue;
+                    substringAltIndex = i;
+                    break;
+                }
+                if (substringAltIndex !== null) {
+                    chosenIndex = substringAltIndex;
+                }
+            }
+
 	        const bestIndex = chosenIndex;
-	        const bestText = texts[bestIndex] || texts[rankingBestIndex] || texts[0] || '';
-            const bestNode = candidates[bestIndex]?.node || candidates[rankingBestIndex]?.node || candidates[0]?.node || null;
+            const bestCandidate = candidates[bestIndex] || candidates[rankingBestIndex] || candidates[0] || null;
+	        const bestText = bestCandidate?.text || '';
 
 	        const meta = {
 	            provider: 'chatgpt',
@@ -570,7 +730,9 @@
                 rankingBestIndex: rankingBestIndex,
                 rankingBestIsReferenceList: ranking.best?.isReferenceList ?? null,
                 didOverrideReferenceBest: bestIndex !== rankingBestIndex,
-                bestOrigin: candidates[bestIndex]?.origin || null,
+                bestOrigin: bestCandidate?.origin || null,
+                bestAssistantIndex: Number.isFinite(bestCandidate?.assistantIndex) ? bestCandidate.assistantIndex : null,
+                bestWordCount: Number.isFinite(getAnalysisForIndex(bestIndex)?.wordCount) ? getAnalysisForIndex(bestIndex).wordCount : null,
 	            bestScore: Array.isArray(ranking.ranked)
                     ? (ranking.ranked.find(r => r.index === bestIndex)?.score ?? null)
                     : (ranking.best?.score ?? null),
@@ -608,7 +770,7 @@
                 text: bestText
             };
             if (options.withHtml) {
-                result.html = extractCleanHtmlFromNode(bestNode);
+                result.html = bestCandidate?.html || '';
             }
 	        return options.withMeta ? { ...result, meta } : result;
 	    }
@@ -897,7 +1059,7 @@
 	    function evaluateCapture() {
 	        if (!captureState.active) return;
 	        const now = Date.now();
-	        const minDelayMs = 800;
+	        const minDelayMs = isChatGPT ? 1200 : 800;
 	        if (now - captureState.startedAt < minDelayMs) return;
 
 	        const extraction = extractLatestResponse({ withMeta: true });
@@ -917,21 +1079,39 @@
         if (textChanged) {
             captureState.lastText = text;
             captureState.lastTextChangeAt = now;
-        }
+	        }
 
 	        const generating = isGenerating();
 	        const stableForMs = now - captureState.lastTextChangeAt;
             const totalForMs = now - captureState.startedAt;
-	        const baseForceCaptureMs = isChatGPT ? 20000 : 15000;
+            const metaWordCount = isChatGPT && Number.isFinite(captureState.lastExtractionMeta?.bestWordCount)
+                ? captureState.lastExtractionMeta.bestWordCount
+                : null;
+            const wordCount = metaWordCount !== null
+                ? metaWordCount
+                : String(text || '').trim().split(/\s+/).filter(Boolean).length;
+
+            const looksUrlishOnly = isChatGPT
+                ? (wordCount > 0 &&
+                    wordCount <= 10 &&
+                    !/[.!?](?:\s|$)/.test(text) &&
+                    /(?:\bhttps?:\/\/\S+|\bwww\.\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,24}\b)/i.test(text))
+                : false;
+
+	        const baseForceCaptureMs = isChatGPT ? 45000 : 15000;
 	        const isLikelyReferenceOnly = isChatGPT
-	            ? Boolean(captureState.lastExtractionMeta?.bestIsReferenceList || looksLikeChatGPTSourcesOnly(text))
+	            ? Boolean(captureState.lastExtractionMeta?.bestIsReferenceList || looksLikeChatGPTSourcesOnly(text) || looksUrlishOnly)
 	            : false;
-	        const forceCaptureMs = isLikelyReferenceOnly ? Math.max(baseForceCaptureMs, 45000) : baseForceCaptureMs;
+	        const forceCaptureMs = isLikelyReferenceOnly ? Math.max(baseForceCaptureMs, 60000) : baseForceCaptureMs;
 	        const minTextLen = 5;
-            const stableCaptureMs = isLikelyReferenceOnly
+            let stableCaptureMs = isLikelyReferenceOnly
                 ? (isChatGPT ? 9000 : 3000)
-                : (isChatGPT ? 1800 : 1200);
+                : (isChatGPT ? 3000 : 1200);
             const maxWaitMs = isChatGPT ? 180000 : 120000;
+
+            if (isChatGPT && !isLikelyReferenceOnly && wordCount > 0 && wordCount < 12) {
+                stableCaptureMs = Math.max(stableCaptureMs, 4500);
+            }
 
 	        if (generating) {
 	            if (stableForMs >= forceCaptureMs && text.length >= minTextLen) {

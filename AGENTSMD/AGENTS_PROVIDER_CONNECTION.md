@@ -35,7 +35,7 @@ This document explains how the extension “connects” to ChatGPT and Gemini ta
 
 ### 1) Side panel triggers connect
 
-When the user clicks “Connect ChatGPT” / “Connect Gemini”, the side panel (`sidepanel.js`) sends:
+When the user clicks **Connect** for a provider (in the Route Builder or Settings), the side panel (`sidepanel.js`) sends:
 
 - `{ type: 'CONNECT_PROVIDER', provider: 'chatgpt' | 'gemini' }`
 
@@ -73,9 +73,9 @@ The background returns:
 
 The side panel only shows **ready/connected** once the provider tab responds to `PING` (this ensures capture is possible).
 
-## The “Connect both” flow (why it used to fail)
+## The “Connect all” flow (why it used to fail)
 
-“Connect both” triggers *two* `CONNECT_PROVIDER` requests back-to-back (ChatGPT + Gemini).
+**Connect all** triggers *two* `CONNECT_PROVIDER` requests back-to-back (ChatGPT + Gemini).
 
 ### Previous bug (lost update)
 
@@ -93,7 +93,7 @@ With two connect operations running concurrently, the later save could overwrite
 
 - `withTabProfilesLock(fn)` queues all operations that mutate `mlc_tab_profiles_v1`
 
-This guarantees connect-both cannot clobber the other provider’s profile/default writes.
+This guarantees connect-all cannot clobber the other provider’s profile/default writes.
 
 ## Important caveat: host permissions and login redirects
 
@@ -109,7 +109,7 @@ The ping-based connection check requires the content script to be injected into 
 - If a provider shows **Waiting…**:
   - A profile exists, but ping failed. Reload the provider tab once it’s on a matched host.
 - If providers show **ready** but **Run** is disabled:
-  - Unlock history in Settings → Security (see `AGENTS_DBS.md`).
-- If “Connect both” opens tabs but only one stays connected:
+  - Unlock history in Settings → Security (see `AGENTSMD/AGENTS_DBS.md`).
+- If “Connect all” opens tabs but only one stays connected:
   - Reload the extension (MV3 service worker updates are not hot-reloaded reliably).
   - Check Settings → Advanced connections to confirm both default profiles exist.
