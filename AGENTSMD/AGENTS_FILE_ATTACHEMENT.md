@@ -75,7 +75,7 @@ Files are selected via the side panel and read into memory:
 
 Before starting a run, the side panel computes an “attachment plan”:
 
-- `getAttachmentProviderPlan(runTarget)` returns:
+- `getAttachmentProviderPlan(route)` returns:
   - `required`: providers involved in the run
   - `autoProviders`: subset where `attachments.mode === 'auto'`
   - `manualProviders`: subset where `attachments.mode !== 'auto'`
@@ -110,7 +110,7 @@ Flow:
 Acknowledgement key details:
 
 - computed from:
-  - `runTarget`
+  - `route` (kind + providers + rounds)
   - `manualProviders` (sorted)
   - current attachment IDs
 - any change to providers/attachments implicitly invalidates the previous ack (because the key changes), so the user is re-warned when needed.

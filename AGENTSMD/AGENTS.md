@@ -419,13 +419,20 @@ Current force‑capture thresholds:
 
 ## 6) UI and message protocol
 
+The side panel’s primary run control is the **Route Builder** (`To` pill). See `AGENTSMD/AGENTS_ROUTE_BUILDER.md` for the full UX + state model.
+
 ### Side panel -> background
 
-- `START_DEBATE_SESSION`:
+- `START_RUN` (primary):
+  - `{ prompt, chatId, rounds, route, mode, target, firstLLM?, attachments? }`
+- `START_DEBATE_SESSION` (legacy; still accepted by background):
   - `{ prompt, firstLLM, rounds, profileIds: { chatgpt, gemini } }` (tabIds still accepted for backward compat)
 - `STOP_SESSION`:
   - `{ sessionId }`
 - `RESUME_SESSION`
+- `CONNECT_PROVIDER` `{ provider }`
+- `CHECK_CONNECTION`
+- `GET_PROVIDER_CAPABILITIES`
 - `GET_TAB_PROFILES`
 - `CREATE_PROFILE_FROM_ACTIVE_TAB` `{ provider, label?, profileId? }`
 - `CLAIM_TAB_AS_PROFILE` `{ provider, tabId, label?, profileId? }`
@@ -438,7 +445,7 @@ Current force‑capture thresholds:
 - `GET_DEBATE_PROMPTS`
 - `SET_DEBATE_PROMPTS` `{ config }`
 - `RESET_DEBATE_PROMPTS`
-- `SEND_PROMPT`:
+- `SEND_PROMPT` (legacy; non-session direct send):
   - `{ prompt, targets:{chatgpt, gemini}, multiAgent:{enabled, maxIterations} }`
 - Legacy (still supported by background):
   - `LIST_LLM_TABS`
@@ -458,6 +465,7 @@ Responses (for profile actions):
 - `UI_SESSION_STARTED` `{ sessionId, rounds, firstLLM, tabIds, profileIds }`
 - `UI_MESSAGE_ADD` `{ role, content, timestamp, turnIndex, roundIndex }`
 - `UI_SESSION_PROGRESS` `{ sessionId, waitingFor, roundIndex, totalRounds }`
+  - `waitingFor` may be a string or an array (parallel mode).
 - `UI_SESSION_PAUSED` `{ sessionId, provider, reason }`
 - `UI_SESSION_RESUMED` `{ sessionId }`
 - `UI_SESSION_ENDED` `{ sessionId, reason }`
@@ -487,14 +495,13 @@ TAB_PROFILES updates:
 
 ### Side panel behavior details
 
-- Profile dropdown values are `default` or a concrete `profileId`.
-- "Default" entry resolves to `defaults[provider]` in storage.
-- Start button is disabled unless both resolved profiles exist and have status `ok`.
+- Routes are selected via the `To` pill (Route Builder) and persisted as `mlc_last_route_v1`.
+- Runs always use the **default profile** for each provider (set in the Provider Manager); there is no per-message profile dropdown.
+- Send is disabled unless the route is valid/supported and the route’s required providers are ready (PING/PONG).
 - Paused sessions show a "Paused" state with actions:
   - Focus tab (uses profile tabId)
   - Rebind to current tab (calls CREATE_PROFILE_FROM_ACTIVE_TAB with profileId)
   - Resume session (RESUME_SESSION)
-- Dropdown entries show profile label plus status and in-use hints when applicable.
 - Prompt templates can be edited in the side panel (3-field editor; optional advanced raw JSON) and saved to `mlc_debate_prompts_override_v1`.
 - The composer prompt input has no extension-enforced character limit (provider UIs may still impose their own).
 
