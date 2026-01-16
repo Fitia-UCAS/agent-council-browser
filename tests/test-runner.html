@@ -96,6 +96,7 @@
         <div id="ui-output" class="test-output">UI tests will be available after sidepanel components are created...</div>
     </div>
 
+    <script src="../selectors.js"></script>
     <script type="module">
         // Utility function to log to specific output div
         function logToOutput(outputId, message, isError = false) {
@@ -148,7 +149,12 @@
                 logToOutput('manifest-output', '✅ All required permissions present');
                 
                 // Test host permissions
-                const expectedHosts = ['https://gemini.google.com/*', 'https://chat.openai.com/*'];
+                const expectedHosts = [
+                    'https://gemini.google.com/*',
+                    'https://chat.openai.com/*',
+                    'https://chatgpt.com/*',
+                    'https://claude.ai/*'
+                ];
                 if (!manifest.host_permissions) {
                     throw new Error('No host_permissions defined');
                 }
@@ -198,18 +204,16 @@
             logToOutput('selectors-output', 'Starting selectors.js validation...');
             
             try {
-                // Import the selectors module
-                const module = await import('../selectors.js');
-                const LLM_SELECTORS = module.LLM_SELECTORS;
+                const LLM_SELECTORS = window.LLM_SELECTORS;
                 
                 if (!LLM_SELECTORS) {
-                    throw new Error('LLM_SELECTORS not found in module');
+                    throw new Error('LLM_SELECTORS not found on window (did selectors.js load?)');
                 }
                 
                 logToOutput('selectors-output', '✅ Successfully loaded selectors.js');
                 
                 // Test structure
-                const expectedProviders = ['gemini', 'chatgpt'];
+                const expectedProviders = ['gemini', 'chatgpt', 'claude'];
                 for (const provider of expectedProviders) {
                     if (!LLM_SELECTORS[provider]) {
                         throw new Error(`Missing provider: ${provider}`);
@@ -240,6 +244,18 @@
                     }
                 }
                 logToOutput('selectors-output', '✅ All ChatGPT selectors present and valid');
+
+                // Test Claude selectors
+                const claudeSelectors = ['input', 'sendButton', 'responseArea', 'lastResponseBlock', 'doneIndicator'];
+                for (const selector of claudeSelectors) {
+                    if (!LLM_SELECTORS.claude[selector]) {
+                        throw new Error(`Missing Claude selector: ${selector}`);
+                    }
+                    if (typeof LLM_SELECTORS.claude[selector] !== 'string') {
+                        throw new Error(`Claude selector ${selector} must be a string`);
+                    }
+                }
+                logToOutput('selectors-output', '✅ All Claude selectors present and valid');
                 
                 // Test metadata
                 if (LLM_SELECTORS.metadata) {

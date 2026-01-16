@@ -164,26 +164,7 @@
         <div class="drawer-body drawer-scroll">
             <section class="drawer-section">
                 <div class="drawer-section-title">Connections</div>
-                <div class="connection-row">
-                    <div class="connection-meta">
-                        <div class="connection-name">ChatGPT</div>
-                        <div class="connection-status" id="connection-label-chatgpt">Checking…</div>
-                    </div>
-                    <div class="connection-actions">
-                        <button class="ghost-button" id="settings-connect-chatgpt" type="button">Connect</button>
-                        <button class="ghost-button" id="settings-focus-chatgpt" type="button">Focus</button>
-                    </div>
-                </div>
-                <div class="connection-row">
-                    <div class="connection-meta">
-                        <div class="connection-name">Gemini</div>
-                        <div class="connection-status" id="connection-label-gemini">Checking…</div>
-                    </div>
-                    <div class="connection-actions">
-                        <button class="ghost-button" id="settings-connect-gemini" type="button">Connect</button>
-                        <button class="ghost-button" id="settings-focus-gemini" type="button">Focus</button>
-                    </div>
-                </div>
+                <div id="connections-list"></div>
                 <div class="settings-actions">
                     <button class="ghost-button" id="refresh-profiles" type="button">Refresh connections</button>
                 </div>
@@ -193,16 +174,7 @@
                         <span class="material-symbols-rounded">expand_more</span>
                     </summary>
                     <div class="drawer-details-body">
-                        <div class="profile-columns">
-                            <section class="profile-column">
-                                <div class="profile-column-title">ChatGPT connections</div>
-                                <div class="profile-list" id="profile-list-chatgpt"></div>
-                            </section>
-                            <section class="profile-column">
-                                <div class="profile-column-title">Gemini connections</div>
-                                <div class="profile-list" id="profile-list-gemini"></div>
-                            </section>
-                        </div>
+                        <div class="profile-columns" id="profile-columns"></div>
                     </div>
                 </details>
             </section>

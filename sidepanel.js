@@ -1,5 +1,15 @@
 /* global chrome */
 
+const DEFAULT_PROVIDER_IDS = ['chatgpt', 'gemini', 'claude'];
+
+function initProviderMap(value) {
+    const out = {};
+    DEFAULT_PROVIDER_IDS.forEach((provider) => {
+        out[provider] = value;
+    });
+    return out;
+}
+
 const state = {
     sessionId: null,
     activeChatId: null,
@@ -16,11 +26,11 @@ const state = {
     autoScroll: true,
     historyStatus: { configured: false, unlocked: false },
     historyUnlockPrompted: false,
-    connectionStatus: { chatgpt: false, gemini: false },
-    connecting: { chatgpt: false, gemini: false },
+    connectionStatus: initProviderMap(false),
+    connecting: initProviderMap(false),
     profiles: [],
-    defaults: { chatgpt: null, gemini: null },
-    sessionProfiles: { chatgpt: null, gemini: null },
+    defaults: initProviderMap(null),
+    sessionProfiles: initProviderMap(null),
     promptConfig: null,
     promptConfigSource: null,
     providerCapabilities: null,
@@ -81,8 +91,12 @@ function storageSet(items) {
 
 function normalizeProviderId(provider) {
     const value = String(provider || '').trim().toLowerCase();
-    if (value === 'gemini') return 'gemini';
-    if (value === 'chatgpt') return 'chatgpt';
+    if (!value) return null;
+    if (DEFAULT_PROVIDER_IDS.includes(value)) return value;
+    const capabilities = state.providerCapabilities && typeof state.providerCapabilities === 'object'
+        ? state.providerCapabilities
+        : null;
+    if (capabilities && Object.prototype.hasOwnProperty.call(capabilities, value)) return value;
     return null;
 }
 
@@ -131,7 +145,9 @@ function routeFromRunConfig(runConfig) {
     if (runType === 'direct') {
         const target = normalizeProviderId(runConfig.target);
         if (runConfig.target === 'both') {
-            return sanitizeRoute({ kind: 'parallel', providers: ['chatgpt', 'gemini'] });
+            const supported = getSupportedProviders();
+            const providers = supported.length >= 2 ? supported : ['chatgpt', 'gemini'];
+            return sanitizeRoute({ kind: 'parallel', providers });
         }
         return sanitizeRoute({ kind: 'single', providers: [target || 'chatgpt'] });
     }
@@ -218,7 +234,33 @@ function getSupportedProviders() {
     const normalized = capabilities.map(normalizeProviderId).filter(Boolean);
     const unique = [...new Set(normalized)];
     if (unique.length > 0) return unique;
-    return ['chatgpt', 'gemini'];
+    return [...DEFAULT_PROVIDER_IDS];
+}
+
+function ensureProviderMaps() {
+    const providers = getSupportedProviders();
+    providers.forEach((provider) => {
+        if (!Object.prototype.hasOwnProperty.call(state.connectionStatus, provider)) {
+            state.connectionStatus[provider] = false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(state.connecting, provider)) {
+            state.connecting[provider] = false;
+        }
+        if (!Object.prototype.hasOwnProperty.call(state.defaults, provider)) {
+            state.defaults[provider] = null;
+        }
+        if (!Object.prototype.hasOwnProperty.call(state.sessionProfiles, provider)) {
+            state.sessionProfiles[provider] = null;
+        }
+    });
+}
+
+function resetSessionProfiles() {
+    const next = {};
+    getSupportedProviders().forEach((provider) => {
+        next[provider] = null;
+    });
+    state.sessionProfiles = next;
 }
 
 function isRouteProviderSelected(provider) {
@@ -255,11 +297,16 @@ function applyRoutePreset(preset) {
         return;
     }
     if (kind === 'compare') {
-        setRoute({ kind: 'parallel', providers: ['chatgpt', 'gemini'], rounds: route.rounds });
+        const supported = getSupportedProviders();
+        const baseProviders = route.providers.length >= 2 ? route.providers : supported;
+        const providers = baseProviders.length >= 2 ? baseProviders : ['chatgpt', 'gemini'];
+        setRoute({ kind: 'parallel', providers, rounds: route.rounds });
         return;
     }
     if (kind === 'debate') {
-        const providers = route.providers.length === 2 ? route.providers : ['chatgpt', 'gemini'];
+        const supported = getSupportedProviders();
+        const fallbackPair = supported.length >= 2 ? supported.slice(0, 2) : ['chatgpt', 'gemini'];
+        const providers = route.providers.length === 2 ? route.providers : fallbackPair;
         setRoute({ kind: 'debate', providers, rounds: route.rounds || 3 });
     }
 }
@@ -617,10 +664,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.attachmentClear = document.getElementById('attachment-clear');
     elements.attachmentList = document.getElementById('attachment-list');
 
-    elements.profileListChatgpt = document.getElementById('profile-list-chatgpt');
-    elements.profileListGemini = document.getElementById('profile-list-gemini');
-    elements.connectionLabelChatgpt = document.getElementById('connection-label-chatgpt');
-    elements.connectionLabelGemini = document.getElementById('connection-label-gemini');
+    elements.connectionsList = document.getElementById('connections-list');
+    elements.profileColumns = document.getElementById('profile-columns');
+    elements.connectionLabelByProvider = {};
+    elements.connectionFocusButtonByProvider = {};
+    elements.profileListByProvider = {};
 
     elements.chatsButton = document.getElementById('chats-button');
     elements.newChatButton = document.getElementById('new-chat-button');
@@ -635,10 +683,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.settingsDrawer = document.getElementById('settings-drawer');
     elements.settingsBackdrop = document.getElementById('settings-backdrop');
     elements.closeSettingsButton = document.getElementById('close-settings');
-    elements.settingsConnectChatgpt = document.getElementById('settings-connect-chatgpt');
-    elements.settingsConnectGemini = document.getElementById('settings-connect-gemini');
-    elements.settingsFocusChatgpt = document.getElementById('settings-focus-chatgpt');
-    elements.settingsFocusGemini = document.getElementById('settings-focus-gemini');
 
     elements.pausedActions = document.getElementById('paused-actions');
     elements.resumeButton = document.getElementById('resume-session');
@@ -681,6 +725,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 	    elements.attachmentsModalClose = document.getElementById('attachments-modal-close');
 
 	    bindEvents();
+        ensureProviderMaps();
+        renderProviderSettingsUi();
         await loadRoutePreference();
         renderRouteUi();
 	    updateHistoryUi();
@@ -892,28 +938,12 @@ function bindEvents() {
         elements.emptyOpenSettings.addEventListener('click', openSettingsDrawer);
     }
 
-    if (elements.settingsConnectChatgpt) {
-        elements.settingsConnectChatgpt.addEventListener('click', () => connectProvider('chatgpt'));
+    if (elements.connectionsList) {
+        elements.connectionsList.addEventListener('click', handleConnectionsListClick);
     }
 
-    if (elements.settingsConnectGemini) {
-        elements.settingsConnectGemini.addEventListener('click', () => connectProvider('gemini'));
-    }
-
-    if (elements.settingsFocusChatgpt) {
-        elements.settingsFocusChatgpt.addEventListener('click', () => focusProvider('chatgpt'));
-    }
-
-    if (elements.settingsFocusGemini) {
-        elements.settingsFocusGemini.addEventListener('click', () => focusProvider('gemini'));
-    }
-
-    if (elements.profileListChatgpt) {
-        elements.profileListChatgpt.addEventListener('click', handleProfileListClick);
-    }
-
-    if (elements.profileListGemini) {
-        elements.profileListGemini.addEventListener('click', handleProfileListClick);
+    if (elements.profileColumns) {
+        elements.profileColumns.addEventListener('click', handleProfileListClick);
     }
 
     if (elements.resumeButton) {
@@ -1678,11 +1708,10 @@ function isRouteSupported(route) {
     if (!isRouteValid(route)) return false;
     const providers = Array.isArray(route?.providers) ? route.providers : [];
     if (route.kind === 'single') return providers.length === 1;
-    if (route.kind === 'debate') return providers.length === 2 && providers.every((p) => p === 'chatgpt' || p === 'gemini');
-    if (route.kind === 'parallel') {
-        const set = new Set(providers);
-        return set.size === 2 && set.has('chatgpt') && set.has('gemini');
-    }
+    const supported = new Set(getSupportedProviders());
+    if (providers.some((provider) => !supported.has(provider))) return false;
+    if (route.kind === 'debate') return providers.length === 2;
+    if (route.kind === 'parallel') return providers.length >= 2;
     return false;
 }
 
@@ -1820,6 +1849,8 @@ function requestProviderCapabilities() {
     sendMessage({ type: 'GET_PROVIDER_CAPABILITIES' }, (response) => {
         if (!response || response.ok === false) return;
         state.providerCapabilities = response.capabilities || null;
+        ensureProviderMaps();
+        renderProviderSettingsUi();
         renderRouteUi();
         updateAttachmentsUi();
         updateSendState();
@@ -2102,6 +2133,7 @@ function getDefaultProfile(provider) {
 }
 
 function focusProvider(provider) {
+    ensureProviderMaps();
     state.lastFocusedProvider = provider;
     renderRouteUi();
     const profile = getDefaultProfile(provider);
@@ -2114,6 +2146,7 @@ function focusProvider(provider) {
 
 function connectProvider(provider) {
     if (!provider) return;
+    ensureProviderMaps();
     if (state.connecting[provider]) return;
     state.lastFocusedProvider = provider;
     state.connecting[provider] = true;
@@ -2159,8 +2192,121 @@ function connectAllProviders() {
     });
 }
 
+function handleConnectionsListClick(event) {
+    const button = event.target.closest('button');
+    if (!button) return;
+    const action = button.dataset.action;
+    const provider = normalizeProviderId(button.dataset.provider);
+    if (!action || !provider) return;
+
+    if (action === 'connect-provider') {
+        connectProvider(provider);
+        return;
+    }
+    if (action === 'focus-provider') {
+        focusProvider(provider);
+    }
+}
+
+function renderProviderSettingsUi() {
+    ensureProviderMaps();
+    const providers = getSupportedProviders();
+
+    if (elements.connectionLabelByProvider && typeof elements.connectionLabelByProvider === 'object') {
+        elements.connectionLabelByProvider = {};
+    } else {
+        elements.connectionLabelByProvider = {};
+    }
+    if (elements.connectionFocusButtonByProvider && typeof elements.connectionFocusButtonByProvider === 'object') {
+        elements.connectionFocusButtonByProvider = {};
+    } else {
+        elements.connectionFocusButtonByProvider = {};
+    }
+    if (elements.profileListByProvider && typeof elements.profileListByProvider === 'object') {
+        elements.profileListByProvider = {};
+    } else {
+        elements.profileListByProvider = {};
+    }
+
+    if (elements.connectionsList) {
+        elements.connectionsList.innerHTML = '';
+        providers.forEach((provider) => {
+            const row = document.createElement('div');
+            row.className = 'connection-row';
+            row.dataset.provider = provider;
+
+            const meta = document.createElement('div');
+            meta.className = 'connection-meta';
+
+            const name = document.createElement('div');
+            name.className = 'connection-name';
+            name.textContent = formatProviderLabel(provider);
+
+            const status = document.createElement('div');
+            status.className = 'connection-status';
+            status.textContent = 'Checking…';
+
+            meta.appendChild(name);
+            meta.appendChild(status);
+
+            const actions = document.createElement('div');
+            actions.className = 'connection-actions';
+
+            const connect = document.createElement('button');
+            connect.className = 'ghost-button';
+            connect.type = 'button';
+            connect.textContent = 'Connect';
+            connect.dataset.action = 'connect-provider';
+            connect.dataset.provider = provider;
+
+            const focus = document.createElement('button');
+            focus.className = 'ghost-button';
+            focus.type = 'button';
+            focus.textContent = 'Focus';
+            focus.dataset.action = 'focus-provider';
+            focus.dataset.provider = provider;
+
+            actions.appendChild(connect);
+            actions.appendChild(focus);
+
+            row.appendChild(meta);
+            row.appendChild(actions);
+            elements.connectionsList.appendChild(row);
+
+            elements.connectionLabelByProvider[provider] = status;
+            elements.connectionFocusButtonByProvider[provider] = focus;
+        });
+    }
+
+    if (elements.profileColumns) {
+        elements.profileColumns.innerHTML = '';
+        providers.forEach((provider) => {
+            const column = document.createElement('section');
+            column.className = 'profile-column';
+
+            const title = document.createElement('div');
+            title.className = 'profile-column-title';
+            title.textContent = `${formatProviderLabel(provider)} connections`;
+
+            const list = document.createElement('div');
+            list.className = 'profile-list';
+            list.dataset.provider = provider;
+
+            column.appendChild(title);
+            column.appendChild(list);
+            elements.profileColumns.appendChild(column);
+
+            elements.profileListByProvider[provider] = list;
+        });
+    }
+
+    renderProfileLists();
+    updateProviderUi();
+}
+
 function updateProviderUi() {
-    const providers = ['chatgpt', 'gemini'];
+    ensureProviderMaps();
+    const providers = getSupportedProviders();
     let readyCount = 0;
     let connectingCount = 0;
 
@@ -2186,11 +2332,14 @@ function updateProviderUi() {
             labelText = 'Waiting…';
         }
 
-        if (provider === 'chatgpt' && elements.connectionLabelChatgpt) {
-            elements.connectionLabelChatgpt.textContent = labelText;
+        const labelEl = elements.connectionLabelByProvider?.[provider];
+        if (labelEl) {
+            labelEl.textContent = labelText;
         }
-        if (provider === 'gemini' && elements.connectionLabelGemini) {
-            elements.connectionLabelGemini.textContent = labelText;
+
+        const focusButton = elements.connectionFocusButtonByProvider?.[provider];
+        if (focusButton) {
+            focusButton.disabled = !profile?.tabId;
         }
     });
 
@@ -2205,13 +2354,6 @@ function updateProviderUi() {
         elements.providersButton.classList.toggle('is-ready', readyCount > 0 && connectingCount === 0);
         elements.providersButton.classList.toggle('is-offline', readyCount === 0 && connectingCount === 0);
         elements.providersButton.classList.toggle('is-connecting', connectingCount > 0);
-    }
-
-    if (elements.settingsFocusChatgpt) {
-        elements.settingsFocusChatgpt.disabled = !getDefaultProfile('chatgpt')?.tabId;
-    }
-    if (elements.settingsFocusGemini) {
-        elements.settingsFocusGemini.disabled = !getDefaultProfile('gemini')?.tabId;
     }
 
     renderRouteUi();
@@ -2441,10 +2583,10 @@ async function startSession() {
     payload.route = { kind: route.kind, providers: route.providers, rounds };
     if (route.kind === 'debate') {
         payload.mode = 'debate';
-        payload.firstLLM = route.providers[0] === 'gemini' ? 'gemini' : 'chatgpt';
+        payload.firstLLM = route.providers[0] || 'chatgpt';
     } else {
         payload.mode = 'direct';
-        payload.target = route.kind === 'parallel' ? 'both' : (route.providers[0] === 'gemini' ? 'gemini' : 'chatgpt');
+        payload.target = route.kind === 'parallel' ? 'both' : (route.providers[0] || 'chatgpt');
     }
     sendMessage(payload);
 
@@ -2474,13 +2616,17 @@ function resumeSession() {
 }
 
 function isFullyConnected() {
-    return Boolean(state.connectionStatus.chatgpt && state.connectionStatus.gemini);
+    const providers = getSupportedProviders();
+    if (providers.length === 0) return false;
+    return providers.every((provider) => Boolean(state.connectionStatus?.[provider]));
 }
 
 function handleBackgroundMessage(message) {
     switch (message.type) {
         case 'PROVIDER_CAPABILITIES':
             state.providerCapabilities = message.capabilities || null;
+            ensureProviderMaps();
+            renderProviderSettingsUi();
             renderRouteUi();
             updateAttachmentsUi();
             updateSendState();
@@ -2502,7 +2648,10 @@ function handleBackgroundMessage(message) {
             break;
         case 'UI_SESSION_STARTED':
             state.sessionId = message.sessionId;
-            state.sessionProfiles = message.profileIds || state.sessionProfiles;
+            state.sessionProfiles = message.profileIds && typeof message.profileIds === 'object'
+                ? message.profileIds
+                : state.sessionProfiles;
+            ensureProviderMaps();
             setSessionState({ running: true, paused: false });
             setSessionStatus(`Running round 1 of ${message.rounds}`);
             if (message.chatId && message.chatId !== state.activeChatId) {
@@ -2556,15 +2705,26 @@ function handleBackgroundMessage(message) {
 
 function handleProfileList(message) {
     state.profiles = Array.isArray(message.profiles) ? message.profiles : [];
-    state.defaults = message.defaults || { chatgpt: null, gemini: null };
+    state.defaults = message.defaults && typeof message.defaults === 'object' ? message.defaults : {};
+    ensureProviderMaps();
+    getSupportedProviders().forEach((provider) => {
+        if (!Object.prototype.hasOwnProperty.call(state.defaults, provider)) {
+            state.defaults[provider] = null;
+        }
+    });
+    if (elements.profileColumns && (!elements.profileListByProvider || Object.keys(elements.profileListByProvider).length === 0)) {
+        renderProviderSettingsUi();
+    }
     renderProfileLists();
     updateProviderUi();
     updateSendState();
 }
 
 function renderProfileLists() {
-    renderProfileList(elements.profileListChatgpt, 'chatgpt');
-    renderProfileList(elements.profileListGemini, 'gemini');
+    const providers = getSupportedProviders();
+    providers.forEach((provider) => {
+        renderProfileList(elements.profileListByProvider?.[provider] || null, provider);
+    });
 }
 
 function renderProfileList(container, provider) {
@@ -2746,11 +2906,13 @@ function rebindPausedProvider() {
 }
 
 function handleConnectionStatus(message) {
-    const { gemini, chatgpt } = message.status || {};
-    state.connectionStatus = {
-        chatgpt: Boolean(chatgpt),
-        gemini: Boolean(gemini)
-    };
+    const incoming = message.status && typeof message.status === 'object' ? message.status : {};
+    ensureProviderMaps();
+    const next = { ...state.connectionStatus };
+    getSupportedProviders().forEach((provider) => {
+        next[provider] = Boolean(incoming[provider]);
+    });
+    state.connectionStatus = next;
     updateProviderUi();
     updateSendState();
 }
@@ -2759,7 +2921,7 @@ function hydrateSession(session) {
     if (!session || (!session.isActive && !session.isPaused)) {
         setSessionState({ running: false, paused: false });
         state.sessionId = null;
-        state.sessionProfiles = { chatgpt: null, gemini: null };
+        resetSessionProfiles();
         state.pausedProvider = null;
         state.pausedReason = null;
         setSessionStatus('Idle');
@@ -2767,7 +2929,10 @@ function hydrateSession(session) {
     }
 
     state.sessionId = session.sessionId;
-    state.sessionProfiles = session.profileIds || state.sessionProfiles;
+    state.sessionProfiles = session.profileIds && typeof session.profileIds === 'object'
+        ? session.profileIds
+        : state.sessionProfiles;
+    ensureProviderMaps();
     state.paused = Boolean(session.isPaused);
     state.pausedProvider = session.pausedProvider || null;
     state.pausedReason = session.pausedReason || null;
@@ -2818,7 +2983,7 @@ function handleSessionEnded(message) {
     setSessionStatus(message?.reason || 'Session completed');
     state.sessionId = null;
     state.stopRequested = false;
-    state.sessionProfiles = { chatgpt: null, gemini: null };
+    resetSessionProfiles();
 }
 
 function handleSessionError(message) {
@@ -3208,6 +3373,7 @@ function formatRoleLabel(role) {
     if (normalized === 'user') return 'User';
     if (normalized === 'chatgpt') return 'ChatGPT';
     if (normalized === 'gemini') return 'Gemini';
+    if (normalized === 'claude') return 'Claude';
     return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
@@ -3216,6 +3382,7 @@ function formatProviderLabel(provider) {
     const normalized = String(provider).toLowerCase();
     if (normalized === 'gemini') return 'Gemini';
     if (normalized === 'chatgpt') return 'ChatGPT';
+    if (normalized === 'claude') return 'Claude';
     return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 

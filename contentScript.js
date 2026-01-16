@@ -2,13 +2,14 @@
     const host = location.hostname;
     const isChatGPT = host.includes('openai.com') || host.includes('chatgpt.com');
     const isGemini = host.includes('gemini.google.com');
-    if (!isChatGPT && !isGemini) return;
+    const isClaude = host.includes('claude.ai');
+    if (!isChatGPT && !isGemini && !isClaude) return;
 
     let forwardEnabled = false;
-	    const forwardTo = isChatGPT ? 'gemini' : 'chatgpt';
-	    const currentLLM = isChatGPT ? 'chatgpt' : 'gemini';
+	    const forwardTo = isChatGPT ? 'gemini' : (isGemini ? 'chatgpt' : null);
+	    const currentLLM = isChatGPT ? 'chatgpt' : (isGemini ? 'gemini' : 'claude');
 
-	    console.log(`[MLC ContentScript] Initializing for ${currentLLM}. Forwarding to ${forwardTo}.`);
+	    console.log(`[MLC ContentScript] Initializing for ${currentLLM}.${forwardTo ? ` Forwarding to ${forwardTo}.` : ''}`);
 
 	    const CaptureUtils = globalThis.MLCCaptureUtils || null;
 
@@ -29,6 +30,7 @@
 	    const captureState = {
 	        active: false,
 	        promptId: null,
+            promptPreview: '',
 	        sessionId: null,
 	        turnIndex: null,
 	        startedAt: 0,
@@ -36,6 +38,7 @@
 	        baselineText: '',
 	        baselineAssistantCount: null,
 	        hasNewText: false,
+            sawGenerating: false,
 	        lastTextChangeAt: 0,
 	        lastEmitAt: 0,
 	        lastExtractionMeta: null
@@ -75,7 +78,7 @@
             'textarea[placeholder*="Message"]',
             'textarea',
             '[contenteditable="true"]'
-        ] : [ 
+        ] : (isGemini ? [ 
             'div.ql-editor[role="textbox"]', 
             '.ql-editor.textarea',
             'div[contenteditable="true"][aria-label*="prompt"]', 
@@ -83,7 +86,17 @@
             'textarea[placeholder*="Ask"]',
             'textarea',
             '[contenteditable="true"]'
-        ];
+        ] : [
+            'textarea[placeholder*="Message" i]',
+            'textarea[aria-label*="Message" i]',
+            'textarea[placeholder*="Send" i]',
+            'textarea',
+            '.ProseMirror[contenteditable="true"]',
+            'div[contenteditable="true"][role="textbox"]',
+            'div[contenteditable="true"]',
+            '[contenteditable="true"]',
+            '[role="textbox"]'
+        ]);
         for (const sel of selectors) {
             const el = document.querySelector(sel);
             if (el) {
@@ -322,8 +335,10 @@
 
         if (relevantChange) {
             // console.log(`[MLC ContentScript - ${currentLLM}] DOM changed, re-evaluating elements.`);
-            addToggleButton(); 
-            attachListeners(); 
+            if (forwardTo) {
+                addToggleButton(); 
+                attachListeners(); 
+            }
         }
     });
 
@@ -331,14 +346,17 @@
 
     setTimeout(() => {
         // console.log(`[MLC ContentScript - ${currentLLM}] Delayed initial setup.`);
-        addToggleButton();
-        attachListeners();
+        if (forwardTo) {
+            addToggleButton();
+            attachListeners();
+        }
     }, 2500); // Slightly increased delay
 
 	    function armCapture(message) {
 	        if (!message || !message.promptId) return;
 	        captureState.active = true;
 	        captureState.promptId = message.promptId;
+            captureState.promptPreview = typeof message.promptPreview === 'string' ? message.promptPreview : '';
 	        captureState.sessionId = message.sessionId || null;
 	        captureState.turnIndex = message.turnIndex || null;
 	        captureState.startedAt = message.timestamp || Date.now();
@@ -348,6 +366,7 @@
 	            : null;
 	        captureState.baselineText = extractLatestResponseText() || '';
 	        captureState.hasNewText = false;
+            captureState.sawGenerating = false;
 	        captureState.lastTextChangeAt = captureState.startedAt;
 	        captureState.lastEmitAt = 0;
 	        captureState.lastExtractionMeta = null;
@@ -382,8 +401,20 @@
         return false;
     }
 
+    function isClaudeGenerating() {
+        const stopButton = document.querySelector(
+            'button[aria-label*=\"Stop\" i], button[aria-label*=\"Cancel\" i], button[aria-label*=\"Annuler\" i], button[aria-label*=\"Arrêter\" i], button[title*=\"Stop\" i], button[title*=\"Cancel\" i], button[title*=\"Annuler\" i], button[title*=\"Arrêter\" i], button[data-testid*=\"stop\" i]'
+        );
+        if (stopButton && stopButton.offsetParent !== null) return true;
+        const spinner = document.querySelector('[role=\"progressbar\"], .loading, .spinner, .animate-spin');
+        if (spinner && spinner.offsetParent !== null) return true;
+        return false;
+    }
+
     function isGenerating() {
-        return isChatGPT ? isChatGPTGenerating() : isGeminiGenerating();
+        if (isChatGPT) return isChatGPTGenerating();
+        if (isGemini) return isGeminiGenerating();
+        return isClaudeGenerating();
     }
 
 	    function getTrimmedText(node) {
@@ -880,9 +911,148 @@
 	        return options.withMeta ? { text: '', meta: { provider: 'gemini' } } : { text: '' };
 	    }
 
+    function normalizeCaptureText(text) {
+        const raw = String(text || '');
+        if (!raw) return '';
+        if (CaptureUtils && typeof CaptureUtils.normalizeWhitespace === 'function') {
+            return CaptureUtils.normalizeWhitespace(raw);
+        }
+        return raw.replace(/\s+/g, ' ').trim();
+    }
+
+    function looksLikePromptEcho(text) {
+        const preview = normalizeCaptureText(captureState.promptPreview || '');
+        if (!preview) return false;
+        const candidate = normalizeCaptureText(text || '');
+        if (!candidate) return false;
+        if (candidate === preview) return true;
+
+        const prefixLen = Math.min(preview.length, 120);
+        if (prefixLen < 40) return false;
+        const prefix = preview.slice(0, prefixLen);
+        return candidate.startsWith(prefix);
+    }
+
+    function isClaudeUserMessage(node) {
+        if (!node) return false;
+        const userSelectors = [
+            '[data-testid*="user" i]',
+            '[data-testid*="human" i]',
+            '[data-role*="user" i]',
+            '[data-author*="user" i]',
+            '.user-message',
+            '.human-message',
+            '.message-user'
+        ];
+        for (const sel of userSelectors) {
+            if (node.matches?.(sel) || node.closest?.(sel)) return true;
+        }
+        const aria = node.getAttribute?.('aria-label') || '';
+        if (/\b(you|user)\b/i.test(aria)) return true;
+        return false;
+    }
+
+    function extractClaudeResponse(options = {}) {
+        const inputEl = findInput({ silent: true });
+        const composerRoot = inputEl
+            ? (inputEl.closest('form') || inputEl.closest('footer') || inputEl.closest('[role="form"]') || inputEl.parentElement)
+            : null;
+        const roots = [document.querySelector('main'), document.querySelector('[role="main"]'), document.body].filter(Boolean);
+
+        const selectors = [
+            '[data-testid*="assistant" i]',
+            '[data-testid*="message" i]',
+            '[data-testid*="chat" i]',
+            '.markdown',
+            '.prose',
+            'article',
+            '[role="article"]',
+            '[class*="assistant" i]',
+            '[class*="message" i]'
+        ];
+
+        const candidates = [];
+        const seen = new Set();
+        let sawPromptEcho = false;
+
+        const collect = (root, selector, limit) => {
+            let nodes = [];
+            try {
+                nodes = Array.from(root.querySelectorAll(selector));
+            } catch (error) {
+                nodes = [];
+            }
+            if (nodes.length > limit) {
+                nodes = nodes.slice(nodes.length - limit);
+            }
+            nodes.forEach((node) => {
+                if (!node || seen.has(node)) return;
+                seen.add(node);
+                candidates.push({ node, selector });
+            });
+        };
+
+        for (const root of roots) {
+            for (const sel of selectors) {
+                collect(root, sel, 40);
+            }
+            if (candidates.length > 0) break;
+        }
+
+        let best = null;
+        let bestBottom = -Infinity;
+        let bestLen = -Infinity;
+
+        for (const entry of candidates) {
+            const node = entry.node;
+            if (!node) continue;
+            if (inputEl && (node === inputEl || node.contains(inputEl))) continue;
+            if (composerRoot && (composerRoot.contains(node) || node.contains(composerRoot))) continue;
+            if (isClaudeUserMessage(node)) continue;
+
+            const text = (node.innerText || node.textContent || '').trim();
+            if (!text) continue;
+            if (looksLikePromptEcho(text)) {
+                sawPromptEcho = true;
+                continue;
+            }
+
+            let rect;
+            try {
+                rect = node.getBoundingClientRect();
+            } catch (error) {
+                rect = null;
+            }
+            const bottom = rect && Number.isFinite(rect.bottom) ? rect.bottom : 0;
+            const len = text.length;
+
+            if (bottom > bestBottom + 1 || (Math.abs(bottom - bestBottom) <= 1 && len > bestLen)) {
+                best = { node, selector: entry.selector, text };
+                bestBottom = bottom;
+                bestLen = len;
+            }
+        }
+
+        const meta = {
+            provider: 'claude',
+            candidateCount: candidates.length,
+            sawPromptEcho,
+            bestSelector: best?.selector || null,
+            bestBottom: Number.isFinite(bestBottom) ? Math.round(bestBottom) : null,
+            bestLen: Number.isFinite(bestLen) ? bestLen : null
+        };
+
+        const result = { text: best?.text || '' };
+        if (options.withHtml) {
+            result.html = best?.node ? extractCleanHtmlFromNode(best.node) : '';
+        }
+        return options.withMeta ? { ...result, meta } : result;
+    }
+
 	    function extractLatestResponse(options = {}) {
 	        if (isChatGPT) return extractChatGPTResponse(options);
-	        return extractGeminiResponse(options);
+	        if (isGemini) return extractGeminiResponse(options);
+	        return extractClaudeResponse(options);
 	    }
 
 	    function extractLatestResponseText() {
@@ -961,8 +1131,30 @@
         return '';
     }
 
+    function detectClaudeModelLabel() {
+        const selectors = [
+            'button[aria-label*="Model" i]',
+            'button[aria-label*="Claude" i]',
+            '[data-testid*="model" i]',
+            '[data-testid*="model" i] button'
+        ];
+        for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            const aria = normalizeInlineText(el.getAttribute('aria-label') || '');
+            const text = normalizeInlineText(el.textContent || '');
+            for (const candidate of [text, aria]) {
+                const label = sanitizeModelLabel(candidate);
+                if (label) return label;
+            }
+        }
+        return '';
+    }
+
     function detectModelLabel() {
-        return isChatGPT ? detectChatGPTModelLabel() : detectGeminiModelLabel();
+        if (isChatGPT) return detectChatGPTModelLabel();
+        if (isGemini) return detectGeminiModelLabel();
+        return detectClaudeModelLabel();
     }
 
     function shouldConfirmModelLabel(label) {
@@ -1031,7 +1223,9 @@
 
         const messageType = captureState.sessionId
             ? 'MLC_RESPONSE_CAPTURED'
-            : (currentLLM === 'chatgpt' ? 'CHATGPT_RESPONSE_CAPTURED' : 'GEMINI_RESPONSE_CAPTURED');
+            : (currentLLM === 'chatgpt'
+                ? 'CHATGPT_RESPONSE_CAPTURED'
+                : (currentLLM === 'gemini' ? 'GEMINI_RESPONSE_CAPTURED' : 'CLAUDE_RESPONSE_CAPTURED'));
 
         chrome.runtime.sendMessage({ type: messageType, ...responsePayload }, () => {
             if (chrome.runtime.lastError) {
@@ -1082,6 +1276,7 @@
 	        }
 
 	        const generating = isGenerating();
+            if (generating) captureState.sawGenerating = true;
 	        const stableForMs = now - captureState.lastTextChangeAt;
             const totalForMs = now - captureState.startedAt;
             const metaWordCount = isChatGPT && Number.isFinite(captureState.lastExtractionMeta?.bestWordCount)

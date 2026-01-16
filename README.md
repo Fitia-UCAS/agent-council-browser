@@ -4,14 +4,14 @@ Chrome extension side panel that lets you route a prompt to multiple LLM web UIs
 
 It supports:
 
-1. **Single**: send to ChatGPT or Gemini.
-2. **Compare (Parallel)**: send the same prompt to both providers.
+1. **Single**: send to ChatGPT, Gemini, or Claude.
+2. **Compare (Parallel)**: send the same prompt to multiple providers.
 3. **Debate**: multi-round ping-pong between two providers.
-4. **In-page forwarding**: optional ⇄ toggle buttons on provider pages.
+4. **In-page forwarding**: optional ⇄ toggle buttons on ChatGPT/Gemini pages.
 
 ## ✨ Features
 
--   **Multi-LLM Support**: Interact with Gemini and ChatGPT.
+-   **Multi-LLM Support**: Interact with Gemini, ChatGPT, and Claude.
 -   **Route Builder (“To”)**: Choose Single / Compare / Debate, reorder providers, and set debate rounds.
 -   **Connect-on-demand**: The side panel only asks you to connect the providers required for your route (plus **Connect all**).
 -   **Encrypted Chat History (Local-First)**: Chats and messages are stored in IndexedDB and encrypted with a user passphrase.
@@ -21,6 +21,7 @@ It supports:
 -   **Attachments**: Attach files/images in the side panel.
     - ChatGPT: best-effort auto-upload.
     - Gemini: manual upload (text-only is sent from the side panel when files are attached).
+    - Claude: manual upload (text-only is sent from the side panel when files are attached).
 -   **Dark Theme**: Professional dark theme optimized for developers.
 -   **Real-time Status**: Live connection status in the side panel.
 -   **Syntax Highlighting**: Code blocks are automatically highlighted in the side panel.
@@ -52,7 +53,7 @@ It supports:
 ### Sending prompts from the side panel
 
 1. **Choose route**: click the `To` pill and pick:
-   - **Single** (ChatGPT or Gemini),
+   - **Single** (ChatGPT, Gemini, Claude),
    - **Compare** (Parallel),
    - **Debate** (set rounds + swap order if needed).
 2. **Connect providers** when prompted:
@@ -114,6 +115,7 @@ The extension's ability to interact with LLM websites (finding input fields, sen
 ### Limitations
 -   Requires being logged in on the provider websites.
 -   Functionality can break if LLM websites significantly change their DOM structure.
+-   Claude sending uses `chrome.debugger` to simulate real typing (needed because Claude can ignore synthetic DOM events). This requires the `debugger` permission and the Claude tab cannot have DevTools open while sending.
 -   No offline functionality.
 -   Subject to the LLM websites' rate limits and usage policies.
 
@@ -134,7 +136,7 @@ tests/           # small node-based heuristics tests
 
 ### Debugging
 -   **Side Panel**: Right-click inside the side panel and select "Inspect" to open DevTools for it.
--   **Content Scripts**: Open DevTools on the ChatGPT or Gemini page. Console logs from `contentScript.js` will appear here. Errors during `simpleInteraction` (which is injected) will also appear here.
+-   **Content Scripts**: Open DevTools on the ChatGPT, Gemini, or Claude page. Console logs from `contentScript.js` will appear here. Errors during `simpleInteraction` (which is injected) will also appear here.
 -   **Background Script**: Go to `chrome://extensions/`, find "Multi-LLM Coder", and click the "Service worker" link to open its DevTools.
 -   **Test Selectors**: Use the browser's DevTools console on the LLM page (e.g., `document.querySelector('#prompt-textarea')`) to test if selectors are still valid.
 -   **Inspect chat history DB**: DevTools → Application → IndexedDB → `mlc_history_v1` (see `AGENTSMD/AGENTS_DBS.md` for schema + encryption details).

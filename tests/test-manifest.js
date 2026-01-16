@@ -71,7 +71,9 @@ const manifestTests = {
     console.log('Testing host permissions...');
     const expectedHosts = [
       'https://gemini.google.com/*',
-      'https://chat.openai.com/*'
+      'https://chat.openai.com/*',
+      'https://chatgpt.com/*',
+      'https://claude.ai/*'
     ];
     
     if (!manifest.host_permissions) {

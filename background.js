@@ -349,7 +349,7 @@ async function appendChatMessage(chatId, message) {
     if (!chatId || !message) return { ok: false, error: 'Missing chatId or message.' };
     try {
         const store = await requireHistoryUnlocked();
-        const provider = message.role === 'gemini' || message.role === 'chatgpt' ? message.role : null;
+        const provider = isSupportedProviderKey(message.role) ? message.role : null;
         const saved = await store.appendMessage(chatId, { ...message, provider });
         await notifyChatsState();
         return { ok: true, message: saved };
@@ -411,6 +411,20 @@ function normalizeProviderKey(provider) {
     return String(provider || '').trim().toLowerCase();
 }
 
+function getSupportedProviderKeys() {
+    const capabilities = PROVIDER_CAPABILITIES && typeof PROVIDER_CAPABILITIES === 'object'
+        ? Object.keys(PROVIDER_CAPABILITIES)
+        : [];
+    const normalized = capabilities.map(normalizeProviderKey).filter(Boolean);
+    return [...new Set(normalized)];
+}
+
+function isSupportedProviderKey(provider) {
+    const key = normalizeProviderKey(provider);
+    if (!key) return false;
+    return getSupportedProviderKeys().includes(key);
+}
+
 function initProviderFlagMap(providers, initialValue) {
     const map = {};
     if (!Array.isArray(providers)) return map;
@@ -426,12 +440,26 @@ function listSessionProviders(session, fallbackProvider) {
     const ordered = [];
     const push = (provider) => {
         const key = normalizeProviderKey(provider);
-        if (!key) return;
+        if (!key || !isSupportedProviderKey(key)) return;
         if (!ordered.includes(key)) ordered.push(key);
     };
     push(session?.firstLLM);
     push(session?.secondLLM);
     push(fallbackProvider);
+    return ordered;
+}
+
+function getSessionProviders(session, fallbackProvider) {
+    const ordered = [];
+    const push = (provider) => {
+        const key = normalizeProviderKey(provider);
+        if (!key || !isSupportedProviderKey(key)) return;
+        if (!ordered.includes(key)) ordered.push(key);
+    };
+
+    const routeProviders = Array.isArray(session?.route?.providers) ? session.route.providers : [];
+    routeProviders.forEach(push);
+    listSessionProviders(session, fallbackProvider).forEach(push);
     return ordered;
 }
 
@@ -541,7 +569,7 @@ function markSessionAttachmentsSent(session, provider) {
     }
     activeSessionAttachments.preparedTo[normalizedProvider] = true;
 
-    const requiredProviders = listSessionProviders(session, normalizedProvider);
+    const requiredProviders = getSessionProviders(session, normalizedProvider);
     const allSent = requiredProviders.every((p) => activeSessionAttachments.sentTo?.[p]);
     if (allSent) {
         activeSessionAttachments = null;
@@ -622,7 +650,10 @@ async function setPreferredTabs(payload = {}) {
 }
 
 function normalizeProvider(provider) {
-    return provider === 'gemini' ? 'gemini' : 'chatgpt';
+    const key = normalizeProviderKey(provider);
+    if (key && isSupportedProviderKey(key)) return key;
+    // Preserve legacy behavior: unknown providers map to ChatGPT.
+    return 'chatgpt';
 }
 
 function getTabUrlCandidate(tab) {
@@ -633,7 +664,14 @@ function getTabUrlCandidate(tab) {
 }
 
 function getEmptyProfilesState() {
-    return { profiles: [], defaults: { chatgpt: null, gemini: null } };
+    const defaults = {};
+    for (const provider of getSupportedProviderKeys()) {
+        defaults[provider] = null;
+    }
+    // Backward compatibility (older code expects these keys to exist).
+    if (!Object.prototype.hasOwnProperty.call(defaults, 'chatgpt')) defaults.chatgpt = null;
+    if (!Object.prototype.hasOwnProperty.call(defaults, 'gemini')) defaults.gemini = null;
+    return { profiles: [], defaults };
 }
 
 function generateProfileId() {
@@ -700,8 +738,12 @@ function sanitizeProfilesState(state) {
 }
 
 function getExpectedHosts(provider) {
-    if (provider === 'gemini') {
+    const normalized = normalizeProvider(provider);
+    if (normalized === 'gemini') {
         return ['gemini.google.com'];
+    }
+    if (normalized === 'claude') {
+        return ['claude.ai'];
     }
     return ['chatgpt.com', 'chat.openai.com', 'openai.com', 'platform.openai.com'];
 }
@@ -722,13 +764,16 @@ async function loadTabProfiles() {
     if (stored && stored[TAB_PROFILES_KEY]) {
         const next = stored[TAB_PROFILES_KEY];
         if (Array.isArray(next.profiles) && next.defaults) {
-            const state = {
-                profiles: next.profiles,
-                defaults: {
-                    chatgpt: next.defaults.chatgpt || null,
-                    gemini: next.defaults.gemini || null
-                }
-            };
+            const baseDefaults = getEmptyProfilesState().defaults;
+            const storedDefaults = next.defaults && typeof next.defaults === 'object' ? next.defaults : {};
+            const defaults = { ...baseDefaults };
+            for (const [provider, profileId] of Object.entries(storedDefaults)) {
+                const key = normalizeProviderKey(provider);
+                if (!key) continue;
+                if (!Object.prototype.hasOwnProperty.call(defaults, key)) continue;
+                defaults[key] = profileId || null;
+            }
+            const state = { profiles: next.profiles, defaults };
             return sanitizeProfilesState(state).state;
         }
     }
@@ -749,7 +794,7 @@ function findProfileByTabId(state, provider, tabId) {
 }
 
 function formatDefaultProfileLabel(provider, tab) {
-    const base = provider === 'gemini' ? 'Gemini' : 'ChatGPT';
+    const base = formatLLMLabel(provider);
     if (tab?.title) {
         const trimmed = tab.title.trim();
         if (trimmed) {
@@ -907,7 +952,7 @@ async function claimTabAsProfile({ provider, tabId, label, profileId, setDefault
             : 'unknown';
 
         if (!skipHostCheck && status !== 'ok') {
-            return { ok: false, error: `Selected tab is not a valid ${normalizedProvider === 'gemini' ? 'Gemini' : 'ChatGPT'} tab.` };
+            return { ok: false, error: `Selected tab is not a valid ${formatLLMLabel(normalizedProvider)} tab.` };
         }
 
         const state = await loadTabProfiles();
@@ -1018,7 +1063,7 @@ async function deleteTabProfile(profileId) {
         const profile = findProfileById(state, profileId);
         if (!profile) return { ok: false, error: 'Profile not found.' };
         state.profiles = state.profiles.filter(item => item.profileId !== profileId);
-        for (const provider of ['chatgpt', 'gemini']) {
+        for (const provider of Object.keys(state.defaults || {})) {
             if (state.defaults[provider] === profileId) {
                 state.defaults[provider] = null;
             }
@@ -1067,7 +1112,9 @@ async function focusTab(tabId) {
 
 async function openProviderTab(provider, options = {}) {
     const normalizedProvider = normalizeProvider(provider);
-    const url = normalizedProvider === 'gemini' ? 'https://gemini.google.com/' : 'https://chatgpt.com/';
+    const url = normalizedProvider === 'gemini'
+        ? 'https://gemini.google.com/'
+        : (normalizedProvider === 'claude' ? 'https://claude.ai/new' : 'https://chatgpt.com/');
     const focus = options.focus !== false;
     const tab = await chrome.tabs.create({
         url,
@@ -1081,7 +1128,7 @@ async function connectProvider(provider, options = {}) {
     const normalizedProvider = normalizeProvider(provider);
     const opened = await openProviderTab(normalizedProvider, options);
     if (!opened?.ok) return opened || { ok: false, error: 'Failed to open provider tab.' };
-    const label = normalizedProvider === 'gemini' ? 'Gemini' : 'ChatGPT';
+    const label = formatLLMLabel(normalizedProvider);
     let claimed = await claimTabAsProfile({
         provider: normalizedProvider,
         tabId: opened.tabId,
@@ -1166,9 +1213,9 @@ async function lockProfilesForSession(sessionId, profileIds) {
     return withTabProfilesLock(async () => {
         const state = await loadTabProfiles();
         let changed = false;
-        for (const provider of ['chatgpt', 'gemini']) {
-            const profileId = profileIds[provider];
-            if (!profileId) continue;
+        for (const [provider, profileId] of Object.entries(profileIds || {})) {
+            const normalizedProvider = normalizeProvider(provider);
+            if (!profileId || !normalizedProvider) continue;
             const profile = findProfileById(state, profileId);
             if (!profile) continue;
             if (profile.inUseBySessionId !== sessionId) {
@@ -1316,6 +1363,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             enqueueDebateResponse(message, 'ChatGPT response');
             handleChatGPTResponse(message);
             sendResponse({ status: 'chatgpt_response_received', type: message.type });
+            break;
+        case 'CLAUDE_RESPONSE_CAPTURED':
+            enqueueDebateResponse(message, 'Claude response');
+            handleClaudeResponse(message);
+            sendResponse({ status: 'claude_response_received', type: message.type });
             break;
         case 'MLC_RESPONSE_CAPTURED':
             enqueueDebateResponse(message, 'response');
@@ -1613,8 +1665,9 @@ function sanitizeUiRoute(input) {
     const rawProviders = Array.isArray(input.providers) ? input.providers : [];
     const providers = [];
     for (const item of rawProviders) {
-        if (item !== 'chatgpt' && item !== 'gemini') continue;
-        if (!providers.includes(item)) providers.push(item);
+        const normalized = normalizeProviderKey(item);
+        if (!normalized || !isSupportedProviderKey(normalized)) continue;
+        if (!providers.includes(normalized)) providers.push(normalized);
     }
     if (providers.length === 0) return null;
     const rounds = Math.min(12, Math.max(1, parseInt(input.rounds, 10) || 1));
@@ -1625,6 +1678,7 @@ function sanitizeUiRoute(input) {
     }
 
     if (kind === 'parallel') {
+        if (providers.length < 2) return null;
         return { kind: 'parallel', providers, rounds: 1 };
     }
 
@@ -1697,8 +1751,12 @@ async function handleStartDebateSession(message) {
 	            await endDebateSession('Session replaced by a new request.');
 	        }
 
-	        let profileIds = { chatgpt: null, gemini: null };
-	        const tabIds = { chatgpt: null, gemini: null };
+	        const profileIds = {};
+	        const tabIds = {};
+	        for (const provider of getSupportedProviderKeys()) {
+	            profileIds[provider] = null;
+	            tabIds[provider] = null;
+	        }
 	        let chatId = null;
 	        if (historyStore) {
 	            const chatsState = await loadChatsState();
@@ -1911,7 +1969,10 @@ function getTurnLLM(session, turnIndex) {
 }
 
 function formatLLMLabel(llmType) {
-    return llmType === 'gemini' ? 'Gemini' : 'ChatGPT';
+    const normalized = normalizeProviderKey(llmType);
+    if (normalized === 'gemini') return 'Gemini';
+    if (normalized === 'claude') return 'Claude';
+    return 'ChatGPT';
 }
 
 const PROVIDER_CAPABILITIES = {
@@ -1925,6 +1986,13 @@ const PROVIDER_CAPABILITIES = {
         // - No discoverable <input type="file"> in light DOM / open shadow roots
         // - Synthetic drag/drop events are ignored (event.isTrusted === false)
         // Fall back to sending text-only (no programmatic upload).
+        attachments: {
+            mode: 'manual'
+        }
+    },
+    claude: {
+        // Claude (claude.ai) attachment automation has not been validated yet.
+        // Start in manual mode for safety; upgrade to 'auto' once selectors + upload flows are proven stable.
         attachments: {
             mode: 'manual'
         }
@@ -2235,8 +2303,7 @@ function getLastResponse(session, llmType) {
 function describeMessageRoleForContext(role) {
     if (!role) return 'Assistant';
     if (role === 'user') return 'User';
-    if (role === 'chatgpt') return 'ChatGPT';
-    if (role === 'gemini') return 'Gemini';
+    if (isSupportedProviderKey(role)) return formatLLMLabel(role);
     return String(role);
 }
 
@@ -2278,19 +2345,24 @@ function formatTranscriptForPrompt(messages, { maxChars = 48000 } = {}) {
 }
 
 const CHAT_DELIVERY_STATE_META_PREFIX = 'mlc_chat_delivery_state_v1:';
+const CHAT_DELIVERY_STATE_SCHEMA_VERSION = 2;
 
 function getChatDeliveryStateKey(chatId) {
     return `${CHAT_DELIVERY_STATE_META_PREFIX}${chatId}`;
 }
 
 function createEmptyDeliveryState() {
+    const providers = {};
+    for (const provider of getSupportedProviderKeys()) {
+        providers[provider] = { deliveredUpTo: 0, contextKey: null };
+    }
+    // Backward compatibility (older code assumes these keys exist).
+    if (!Object.prototype.hasOwnProperty.call(providers, 'chatgpt')) providers.chatgpt = { deliveredUpTo: 0, contextKey: null };
+    if (!Object.prototype.hasOwnProperty.call(providers, 'gemini')) providers.gemini = { deliveredUpTo: 0, contextKey: null };
     return {
-        schemaVersion: 1,
+        schemaVersion: CHAT_DELIVERY_STATE_SCHEMA_VERSION,
         updatedAt: 0,
-        providers: {
-            chatgpt: { deliveredUpTo: 0, contextKey: null },
-            gemini: { deliveredUpTo: 0, contextKey: null }
-        }
+        providers
     };
 }
 
@@ -2310,11 +2382,12 @@ function normalizeChatDeliveryState(value) {
     const base = createEmptyDeliveryState();
     if (!value || typeof value !== 'object') return base;
 
-    if (value.schemaVersion === 1 && value.providers && typeof value.providers === 'object') {
+    if ((value.schemaVersion === 1 || value.schemaVersion === 2) && value.providers && typeof value.providers === 'object') {
         const out = createEmptyDeliveryState();
         out.updatedAt = Number.isFinite(value.updatedAt) ? Math.floor(value.updatedAt) : 0;
-        out.providers.chatgpt = normalizeDeliveryProviderState(value.providers.chatgpt);
-        out.providers.gemini = normalizeDeliveryProviderState(value.providers.gemini);
+        for (const provider of Object.keys(out.providers)) {
+            out.providers[provider] = normalizeDeliveryProviderState(value.providers[provider]);
+        }
         return out;
     }
 
@@ -2371,8 +2444,9 @@ function getProviderContextKey(session, provider) {
 function getEffectiveDeliveredUpTo(state, provider, contextKey) {
     if (!state || typeof state !== 'object') return 0;
     const providers = state.providers && typeof state.providers === 'object' ? state.providers : null;
-    const entry = providers?.[provider] && typeof providers[provider] === 'object'
-        ? providers[provider]
+    const normalizedProvider = normalizeProviderKey(provider);
+    const entry = normalizedProvider && providers?.[normalizedProvider] && typeof providers[normalizedProvider] === 'object'
+        ? providers[normalizedProvider]
         : null;
     const deliveredUpTo = Number.isFinite(entry?.deliveredUpTo) ? Math.max(0, Math.floor(entry.deliveredUpTo)) : 0;
     const storedContextKey = typeof entry?.contextKey === 'string' && entry.contextKey.trim()
@@ -2386,12 +2460,14 @@ function getEffectiveDeliveredUpTo(state, provider, contextKey) {
 
 async function bumpProviderDeliveredUpTo(store, chatId, provider, sequence, contextKey) {
     if (!store || !chatId) return { ok: false, error: 'Missing store/chatId.' };
-    if (provider !== 'chatgpt' && provider !== 'gemini') return { ok: false, error: 'Invalid provider.' };
+    const normalizedProvider = normalizeProviderKey(provider);
+    if (!normalizedProvider || !isSupportedProviderKey(normalizedProvider)) return { ok: false, error: 'Invalid provider.' };
     if (!Number.isFinite(sequence) || sequence <= 0) return { ok: false, error: 'Invalid sequence.' };
 
     const state = await getChatDeliveryState(store, chatId);
     const normalized = normalizeChatDeliveryState(state);
-    const entry = normalized.providers[provider];
+    const entry = normalized.providers[normalizedProvider] || { deliveredUpTo: 0, contextKey: null };
+    normalized.providers[normalizedProvider] = entry;
     const safeContextKey = typeof contextKey === 'string' && contextKey.trim() ? contextKey.trim() : null;
 
     if (safeContextKey && entry.contextKey && entry.contextKey !== safeContextKey) {
@@ -2427,7 +2503,7 @@ async function buildDirectHistoryDelta(store, chatId, { afterSequence = 0, cutof
                 break;
             }
             const role = msg.role;
-            if (role !== 'user' && role !== 'chatgpt' && role !== 'gemini') continue;
+            if (role !== 'user' && !isSupportedProviderKey(role)) continue;
             collectedReversed.push(msg);
             if (collectedReversed.length >= maxMessages) {
                 reachedBoundary = true;
@@ -2897,7 +2973,7 @@ async function prefetchSessionAttachments(session, excludeProvider) {
         if (!Array.isArray(attachments) || attachments.length === 0) return;
 
         const excludeKey = normalizeProviderKey(excludeProvider);
-        const providers = listSessionProviders(session).filter((provider) => provider && provider !== excludeKey);
+        const providers = getSessionProviders(session).filter((provider) => provider && provider !== excludeKey);
 
         for (const provider of providers) {
             if (!hasSessionAttachments(sessionId)) return;
@@ -2930,7 +3006,7 @@ function getParallelProviders(session) {
         : listSessionProviders(session);
     for (const candidate of candidates) {
         const key = normalizeProviderKey(candidate);
-        if (key !== 'chatgpt' && key !== 'gemini') continue;
+        if (!isSupportedProviderKey(key)) continue;
         if (!providers.includes(key)) providers.push(key);
     }
     return providers;
@@ -3133,7 +3209,7 @@ async function handleParallelResponse(session, message) {
     if (!sessionId) return;
 
     const provider = normalizeProviderKey(message.sourceLLM || message.provider || '');
-    if (provider !== 'chatgpt' && provider !== 'gemini') return;
+    if (!isSupportedProviderKey(provider)) return;
 
     const waitingFor = Array.isArray(session.waitingFor)
         ? session.waitingFor.map(normalizeProviderKey).filter(Boolean)
@@ -3305,7 +3381,7 @@ async function handleDebateResponse(message) {
         });
         if (persisted?.ok && Number.isFinite(persisted?.message?.sequence)) {
             const provider = expectedLLM || message.sourceLLM;
-            if (provider === 'chatgpt' || provider === 'gemini') {
+            if (isSupportedProviderKey(provider)) {
                 try {
                     const store = await requireHistoryUnlocked();
                     await bumpProviderDeliveredUpTo(
@@ -3363,7 +3439,9 @@ async function handleSendPrompt(message) {
     
     // Check if multi-agent mode is requested
     if (multiAgent && multiAgent.enabled) {
-        const firstLLM = targets.chatgpt ? 'chatgpt' : 'gemini';
+        const firstLLM = targets.chatgpt
+            ? 'chatgpt'
+            : (targets.gemini ? 'gemini' : 'claude');
         handleStartDebateSession({
             prompt: prompt,
             firstLLM: firstLLM,
@@ -3373,6 +3451,10 @@ async function handleSendPrompt(message) {
     }
     
     // Regular mode - send to individual LLMs
+    if (targets.claude) {
+        await processLLM('claude', prompt);
+    }
+    
     if (targets.gemini) {
         await processLLM('gemini', prompt);
     }
@@ -3501,6 +3583,22 @@ function handleChatGPTResponse(message) {
     });
 }
 
+function handleClaudeResponse(message) {
+    if (message.sessionId) return;
+
+    if (!message.content || message.content.trim().length === 0) {
+        console.log('[MLC] Received empty Claude response, ignoring.');
+        return;
+    }
+
+    sendMessageToPopup({
+        type: 'LLM_RESPONSE',
+        llm: 'claude',
+        content: message.content,
+        contentHtml: message.contentHtml || undefined
+    });
+}
+
 function triggerFollowUpIfReady() {
     if (
         activeFollowUpState.originalSourceLLM === 'chatgpt' &&
@@ -3581,6 +3679,17 @@ function simpleInteraction_InjectOnly(prompt, llmType) {
                 'textarea[placeholder*="Enter a prompt"]',
                 'textarea[placeholder*="Ask"]',
                 'textarea'
+            ],
+            claude: [
+                'textarea[data-testid="chat-input-ssr"]',
+                'textarea[placeholder*="Message" i]',
+                'textarea[aria-label*="Message" i]',
+                'textarea[placeholder*="Send" i]',
+                'textarea',
+                '.ProseMirror[contenteditable="true"]',
+                'div[contenteditable="true"][role="textbox"]',
+                'div[contenteditable="true"]',
+                '[contenteditable="true"]'
             ]
         };
         const selectors = inputSelectors[llmType] || [];
@@ -3627,7 +3736,7 @@ async function processLLM(llmType, prompt, context = {}) {
         const tab = await findLLMTab(llmType, preferredId);
 
         if (!tab) {
-            throw new Error(`${llmType} tab not found. Please open ${llmType} in a tab and ensure you're logged in.`);
+            throw new Error(`${formatLLMLabel(llmType)} tab not found. Please open it in a tab and ensure you're logged in.`);
         }
         console.log(`[MLC Background] Found ${llmType} tab: ID ${tab.id}, URL ${tab.url}`);
 
@@ -3650,6 +3759,7 @@ async function processLLM(llmType, prompt, context = {}) {
 async function listLLMTabs(llmType) {
     const urlPatterns = {
         gemini: ['*://gemini.google.com/*'],
+        claude: ['*://claude.ai/*', '*://*.claude.ai/*'],
         chatgpt: [
             '*://chat.openai.com/*',
             '*://chatgpt.com/*',
@@ -3712,7 +3822,19 @@ async function resolveTabForLLM(llmType, requestedTabId, preferredTabId) {
         if (match) return match;
     }
 
-    return selectTabFromList(candidates, preferredTabId);
+    if (preferredTabId) {
+        const preferred = candidates.find(tab => tab.id === preferredTabId);
+        if (preferred) return preferred;
+    }
+
+    if (llmType === 'claude') {
+        const chatTabs = candidates.filter(tab => typeof tab.url === 'string' && /:\/\/claude\.ai\/chat\//i.test(tab.url));
+        if (chatTabs.length > 0) {
+            return selectTabFromList(chatTabs, null);
+        }
+    }
+
+    return selectTabFromList(candidates, null);
 }
 
 async function findLLMTab(llmType, preferredTabId) {
@@ -3726,17 +3848,728 @@ async function findLLMTab(llmType, preferredTabId) {
     }
 }
 
+function debuggerAttach(debuggee, protocolVersion = '1.3') {
+    return new Promise((resolve, reject) => {
+        try {
+            chrome.debugger.attach(debuggee, protocolVersion, () => {
+                if (chrome.runtime.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message));
+                    return;
+                }
+                resolve();
+            });
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+function debuggerDetach(debuggee) {
+    return new Promise((resolve) => {
+        try {
+            chrome.debugger.detach(debuggee, () => resolve());
+        } catch (error) {
+            resolve();
+        }
+    });
+}
+
+function debuggerSendCommand(debuggee, method, params = {}) {
+    return new Promise((resolve, reject) => {
+        try {
+            chrome.debugger.sendCommand(debuggee, method, params, (result) => {
+                if (chrome.runtime.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message));
+                    return;
+                }
+                resolve(result);
+            });
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+async function sendPromptViaClaudeDebugger(tabId, promptText) {
+    const debuggee = { tabId };
+    await debuggerAttach(debuggee, '1.3');
+    try {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        // Make the tab active to maximize the chance CDP input targets the correct frame/element.
+        try {
+            const tab = await chrome.tabs.get(tabId);
+            if (tab?.windowId) {
+                await chrome.windows.update(tab.windowId, { focused: true });
+            }
+            await chrome.tabs.update(tabId, { active: true });
+        } catch (error) {
+            // ignore focus errors
+        }
+
+        const focusExpr = `(() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = el.getBoundingClientRect();
+                if (!(rect.width > 8 && rect.height > 8)) return false;
+                if (rect.bottom < 0 || rect.right < 0) return false;
+                if (rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+                return true;
+            };
+
+            const bottomMost = (nodes) => {
+                let best = null;
+                let bestBottom = -Infinity;
+                for (const node of nodes) {
+                    if (!isVisible(node)) continue;
+                    const rect = node.getBoundingClientRect();
+                    const bottom = Number.isFinite(rect.bottom) ? rect.bottom : 0;
+                    if (bottom >= bestBottom) {
+                        bestBottom = bottom;
+                        best = node;
+                    }
+                }
+                return best;
+            };
+
+            const sendSelectors = [
+                'button[aria-label*="message" i]',
+                'button[aria-label*="envoyer" i]',
+                'button[aria-label*="send" i]'
+            ];
+
+            const findComposerRoot = () => {
+                const uploadSelectors = [
+                    'input[type="file"][data-testid="file-upload"]',
+                    'input[type="file"]#chat-input-file-upload-onpage',
+                    'input[type="file"][id*="chat-input-file-upload" i]'
+                ];
+                for (const sel of uploadSelectors) {
+                    const upload = bottomMost(Array.from(document.querySelectorAll(sel)));
+                    if (upload) {
+                        return upload.closest('fieldset')
+                            || upload.closest('form')
+                            || upload.closest('[role="form"]')
+                            || upload.parentElement
+                            || document.body;
+                    }
+                }
+
+                const ta = bottomMost(Array.from(document.querySelectorAll('textarea[data-testid="chat-input-ssr"], textarea')));
+                if (ta) {
+                    return ta.closest('fieldset')
+                        || ta.closest('form')
+                        || ta.closest('[role="form"]')
+                        || ta.parentElement
+                        || document.body;
+                }
+
+                for (const sel of sendSelectors) {
+                    const btn = bottomMost(Array.from(document.querySelectorAll(sel)));
+                    if (btn) {
+                        return btn.closest('fieldset')
+                            || btn.closest('form')
+                            || btn.closest('[role="form"]')
+                            || btn.parentElement
+                            || document.body;
+                    }
+                }
+
+                return document.body;
+            };
+
+            const root = findComposerRoot();
+
+            let sendBtn = null;
+            for (const sel of sendSelectors) {
+                const btn = bottomMost(Array.from(root.querySelectorAll(sel)));
+                if (btn) {
+                    sendBtn = btn;
+                    break;
+                }
+            }
+            if (!sendBtn) {
+                for (const sel of sendSelectors) {
+                    const btn = bottomMost(Array.from(document.querySelectorAll(sel)));
+                    if (btn) {
+                        sendBtn = btn;
+                        break;
+                    }
+                }
+            }
+
+            const isVisibleInput = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = el.getBoundingClientRect();
+                if (rect.bottom < 0 || rect.right < 0) return false;
+                if (rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+                return true;
+            };
+
+            const inputSelectors = [
+                'div[data-testid="chat-input"][role="textbox"]',
+                '[contenteditable="true"][role="textbox"]',
+                '.ProseMirror[contenteditable="true"]',
+                '[contenteditable="true"]',
+                'textarea[data-testid="chat-input-ssr"]',
+                'textarea'
+            ];
+            const seen = new Set();
+            const candidates = [];
+            const active = document.activeElement;
+            if (active && active !== document.body && !seen.has(active)) {
+                const isLikelyEditor = active.matches?.('div[data-testid="chat-input"][role="textbox"]')
+                    || (Boolean(active.isContentEditable || String(active.getAttribute?.('contenteditable') || '').toLowerCase() === 'true')
+                        && String(active.getAttribute?.('role') || '').toLowerCase() === 'textbox');
+                if (isLikelyEditor && isVisibleInput(active)) {
+                    seen.add(active);
+                    candidates.push(active);
+                }
+            }
+            for (const sel of inputSelectors) {
+                for (const scope of [root, document]) {
+                    if (!scope?.querySelectorAll) continue;
+                    for (const node of Array.from(scope.querySelectorAll(sel))) {
+                        if (!node || seen.has(node)) continue;
+                        seen.add(node);
+                        if (!isVisibleInput(node)) continue;
+                        candidates.push(node);
+                    }
+                }
+            }
+
+            const scoreInput = (node) => {
+                const rect = node.getBoundingClientRect();
+                const bottom = Number.isFinite(rect.bottom) ? rect.bottom : 0;
+                const testId = String(node.getAttribute?.('data-testid') || '');
+                const aria = String(node.getAttribute?.('aria-label') || '');
+                const isTextArea = node.tagName === 'TEXTAREA';
+                const role = String(node.getAttribute?.('role') || '');
+                const isEditable = Boolean(node.isContentEditable || node.getAttribute?.('contenteditable') === 'true');
+
+                let score = bottom;
+                if (testId.toLowerCase() === 'chat-input') score += 250000;
+                if (isEditable) score += 100000;
+                if (role.toLowerCase() === 'textbox') score += 65000;
+                if (isTextArea) score += 40000;
+                if (testId.toLowerCase() === 'chat-input-ssr') score -= 150000;
+                if (/claude/i.test(aria)) score += 8000;
+                if (/invite|prompt|message/i.test(aria)) score += 4000;
+                return score;
+            };
+
+            let input = null;
+            let bestScore = -Infinity;
+            for (const candidate of candidates) {
+                const score = scoreInput(candidate);
+                if (score > bestScore) {
+                    bestScore = score;
+                    input = candidate;
+                }
+            }
+
+            if (!input) return { ok: false, error: 'input_not_found', hasSendButton: Boolean(sendBtn) };
+
+            window.__mlcClaudeComposerRoot = root || null;
+            window.__mlcClaudeInputEl = input || null;
+            window.__mlcClaudeSendBtn = sendBtn || null;
+
+            input.focus();
+            if (input.tagName === 'TEXTAREA' && typeof input.select === 'function') {
+                input.select();
+            } else {
+                try {
+                    const range = document.createRange();
+                    range.selectNodeContents(input);
+                    const sel = window.getSelection();
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                } catch (error) {
+                    // ignore selection failures
+                }
+            }
+
+            const resolveClickTarget = (el) => {
+                let current = el;
+                for (let i = 0; i < 6 && current; i += 1) {
+                    const rect = current.getBoundingClientRect();
+                    if (rect && rect.width > 8 && rect.height > 8) return current;
+                    current = current.parentElement;
+                }
+                return el;
+            };
+
+            const clickTarget = resolveClickTarget(input);
+            const inputRect = clickTarget.getBoundingClientRect();
+            const sendRect = sendBtn ? sendBtn.getBoundingClientRect() : null;
+
+            return {
+                ok: true,
+                inputTag: input.tagName.toLowerCase(),
+                inputTestId: input.getAttribute('data-testid') || null,
+                inputRole: input.getAttribute('role') || null,
+                inputContentEditable: input.isContentEditable || input.contentEditable === 'true',
+                inputX: inputRect.left + inputRect.width / 2,
+                inputY: inputRect.top + inputRect.height / 2,
+                hasSendButton: Boolean(sendBtn),
+                sendLabel: sendBtn?.getAttribute?.('aria-label') || null,
+                sendX: sendRect ? (sendRect.left + sendRect.width / 2) : null,
+                sendY: sendRect ? (sendRect.top + sendRect.height / 2) : null,
+                rootTag: root?.tagName?.toLowerCase?.() || null
+            };
+        })()`;
+
+        const focusResult = await debuggerSendCommand(debuggee, 'Runtime.evaluate', {
+            expression: focusExpr,
+            returnByValue: true
+        });
+        const focusValue = focusResult?.result?.value;
+        if (!focusValue?.ok) {
+            const details = focusValue ? ` details=${JSON.stringify(focusValue)}` : '';
+            throw new Error(`Claude focus failed: ${focusValue?.error || 'unknown_error'}.${details}`);
+        }
+        const focusMeta = {
+            inputTag: focusValue?.inputTag || null,
+            inputTestId: focusValue?.inputTestId || null,
+            inputRole: focusValue?.inputRole || null,
+            inputContentEditable: Boolean(focusValue?.inputContentEditable),
+            sendLabel: focusValue?.sendLabel || null,
+            rootTag: focusValue?.rootTag || null
+        };
+        if (focusMeta.inputTestId === 'chat-input-ssr') {
+            console.warn('[MLC Background] Claude focus selected SSR textarea (chat-input-ssr); composer may not be fully hydrated yet.');
+        }
+
+        const clickAt = async (x, y) => {
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+            await debuggerSendCommand(debuggee, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' });
+            await debuggerSendCommand(debuggee, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+            await debuggerSendCommand(debuggee, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+        };
+
+        // Ensure the target input is really focused.
+        const inputX = Number(focusValue?.inputX);
+        const inputY = Number(focusValue?.inputY);
+        if (Number.isFinite(inputX) && Number.isFinite(inputY)) {
+            await clickAt(inputX, inputY);
+            await sleep(80);
+        }
+
+        const dispatchSelectAll = async (modifier) => {
+            await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
+                type: 'rawKeyDown',
+                key: 'a',
+                code: 'KeyA',
+                modifiers: modifier,
+                windowsVirtualKeyCode: 65,
+                nativeVirtualKeyCode: 65
+            });
+            await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
+                type: 'keyUp',
+                key: 'a',
+                code: 'KeyA',
+                modifiers: modifier,
+                windowsVirtualKeyCode: 65,
+                nativeVirtualKeyCode: 65
+            });
+        };
+
+        const dispatchBackspace = async () => {
+            await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
+                type: 'rawKeyDown',
+                key: 'Backspace',
+                code: 'Backspace',
+                windowsVirtualKeyCode: 8,
+                nativeVirtualKeyCode: 8
+            });
+            await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
+                type: 'keyUp',
+                key: 'Backspace',
+                code: 'Backspace',
+                windowsVirtualKeyCode: 8,
+                nativeVirtualKeyCode: 8
+            });
+        };
+
+        // Clear any existing text (Cmd/Ctrl + A, Backspace).
+        await dispatchSelectAll(4); // Meta (Cmd)
+        await dispatchBackspace();
+        await dispatchSelectAll(2); // Ctrl (fallback)
+        await dispatchBackspace();
+
+        const stateExpr = `(() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = el.getBoundingClientRect();
+                if (!(rect.width > 8 && rect.height > 8)) return false;
+                if (rect.bottom < 0 || rect.right < 0) return false;
+                if (rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+                return true;
+            };
+            const input = window.__mlcClaudeInputEl;
+            const btn = window.__mlcClaudeSendBtn;
+            const getText = (el) => {
+                if (!el) return '';
+                const tag = (el.tagName || '').toUpperCase();
+                if (tag === 'TEXTAREA' || tag === 'INPUT') return String(el.value || '');
+                if (el.isContentEditable || String(el.getAttribute?.('contenteditable') || '').toLowerCase() === 'true') {
+                    return String(el.innerText || el.textContent || '');
+                }
+                return String(el.innerText || el.textContent || '');
+            };
+            const inputText = getText(input);
+            const inputTrim = inputText.trim();
+            const inputLen = inputTrim.length;
+            const btnStyle = btn ? window.getComputedStyle(btn) : null;
+            const pointerEvents = btnStyle ? btnStyle.pointerEvents : null;
+            const disabled = !btn || !isVisible(btn)
+                || Boolean(btn.disabled) || btn.getAttribute('disabled') !== null
+                || String(btn.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
+                || pointerEvents === 'none';
+            const rect = btn && isVisible(btn) ? btn.getBoundingClientRect() : null;
+            return {
+                ok: Boolean(input) && Boolean(btn),
+                inputConnected: Boolean(input?.isConnected),
+                sendConnected: Boolean(btn?.isConnected),
+                inputTag: input?.tagName?.toLowerCase?.() || null,
+                inputContentEditable: Boolean(input?.isContentEditable || String(input?.getAttribute?.('contenteditable') || '').toLowerCase() === 'true'),
+                inputLen,
+                inputPreview: inputTrim.slice(0, 160),
+                sendDisabled: disabled,
+                sendPointerEvents: pointerEvents,
+                sendLabel: btn?.getAttribute?.('aria-label') || '',
+                sendX: rect ? rect.left + rect.width / 2 : null,
+                sendY: rect ? rect.top + rect.height / 2 : null
+            };
+        })()`;
+
+        const evalState = async () => {
+            const result = await debuggerSendCommand(debuggee, 'Runtime.evaluate', {
+                expression: stateExpr,
+                returnByValue: true
+            });
+            return result?.result?.value || null;
+        };
+
+        const text = String(promptText || '');
+        await debuggerSendCommand(debuggee, 'Input.insertText', { text });
+        // Nudge: generate a real text input via key events (some apps ignore insertText-only changes).
+        await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', { type: 'char', text: ' ' });
+        await dispatchBackspace();
+        await sleep(120);
+
+        let state = await evalState();
+        if (!state?.ok) {
+            throw new Error(`Claude composer state unavailable after typing (input/send references lost). focus=${JSON.stringify(focusMeta)}`);
+        }
+        if (!state.inputLen) {
+            throw new Error(`Claude input stayed empty after typing (input did not receive programmatic text). focus=${JSON.stringify(focusMeta)}`);
+        }
+
+        // Wait for Send to become enabled (or at least clickable).
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < 4000) {
+            state = await evalState();
+            if (state?.ok && state.sendDisabled === false && Number.isFinite(state.sendX) && Number.isFinite(state.sendY)) {
+                break;
+            }
+            await sleep(150);
+        }
+
+        if (!state?.ok) {
+            throw new Error('Claude send readiness check failed (composer missing).');
+        }
+        if (state.sendDisabled) {
+            throw new Error(`Claude send button stayed disabled after typing. inputLen=${state.inputLen} pointerEvents=${state.sendPointerEvents || 'unknown'} focus=${JSON.stringify(focusMeta)}`);
+        }
+
+        const ackExpr = `(() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = el.getBoundingClientRect();
+                if (!(rect.width > 4 && rect.height > 4)) return false;
+                if (rect.bottom < 0 || rect.right < 0) return false;
+                if (rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+                return true;
+            };
+
+            const composerRoot = window.__mlcClaudeComposerRoot || null;
+            const input = window.__mlcClaudeInputEl || null;
+            const getText = (el) => {
+                if (!el) return '';
+                const tag = (el.tagName || '').toUpperCase();
+                if (tag === 'TEXTAREA' || tag === 'INPUT') return String(el.value || '');
+                if (el.isContentEditable || String(el.getAttribute?.('contenteditable') || '').toLowerCase() === 'true') {
+                    return String(el.innerText || el.textContent || '');
+                }
+                return String(el.innerText || el.textContent || '');
+            };
+
+            const inputText = getText(input);
+            const inputTrim = inputText.trim();
+
+            const stopSelectors = [
+                'button[aria-label*="stop" i]',
+                'button[aria-label*="cancel" i]',
+                'button[aria-label*="annuler" i]',
+                'button[aria-label*="arrêter" i]',
+                'button[title*="stop" i]',
+                'button[title*="cancel" i]',
+                'button[data-testid*="stop" i]'
+            ];
+            const stopButton = document.querySelector(stopSelectors.join(','));
+
+            const spinnerSelectors = [
+                '[role="progressbar"]',
+                '.animate-spin',
+                '.spinner',
+                '.loading'
+            ];
+            const spinner = document.querySelector(spinnerSelectors.join(','));
+
+            const hasStop = Boolean(stopButton && isVisible(stopButton));
+            const hasSpinner = Boolean(spinner && isVisible(spinner));
+            const generating = hasStop || hasSpinner;
+
+            const main = document.querySelector('main') || document.querySelector('[role="main"]') || document.body;
+            const candidates = [];
+            const addCandidates = (sel, limit) => {
+                let nodes = [];
+                try {
+                    nodes = Array.from(main.querySelectorAll(sel));
+                } catch (error) {
+                    nodes = [];
+                }
+                if (nodes.length > limit) {
+                    nodes = nodes.slice(nodes.length - limit);
+                }
+                for (const node of nodes) {
+                    if (!node) continue;
+                    if (composerRoot && (node === composerRoot || composerRoot.contains(node) || node.contains(composerRoot))) continue;
+                    if (!isVisible(node)) continue;
+                    candidates.push(node);
+                }
+            };
+            addCandidates('article', 60);
+            addCandidates('[role="article"]', 60);
+            addCandidates('[data-testid*="message" i]', 80);
+            addCandidates('[data-testid*="chat" i]', 80);
+            addCandidates('.markdown', 80);
+            addCandidates('.prose', 80);
+            addCandidates('[class*="message" i]', 120);
+            addCandidates('[class*="assistant" i]', 120);
+
+            let bestNode = null;
+            let bestBottom = -Infinity;
+            for (const node of candidates) {
+                let rect;
+                try {
+                    rect = node.getBoundingClientRect();
+                } catch (error) {
+                    rect = null;
+                }
+                const bottom = rect && Number.isFinite(rect.bottom) ? rect.bottom : 0;
+                if (bottom >= bestBottom) {
+                    bestBottom = bottom;
+                    bestNode = node;
+                }
+            }
+
+            const bottomText = bestNode ? getText(bestNode).trim() : '';
+            return {
+                href: String(location.href || ''),
+                inputLen: inputTrim.length,
+                inputPreview: inputTrim.slice(0, 120),
+                generating,
+                hasStop,
+                hasSpinner,
+                bottomLen: bottomText.length,
+                bottomPreview: bottomText.slice(0, 200)
+            };
+        })()`;
+
+        const evalAck = async () => {
+            const result = await debuggerSendCommand(debuggee, 'Runtime.evaluate', {
+                expression: ackExpr,
+                returnByValue: true
+            });
+            return result?.result?.value || null;
+        };
+
+        const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const probe = normalize(text).slice(0, 80);
+
+        const beforeSend = await evalAck();
+
+        await clickAt(Number(state.sendX), Number(state.sendY));
+
+        const pressEnter = async () => {
+            await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
+                type: 'rawKeyDown',
+                key: 'Enter',
+                code: 'Enter',
+                windowsVirtualKeyCode: 13,
+                nativeVirtualKeyCode: 13
+            });
+            await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
+                type: 'keyUp',
+                key: 'Enter',
+                code: 'Enter',
+                windowsVirtualKeyCode: 13,
+                nativeVirtualKeyCode: 13
+            });
+        };
+
+        const detectAckReason = (current) => {
+            if (!current) return null;
+
+            if (beforeSend?.href && current.href && current.href !== beforeSend.href) {
+                return 'navigation';
+            }
+
+            if (beforeSend && beforeSend.generating === false && current.generating === true) {
+                return current.hasStop ? 'generating_stop' : 'generating_spinner';
+            }
+
+            if (beforeSend && beforeSend.inputLen > 0 && current.inputLen === 0) {
+                return 'input_cleared';
+            }
+
+            const beforeBottom = normalize(beforeSend?.bottomPreview || '');
+            const currentBottom = normalize(current.bottomPreview || '');
+            if (beforeBottom && currentBottom && currentBottom !== beforeBottom) {
+                if (probe && probe.length >= 16 && currentBottom.includes(probe.slice(0, 16))) {
+                    return 'message_appended';
+                }
+            }
+
+            return null;
+        };
+
+        const waitForAck = async (timeoutMs) => {
+            const start = Date.now();
+            while (Date.now() - start < timeoutMs) {
+                const current = await evalAck();
+                const reason = detectAckReason(current);
+                if (reason) return { ok: true, reason, current };
+                await sleep(150);
+            }
+            return { ok: false, reason: null, current: await evalAck() };
+        };
+
+        let ack = await waitForAck(3500);
+        if (!ack.ok) {
+            await pressEnter();
+            ack = await waitForAck(3500);
+        }
+
+        if (ack.ok) {
+            return { ok: true, meta: { ...focusMeta, ack: ack.reason } };
+        }
+
+        const finalState = await evalState();
+        const finalAck = ack.current;
+        throw new Error(
+            `Claude send could not be confirmed. `
+            + `inputLen=${finalState?.inputLen ?? 'unknown'} `
+            + `sendDisabled=${finalState?.sendDisabled ?? 'unknown'} `
+            + `ackBottomLen=${finalAck?.bottomLen ?? 'unknown'} `
+            + `ackGenerating=${finalAck?.generating ?? 'unknown'} `
+            + `focus=${JSON.stringify(focusMeta)}`
+        );
+    } finally {
+        await debuggerDetach(debuggee);
+    }
+}
+
 async function injectAndExecute(tabId, llmType, prompt, context = {}) {
     try {
-        console.log(`[MLC Background] Injecting simpleInteraction into Tab ID ${tabId} for ${llmType}.`);
+        if (llmType === 'claude') {
+            console.log(`[MLC Background] Preparing Claude send for Tab ID ${tabId}.`);
+        } else {
+            console.log(`[MLC Background] Injecting simpleInteraction into Tab ID ${tabId} for ${llmType}.`);
+        }
         
         sendMessageToPopup({ type: 'LLM_PROGRESS', llm: llmType, status: 'Sending prompt...' });
+
+        if (llmType === 'claude') {
+            const promptId = context.promptId || generatePromptId();
+            try {
+                console.log('[MLC Background] Sending prompt to Claude via chrome.debugger...');
+                const result = await sendPromptViaClaudeDebugger(tabId, prompt);
+                if (result?.ok) {
+                    console.log('[MLC Background] Claude debugger send succeeded (verified input cleared).', result?.meta || null);
+                    const preview = typeof prompt === 'string' ? prompt.trim().slice(0, 800) : '';
+                    try {
+                        chrome.tabs.sendMessage(tabId, {
+                            type: 'MLC_PROMPT_SENT',
+                            sessionId: context.sessionId || null,
+                            promptId: promptId,
+                            llmType: llmType,
+                            turnIndex: context.turnIndex || null,
+                            timestamp: Date.now(),
+                            promptPreview: preview
+                        });
+                    } catch (error) {
+                        console.warn('[MLC Background] Failed to notify Claude content script about prompt:', error);
+                    }
+                    sendMessageToPopup({ type: 'LLM_PROGRESS', llm: llmType, status: 'Prompt sent.' });
+                    return promptId;
+                }
+            } catch (error) {
+                const rawMessage = String(error?.message || error || '').trim();
+                const tips = [];
+                if (/another debugger|already attached/i.test(rawMessage)) {
+                    tips.push('Close DevTools on the Claude tab (only one debugger can attach).');
+                }
+                if (/missing.*permission|permission|not allowed|cannot access chrome\\.debugger/i.test(rawMessage)) {
+                    tips.push('Reload the extension and re-enable it to grant the "debugger" permission.');
+                }
+                if (/focus failed|input_not_found/i.test(rawMessage)) {
+                    tips.push('Open an actual Claude chat (not the landing/login page) and ensure the message box is visible.');
+                }
+                if (/input stayed empty after typing|did not receive programmatic text/i.test(rawMessage)) {
+                    tips.push('Click inside the Claude message box once, then retry (some sessions require a real user focus).');
+                }
+                if (/send button stayed disabled/i.test(rawMessage)) {
+                    tips.push('Verify you can type and send manually in that Claude tab; if not, Claude is blocking input (or the composer is not ready).');
+                }
+                const suffix = tips.length ? ` ${tips.join(' ')}` : '';
+                const err = new Error(`Failed to send to Claude via debugger.${rawMessage ? ` (${rawMessage})` : ''}${suffix}`);
+                err.code = 'CLAUDE_DEBUGGER_FAILED';
+                err.provider = 'claude';
+                throw err;
+            }
+        }
         
-        const results = await chrome.scripting.executeScript({
+        const execOptions = {
             target: { tabId: tabId },
             func: simpleInteraction, // This function is defined below
             args: [prompt, llmType, context.attachments || null]
-        });
+        };
+        if (llmType === 'claude') {
+            execOptions.world = 'MAIN';
+        }
+
+        let results;
+        try {
+            results = await chrome.scripting.executeScript(execOptions);
+        } catch (error) {
+            if (execOptions.world === 'MAIN') {
+                delete execOptions.world;
+                results = await chrome.scripting.executeScript(execOptions);
+            } else {
+                throw error;
+            }
+        }
         
         console.log(`[MLC Background] Injection results for ${llmType} (Tab ID: ${tabId}):`, JSON.stringify(results, null, 2));
         
@@ -3746,13 +4579,15 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                 console.log(`[MLC Background] simpleInteraction SUCCEEDED for ${llmType}: ${result.method}`);
                 const promptId = context.promptId || generatePromptId();
                 try {
+                    const preview = typeof prompt === 'string' ? prompt.trim().slice(0, 800) : '';
                     chrome.tabs.sendMessage(tabId, {
                         type: 'MLC_PROMPT_SENT',
                         sessionId: context.sessionId || null,
                         promptId: promptId,
                         llmType: llmType,
                         turnIndex: context.turnIndex || null,
-                        timestamp: Date.now()
+                        timestamp: Date.now(),
+                        promptPreview: preview
                     });
                 } catch (error) {
                     console.warn('[MLC Background] Failed to notify content script about prompt:', error);
@@ -3790,11 +4625,26 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
 async function injectAndPrepareAttachments(tabId, llmType, attachments) {
     try {
         console.log(`[MLC Background] Prefetching attachments into Tab ID ${tabId} for ${llmType}.`);
-        const results = await chrome.scripting.executeScript({
+        const execOptions = {
             target: { tabId: tabId },
             func: simpleInteraction,
             args: ['', llmType, attachments || null, { mode: 'prepare_attachments' }]
-        });
+        };
+        if (llmType === 'claude') {
+            execOptions.world = 'MAIN';
+        }
+
+        let results;
+        try {
+            results = await chrome.scripting.executeScript(execOptions);
+        } catch (error) {
+            if (execOptions.world === 'MAIN') {
+                delete execOptions.world;
+                results = await chrome.scripting.executeScript(execOptions);
+            } else {
+                throw error;
+            }
+        }
 
         if (results && results[0] && results[0].result) {
             const result = results[0].result;
@@ -4132,6 +4982,17 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                 'textarea[placeholder*="Enter a prompt"]', // Fallback if textarea is ever used
                 'textarea[placeholder*="Ask"]',
                 '[contenteditable="true"]' // General fallback
+            ],
+            claude: [
+                'textarea[data-testid="chat-input-ssr"]',
+                'textarea[placeholder*="Message" i]',
+                'textarea[aria-label*="Message" i]',
+                'textarea[placeholder*="Send" i]',
+                'textarea',
+                '.ProseMirror[contenteditable="true"]',
+                'div[contenteditable="true"][role="textbox"]',
+                'div[contenteditable="true"]',
+                '[contenteditable="true"]'
             ]
         };
 
@@ -4174,20 +5035,41 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             return { success: true, method: 'prepare_attachments' };
         }
 
-        if (llmType === 'chatgpt' && inputElement.tagName === 'TEXTAREA') {
-            console.log(`[SimpleInteraction INJECTED] Setting prompt for ChatGPT TEXTAREA`);
-            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-            if (nativeInputValueSetter) {
-                nativeInputValueSetter.call(inputElement, promptText);
-            } else {
-                inputElement.value = promptText;
+        const dispatchInputEvents = (el, value) => {
+            if (!el) return;
+            const baseEventInit = { bubbles: true, composed: true };
+            try {
+                const data = typeof value === 'string' ? value.slice(-1) : '';
+                el.dispatchEvent(new InputEvent('input', { ...baseEventInit, inputType: 'insertText', data }));
+            } catch (error) {
+                el.dispatchEvent(new Event('input', baseEventInit));
             }
-            inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-            inputElement.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-            inputElement.dispatchEvent(new KeyboardEvent('keydown',  { key: ' ', keyCode: 32, bubbles: true, composed: true }));
-            inputElement.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', keyCode: 32, bubbles: true, composed: true }));
-            console.log(`[SimpleInteraction INJECTED] Dispatched events for ChatGPT TEXTAREA.`);
+            el.dispatchEvent(new Event('change', baseEventInit));
+        };
 
+        const setNativeValue = (el, value) => {
+            if (!el) return;
+            const stringValue = typeof value === 'string' ? value : String(value || '');
+            const proto = el instanceof HTMLTextAreaElement
+                ? window.HTMLTextAreaElement.prototype
+                : (el instanceof HTMLInputElement ? window.HTMLInputElement.prototype : null);
+            const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+            if (descriptor && typeof descriptor.set === 'function') {
+                descriptor.set.call(el, stringValue);
+            } else {
+                el.value = stringValue;
+            }
+        };
+
+        if (inputElement.tagName === 'TEXTAREA') {
+            console.log(`[SimpleInteraction INJECTED] Setting prompt for TEXTAREA element (${llmType})`);
+            setNativeValue(inputElement, promptText);
+            dispatchInputEvents(inputElement, promptText);
+            if (llmType === 'chatgpt' || llmType === 'claude') {
+                inputElement.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', keyCode: 32, which: 32, bubbles: true, composed: true }));
+                inputElement.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', keyCode: 32, which: 32, bubbles: true, composed: true }));
+                console.log(`[SimpleInteraction INJECTED] Dispatched extra key events for ${llmType} TEXTAREA.`);
+            }
         } else if ((llmType === 'gemini' && (inputElement.isContentEditable || inputElement.contentEditable === 'true')) ||
                    (inputElement.isContentEditable || inputElement.contentEditable === 'true')) { // General contentEditable case
             console.log(`[SimpleInteraction INJECTED] Setting prompt for contentEditable element (${llmType})`);
@@ -4196,10 +5078,9 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             console.log(`[SimpleInteraction INJECTED] Used document.execCommand('insertText'). Success: ${insertSuccess}.`);
             inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true })); // Ensure input event fires for contentEditable too
         } else { // Fallback for other input types (e.g. Gemini using a textarea which is rare)
-            console.log(`[SimpleInteraction INJECTED] Setting prompt for standard input/textarea element (${llmType})`);
-            inputElement.value = promptText;
-            inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-            inputElement.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            console.log(`[SimpleInteraction INJECTED] Setting prompt for standard input element (${llmType})`);
+            setNativeValue(inputElement, promptText);
+            dispatchInputEvents(inputElement, promptText);
         }
 
         // Verification Step
@@ -4242,6 +5123,28 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                 ],
                 stopSelectors: [
                     'button[aria-label*="stop" i]',
+                    'button[data-testid*="stop" i]'
+                ]
+            },
+            claude: {
+                sendSelectors: [
+                    // Claude uses a <button type="button"> with localized aria-label (e.g. "Send message", "Envoyer le message").
+                    // Prefer "message" which is stable across at least EN/FR, plus a few common verb variants.
+                    'button[aria-label*="message" i]',
+                    'button[aria-label*="send" i]',
+                    'button[aria-label*="envoyer" i]',
+                    'button[type="submit"]'
+                ],
+                sendFallbackSelectors: [
+                    'button[aria-label*="message" i]',
+                    'button[type="submit"]',
+                    'button[aria-label*="send" i]',
+                    'button[aria-label*="envoyer" i]'
+                ],
+                stopSelectors: [
+                    'button[aria-label*="stop" i]',
+                    'button[aria-label*="cancel" i]',
+                    'button[title*="stop" i]',
                     'button[data-testid*="stop" i]'
                 ]
             },
@@ -4289,7 +5192,7 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             if (!el || !(el instanceof Element) || !el.isConnected) return false;
             const style = window.getComputedStyle(el);
             if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
-            if (style.opacity === '0' || style.pointerEvents === 'none') return false;
+            if (style.opacity === '0') return false;
             const rect = el.getBoundingClientRect();
             return rect.width > 2 && rect.height > 2;
         };
@@ -4305,7 +5208,11 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
 
         const resolveComposerRoot = () => {
             const inputEl = resolveInputElement();
-            const root = inputEl?.closest?.('form') || inputEl?.closest?.('main') || document.body;
+            const root = inputEl?.closest?.('form')
+                || inputEl?.closest?.('fieldset')
+                || inputEl?.closest?.('[role="form"]')
+                || inputEl?.closest?.('main')
+                || document.body;
             return root && root.isConnected ? root : document.body;
         };
 
@@ -4389,6 +5296,77 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, composed: true }));
         };
 
+        const waitForEnabledSendButton = async ({ timeoutMs = 1500, pollMs = 120 } = {}) => {
+            const startedAt = Date.now();
+            while (Date.now() - startedAt < timeoutMs) {
+                const btn = findSendButton({ allowDisabled: false, includeFallback: true });
+                if (btn) return btn;
+                await sleep(pollMs);
+            }
+            return null;
+        };
+
+        const getButtonDebugInfo = (btn) => {
+            if (!btn) return null;
+            let pointerEvents = '';
+            try {
+                pointerEvents = window.getComputedStyle(btn)?.pointerEvents || '';
+            } catch (error) {
+                pointerEvents = '';
+            }
+            return {
+                tag: btn.tagName.toLowerCase(),
+                type: btn.getAttribute('type') || '',
+                ariaLabel: btn.getAttribute('aria-label') || '',
+                disabled: Boolean(btn.disabled),
+                ariaDisabled: btn.getAttribute('aria-disabled') || null,
+                pointerEvents
+            };
+        };
+
+        const tryRequestSubmit = async () => {
+            const el = resolveInputElement();
+            const form = el?.closest?.('form') || null;
+            if (!form || typeof form.requestSubmit !== 'function') return false;
+            try {
+                form.requestSubmit();
+                return true;
+            } catch (error) {
+                return false;
+            }
+        };
+
+        const tryForceEnableAndClick = async (btn) => {
+            if (!btn) return false;
+            let prevDisabled = null;
+            let hadDisabledAttr = false;
+            try {
+                prevDisabled = Boolean(btn.disabled);
+                hadDisabledAttr = btn.hasAttribute('disabled');
+                btn.disabled = false;
+                btn.removeAttribute('disabled');
+                if ((btn.getAttribute('aria-disabled') || '').toLowerCase() === 'true') {
+                    btn.setAttribute('aria-disabled', 'false');
+                }
+            } catch (error) {
+                // ignore
+            }
+
+            clickSendButton(btn);
+            const acknowledged = await waitForSendAcknowledged({ timeoutMs: 8000 });
+            if (acknowledged) return true;
+
+            if (prevDisabled !== null && prevDisabled) {
+                try {
+                    btn.disabled = true;
+                    if (hadDisabledAttr) btn.setAttribute('disabled', '');
+                } catch (error) {
+                    // ignore
+                }
+            }
+            return false;
+        };
+
         const hasAttachments = attachmentPayloads.length > 0;
         const wantsLongReadyWait = (() => {
             if (hasAttachments) return true;
@@ -4397,6 +5375,45 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
         })();
         const readyTimeoutMs = wantsLongReadyWait ? 120000 : 6000;
         const maxAttempts = wantsLongReadyWait ? 3 : 2;
+
+        if (llmType === 'claude') {
+            const enabledButton = await waitForEnabledSendButton({ timeoutMs: 1800 });
+            if (enabledButton) {
+                console.log('[SimpleInteraction INJECTED] Clicking enabled Send for claude.', getButtonDebugInfo(enabledButton));
+                clickSendButton(enabledButton);
+                const acknowledged = await waitForSendAcknowledged({ timeoutMs: 10000 });
+                if (acknowledged) {
+                    return { success: true, method: 'button_click_for_claude', details: { stage: 'send', attempts: 1 } };
+                }
+            }
+
+            const disabledButton = findSendButton({ allowDisabled: true, includeFallback: true });
+            console.warn('[SimpleInteraction INJECTED] Claude send button remained disabled; attempting fallback send.', {
+                inputLen: getInputText().trim().length,
+                disabledButton: getButtonDebugInfo(disabledButton)
+            });
+
+            const submitted = await tryRequestSubmit();
+            if (submitted) {
+                const acknowledged = await waitForSendAcknowledged({ timeoutMs: 10000 });
+                if (acknowledged) {
+                    return { success: true, method: 'form_requestsubmit_for_claude', details: { stage: 'send', attempts: 1 } };
+                }
+            }
+
+            if (await tryForceEnableAndClick(disabledButton)) {
+                return { success: true, method: 'forced_click_for_claude', details: { stage: 'send', attempts: 1 } };
+            }
+
+            pressEnterToSend();
+            if (await waitForSendAcknowledged({ timeoutMs: 10000 })) {
+                return { success: true, method: 'enter_key_for_claude', details: { stage: 'send', attempts: 1 } };
+            }
+
+            const errMsg = '[SimpleInteraction INJECTED] Failed to send message for claude: send button stayed disabled and no acknowledgement after fallbacks.';
+            console.error(errMsg, { disabledButton: getButtonDebugInfo(disabledButton) });
+            return { success: false, error: errMsg, details: { stage: 'send_not_acknowledged', provider: 'claude' } };
+        }
 
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
             if (wantsLongReadyWait || attempt > 1) {
@@ -4441,57 +5458,50 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
 
 
 async function checkConnectionStatus() {
-    const status = {
-        gemini: false,
-        chatgpt: false
-    };
+    const status = {};
+    const providers = getSupportedProviderKeys();
+    if (providers.length === 0) {
+        status.chatgpt = false;
+        status.gemini = false;
+        return status;
+    }
+    providers.forEach((provider) => {
+        status[provider] = false;
+    });
     
     console.log('[MLC Background] Starting connection status check...');
     
     try {
         const profilesState = await loadTabProfiles();
-        const geminiProfile = profilesState.defaults.gemini ? findProfileById(profilesState, profilesState.defaults.gemini) : null;
-        const chatgptProfile = profilesState.defaults.chatgpt ? findProfileById(profilesState, profilesState.defaults.chatgpt) : null;
+        for (const provider of providers) {
+            const defaultProfileId = profilesState.defaults?.[provider];
+            const profile = defaultProfileId ? findProfileById(profilesState, defaultProfileId) : null;
 
-        const geminiTab = geminiProfile?.tabId
-            ? { id: geminiProfile.tabId }
-            : await findLLMTab('gemini');
-        const chatgptTab = chatgptProfile?.tabId
-            ? { id: chatgptProfile.tabId }
-            : await findLLMTab('chatgpt');
+            let tab = null;
+            if (profile?.tabId) {
+                tab = { id: profile.tabId };
+            } else {
+                tab = await findLLMTab(provider);
+            }
 
-        console.log('[MLC Background] Gemini tab result:', geminiTab ? `Found tab ${geminiTab.id}` : 'Not found');
-        console.log('[MLC Background] ChatGPT tab result:', chatgptTab ? `Found tab ${chatgptTab.id}` : 'Not found');
-        
-        // Test if content scripts are actually loaded by trying to ping them
-        if (geminiTab) {
-            try {
-                console.log('[MLC Background] Pinging Gemini content script...');
-                const response = await chrome.tabs.sendMessage(geminiTab.id, { type: 'PING' });
-                console.log('[MLC Background] Gemini ping response:', response);
-                status.gemini = true;
-                console.log('[MLC Background] Gemini tab responsive:', geminiTab.id);
-            } catch (error) {
-                console.log('[MLC Background] Gemini tab found but content script not responsive:', error.message);
-                status.gemini = false;
+            console.log(`[MLC Background] ${formatLLMLabel(provider)} tab result:`, tab ? `Found tab ${tab.id}` : 'Not found');
+
+            if (!tab) {
+                console.log(`[MLC Background] No ${formatLLMLabel(provider)} tab found`);
+                status[provider] = false;
+                continue;
             }
-        } else {
-            console.log('[MLC Background] No Gemini tab found');
-        }
-        
-        if (chatgptTab) {
+
             try {
-                console.log('[MLC Background] Pinging ChatGPT content script...');
-                const response = await chrome.tabs.sendMessage(chatgptTab.id, { type: 'PING' });
-                console.log('[MLC Background] ChatGPT ping response:', response);
-                status.chatgpt = true;
-                console.log('[MLC Background] ChatGPT tab responsive:', chatgptTab.id);
+                console.log(`[MLC Background] Pinging ${formatLLMLabel(provider)} content script...`);
+                const response = await chrome.tabs.sendMessage(tab.id, { type: 'PING' });
+                console.log(`[MLC Background] ${formatLLMLabel(provider)} ping response:`, response);
+                status[provider] = true;
+                console.log(`[MLC Background] ${formatLLMLabel(provider)} tab responsive:`, tab.id);
             } catch (error) {
-                console.log('[MLC Background] ChatGPT tab found but content script not responsive:', error.message);
-                status.chatgpt = false;
+                console.log(`[MLC Background] ${formatLLMLabel(provider)} tab found but content script not responsive:`, error.message);
+                status[provider] = false;
             }
-        } else {
-            console.log('[MLC Background] No ChatGPT tab found');
         }
 
     } catch (error) {

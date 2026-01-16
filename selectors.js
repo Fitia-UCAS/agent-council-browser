@@ -11,6 +11,14 @@ const LLM_SELECTORS = {
     lastResponseBlock: '.response-block:last-child, .message:last-child, [data-testid="response"]:last-child',
     doneIndicator: '.generation-complete, [aria-label*="Stop"], button[data-testid="stop-button"][style*="display: none"]'
   },
+
+  claude: {
+    input: 'textarea, .ProseMirror[contenteditable="true"], [contenteditable="true"][role="textbox"], [role="textbox"]',
+    sendButton: 'button[aria-label*="message" i], button[aria-label*="Send" i], button[aria-label*="Envoyer" i], button[type="submit"]',
+    responseArea: 'main, [role="main"]',
+    lastResponseBlock: '[data-testid*="assistant" i], [data-testid*="message" i], article, [role="article"]',
+    doneIndicator: 'button[aria-label*="Stop" i], button[aria-label*="Cancel" i], button[data-testid*="stop" i]'
+  },
   
   chatgpt: {
     input: '#prompt-textarea, textarea[data-testid="prompt-textarea"], textarea[placeholder*="Message"], textarea[data-id="root"], textarea, [contenteditable="true"]',
@@ -38,4 +46,13 @@ function validateSelector(selector, context) {
       error: error.message
     };
   }
+}
+
+// Optional globals/exports for ad-hoc debugging + tests.
+if (typeof window !== 'undefined') {
+  window.LLM_SELECTORS = LLM_SELECTORS;
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { LLM_SELECTORS, validateSelector };
 }

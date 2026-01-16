@@ -9,10 +9,18 @@ let LLM_SELECTORS;
 // Load selectors.js for testing
 async function loadSelectors() {
   try {
-    // Import the selectors module
-    const module = await import('../selectors.js');
-    LLM_SELECTORS = module.LLM_SELECTORS;
-    return LLM_SELECTORS;
+    if (typeof window !== 'undefined' && window.LLM_SELECTORS) {
+      LLM_SELECTORS = window.LLM_SELECTORS;
+      return LLM_SELECTORS;
+    }
+
+    if (typeof require !== 'undefined') {
+      const module = require('../selectors.js');
+      LLM_SELECTORS = module.LLM_SELECTORS;
+      return LLM_SELECTORS;
+    }
+
+    throw new Error('Cannot load selectors.js (no window.LLM_SELECTORS and no require())');
   } catch (error) {
     console.error('Failed to load selectors.js:', error);
     return null;
@@ -29,7 +37,7 @@ const selectorsTests = {
     }
     
     // Test that we have both LLM providers
-    const expectedProviders = ['gemini', 'chatgpt'];
+    const expectedProviders = ['gemini', 'chatgpt', 'claude'];
     for (const provider of expectedProviders) {
       if (!LLM_SELECTORS[provider]) {
         throw new Error(`Missing provider: ${provider}`);
@@ -100,12 +108,43 @@ const selectorsTests = {
     return true;
   },
 
+  testClaudeSelectors() {
+    console.log('Testing Claude selectors...');
+    const claude = LLM_SELECTORS.claude;
+    
+    const requiredSelectors = [
+      'input',
+      'sendButton', 
+      'responseArea',
+      'lastResponseBlock',
+      'doneIndicator'
+    ];
+    
+    for (const selector of requiredSelectors) {
+      if (!claude[selector]) {
+        throw new Error(`Missing Claude selector: ${selector}`);
+      }
+      
+      if (typeof claude[selector] !== 'string') {
+        throw new Error(`Claude selector ${selector} must be a string`);
+      }
+      
+      if (claude[selector].trim() === '') {
+        throw new Error(`Claude selector ${selector} cannot be empty`);
+      }
+    }
+    
+    console.log('✅ All Claude selectors present and valid');
+    return true;
+  },
+
   testSelectorFormat() {
     console.log('Testing selector format...');
     
     const allSelectors = [
       ...Object.values(LLM_SELECTORS.gemini),
-      ...Object.values(LLM_SELECTORS.chatgpt)
+      ...Object.values(LLM_SELECTORS.chatgpt),
+      ...Object.values(LLM_SELECTORS.claude)
     ];
     
     for (const selector of allSelectors) {
@@ -124,10 +163,12 @@ const selectorsTests = {
     
     const geminiSelectors = Object.values(LLM_SELECTORS.gemini);
     const chatgptSelectors = Object.values(LLM_SELECTORS.chatgpt);
+    const claudeSelectors = Object.values(LLM_SELECTORS.claude);
     
     // Check for duplicates within each provider
     const geminiSet = new Set(geminiSelectors);
     const chatgptSet = new Set(chatgptSelectors);
+    const claudeSet = new Set(claudeSelectors);
     
     if (geminiSet.size !== geminiSelectors.length) {
       throw new Error('Duplicate selectors found in Gemini configuration');
@@ -135,6 +176,10 @@ const selectorsTests = {
     
     if (chatgptSet.size !== chatgptSelectors.length) {
       throw new Error('Duplicate selectors found in ChatGPT configuration');
+    }
+
+    if (claudeSet.size !== claudeSelectors.length) {
+      throw new Error('Duplicate selectors found in Claude configuration');
     }
     
     console.log('✅ All selectors are unique within their providers');
@@ -185,6 +230,7 @@ async function runSelectorsTests() {
     selectorsTests.testSelectorsStructure();
     selectorsTests.testGeminiSelectors();
     selectorsTests.testChatGPTSelectors();
+    selectorsTests.testClaudeSelectors();
     selectorsTests.testSelectorFormat();
     selectorsTests.testSelectorUniqueness();
     selectorsTests.testMetadata();
