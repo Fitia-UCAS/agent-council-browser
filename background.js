@@ -9,6 +9,12 @@ try {
     console.error('[MLC History] Failed to import history store:', error);
 }
 
+try {
+    importScripts('debatePromptUtils.js');
+} catch (error) {
+    console.error('[MLC Debate] Failed to import debate prompt utils:', error);
+}
+
 // Extension installation
 chrome.runtime.onInstalled.addListener(() => {
     console.log('[MLC Background] Multi-LLM Coder extension installed/updated.');
@@ -2696,16 +2702,48 @@ async function buildDebatePrompt(session, turnIndex) {
             ? renderedInitialInstruction
             : (isFinalTurn ? renderedFinal : renderedIntermediary);
 
+        const utils = globalThis.MLCDebatePromptUtils;
+        if (utils && typeof utils.buildMultiProviderDebatePrompt === 'function') {
+            return utils.buildMultiProviderDebatePrompt({
+                header,
+                roundIndex,
+                rounds: session.rounds,
+                expectedProvider: expectedLLM,
+                expectedLabel,
+                messages: Array.isArray(session?.messages) ? session.messages : [],
+                roleLabelFn: describeMessageRoleForContext,
+                userMessageOverride: userMsg,
+                instruction,
+                maxChars: 48000
+            }).trim();
+        }
+
+        // Fallback (should not normally run): include all transcript messages since this provider last responded.
+        const messages = Array.isArray(session?.messages) ? session.messages : [];
+        let lastOwnIndex = -1;
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+            if (messages[i]?.role === expectedLLM) {
+                lastOwnIndex = i;
+                break;
+            }
+        }
+        const delta = messages.slice(Math.max(0, lastOwnIndex + 1)).map((msg) => {
+            if (!msg) return null;
+            if (msg.role === 'user') return { ...msg, content: userMsg };
+            return msg;
+        }).filter(Boolean);
+        const deltaText = formatTranscriptForPrompt(delta, { maxChars: 48000 }).trim();
+
         const blocks = [
             header,
             '',
             `Iteration ${roundIndex}/${session.rounds}`,
             '',
-            'User question:',
-            userMsg
+            lastOwnIndex < 0 ? 'Conversation so far:' : 'New messages since your last turn:',
+            deltaText || '[No new messages]',
+            '',
+            instruction
         ];
-        if (turnIndex > 1) blocks.push('', `Previous ${otherLabel} answer:`, safeOtherResponse);
-        blocks.push('', instruction);
         return blocks.join('\n').trim();
     }
 

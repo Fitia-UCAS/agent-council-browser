@@ -4,7 +4,7 @@
   "description": "Send prompts to multiple LLM web UIs (ChatGPT, Gemini, Claude, Grok) simultaneously and compare responses side-by-side",
   "main": "background.js",
     "scripts": {
-      "test": "node tests/test-capture-heuristics.js"
+      "test": "node tests/test-capture-heuristics.js && node tests/test-debate-prompt-utils.js"
     },
     "author": "Multi-LLM Coder Team",
     "license": "ISC"
