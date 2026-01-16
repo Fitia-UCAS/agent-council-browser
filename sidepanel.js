@@ -54,6 +54,7 @@ const ATTACHMENTS_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 
 let attachmentsModalResolver = null;
 let passphrasePrompt = null;
+let sessionWatchdogInterval = null;
 
 function storageGet(keys) {
     return new Promise((resolve) => {
@@ -658,7 +659,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.routeDone = document.getElementById('route-done');
 
     elements.emptyOpenRoute = document.getElementById('empty-open-route');
-    elements.emptyOpenSettings = document.getElementById('empty-open-settings');
 
     elements.attachmentInput = document.getElementById('attachment-input');
     elements.attachmentButton = document.getElementById('attachment-button');
@@ -934,10 +934,6 @@ function bindEvents() {
             openRoutePopover();
             elements.routeButton?.focus();
         });
-    }
-
-    if (elements.emptyOpenSettings) {
-        elements.emptyOpenSettings.addEventListener('click', openSettingsDrawer);
     }
 
     if (elements.connectionsList) {
@@ -1783,6 +1779,15 @@ function applyRunDefaultsFromActiveChat() {
     if (runConfig) {
         applyRunConfigDefaults(runConfig);
     } else {
+        const messages = Array.isArray(state.activeChat?.messages) ? state.activeChat.messages : [];
+        const isEmptyChat = messages.length === 0;
+        if (isEmptyChat) {
+            setRoute(getDefaultRoute(), { persist: false });
+            if (!isRoutePopoverOpen()) {
+                openRoutePopover();
+            }
+            return;
+        }
         renderRouteUi();
     }
 }
@@ -1826,6 +1831,7 @@ function setSessionState({ running, paused }) {
     updateAttachmentsUi();
     updatePausedActions();
     updateSendState();
+    updateSessionWatchdog();
 }
 
 function setSessionStatus(text) {
@@ -1886,6 +1892,28 @@ function requestHistoryStatus({ hydrateChats = false, promptUnlock = false } = {
 
 function requestActiveSession() {
     sendMessage({ type: 'GET_ACTIVE_SESSION' });
+}
+
+function updateSessionWatchdog() {
+    const locked = state.running || state.paused;
+    if (!locked) {
+        if (sessionWatchdogInterval) {
+            window.clearInterval(sessionWatchdogInterval);
+            sessionWatchdogInterval = null;
+        }
+        return;
+    }
+
+    if (sessionWatchdogInterval) return;
+    requestActiveSession();
+    sessionWatchdogInterval = window.setInterval(() => {
+        if (!(state.running || state.paused)) {
+            window.clearInterval(sessionWatchdogInterval);
+            sessionWatchdogInterval = null;
+            return;
+        }
+        requestActiveSession();
+    }, 2000);
 }
 
 function requestChatsState() {
