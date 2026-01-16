@@ -715,6 +715,18 @@ textarea:focus {
   background: rgba(20, 45, 36, 0.8);
 }
 
+.message.claude {
+  align-self: flex-start;
+  border-color: rgba(168, 85, 247, 0.4);
+  background: rgba(44, 23, 66, 0.78);
+}
+
+.message.grok {
+  align-self: flex-start;
+  border-color: rgba(244, 63, 94, 0.4);
+  background: rgba(60, 22, 32, 0.78);
+}
+
 .message-meta {
   display: flex;
   justify-content: space-between;

@@ -1,8 +1,8 @@
 {
-    "name": "multi-llm-coder",
-    "version": "0.1.0",
-    "description": "Send prompts to multiple LLM providers (Gemini and ChatGPT) simultaneously and compare responses side-by-side",
-    "main": "background.js",
+  "name": "multi-llm-coder",
+  "version": "0.1.0",
+  "description": "Send prompts to multiple LLM web UIs (ChatGPT, Gemini, Claude, Grok) simultaneously and compare responses side-by-side",
+  "main": "background.js",
     "scripts": {
       "test": "node tests/test-capture-heuristics.js"
     },

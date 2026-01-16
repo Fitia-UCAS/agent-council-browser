@@ -9,9 +9,20 @@ let manifest;
 // Load manifest.json for testing
 async function loadManifest() {
   try {
-    const response = await fetch('../manifest.json');
-    manifest = await response.json();
-    return manifest;
+    if (typeof window !== 'undefined' && typeof fetch === 'function') {
+      const response = await fetch('../manifest.json');
+      manifest = await response.json();
+      return manifest;
+    }
+
+    if (typeof require !== 'undefined') {
+      // Node.js fallback
+      // eslint-disable-next-line global-require, import/no-dynamic-require
+      manifest = require('../manifest.json');
+      return manifest;
+    }
+
+    throw new Error('Cannot load manifest.json (no fetch() and no require())');
   } catch (error) {
     console.error('Failed to load manifest.json:', error);
     return null;
@@ -73,7 +84,8 @@ const manifestTests = {
       'https://gemini.google.com/*',
       'https://chat.openai.com/*',
       'https://chatgpt.com/*',
-      'https://claude.ai/*'
+      'https://claude.ai/*',
+      'https://grok.com/*'
     ];
     
     if (!manifest.host_permissions) {
@@ -177,4 +189,11 @@ if (typeof module !== 'undefined' && module.exports) {
 // Auto-run if this file is loaded directly
 if (typeof window !== 'undefined') {
   document.addEventListener('DOMContentLoaded', runManifestTests);
+}
+
+// Auto-run in Node.js when executed directly (e.g. `node tests/test-manifest.js`)
+if (typeof window === 'undefined' && typeof require !== 'undefined' && require.main === module) {
+  runManifestTests().then((ok) => {
+    if (!ok) process.exitCode = 1;
+  });
 }

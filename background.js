@@ -583,6 +583,22 @@ function clearSessionAttachments(sessionId) {
     }
 }
 
+function notifyAttachmentFallback(session, provider) {
+    const sessionId = session?.sessionId || null;
+    if (!sessionId) return;
+    const label = formatLLMLabel(provider);
+    const timestamp = Date.now();
+    const content = `Attachment upload failed for ${label}. Sent this message without files. If ${label} needs the file, attach it manually in the ${label} tab and resend.`;
+    sendMessageToPopup({
+        type: 'UI_MESSAGE_ADD',
+        chatId: session?.chatId || null,
+        sessionId,
+        role: 'system',
+        content,
+        timestamp
+    });
+}
+
 function resetDebateState() {
     activeDebateState = { ...defaultDebateState };
     console.log('[MLC Debate] State reset.');
@@ -739,13 +755,9 @@ function sanitizeProfilesState(state) {
 
 function getExpectedHosts(provider) {
     const normalized = normalizeProvider(provider);
-    if (normalized === 'gemini') {
-        return ['gemini.google.com'];
-    }
-    if (normalized === 'claude') {
-        return ['claude.ai'];
-    }
-    return ['chatgpt.com', 'chat.openai.com', 'openai.com', 'platform.openai.com'];
+    const hosts = PROVIDER_METADATA?.[normalized]?.expectedHosts;
+    if (Array.isArray(hosts) && hosts.length > 0) return hosts;
+    return PROVIDER_METADATA.chatgpt.expectedHosts;
 }
 
 function isExpectedHost(provider, url) {
@@ -1112,9 +1124,7 @@ async function focusTab(tabId) {
 
 async function openProviderTab(provider, options = {}) {
     const normalizedProvider = normalizeProvider(provider);
-    const url = normalizedProvider === 'gemini'
-        ? 'https://gemini.google.com/'
-        : (normalizedProvider === 'claude' ? 'https://claude.ai/new' : 'https://chatgpt.com/');
+    const url = PROVIDER_METADATA?.[normalizedProvider]?.openUrl || PROVIDER_METADATA.chatgpt.openUrl;
     const focus = options.focus !== false;
     const tab = await chrome.tabs.create({
         url,
@@ -1368,6 +1378,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             enqueueDebateResponse(message, 'Claude response');
             handleClaudeResponse(message);
             sendResponse({ status: 'claude_response_received', type: message.type });
+            break;
+        case 'GROK_RESPONSE_CAPTURED':
+            enqueueDebateResponse(message, 'Grok response');
+            handleGrokResponse(message);
+            sendResponse({ status: 'grok_response_received', type: message.type });
             break;
         case 'MLC_RESPONSE_CAPTURED':
             enqueueDebateResponse(message, 'response');
@@ -1992,10 +2007,45 @@ function getTurnLLM(session, turnIndex) {
 
 function formatLLMLabel(llmType) {
     const normalized = normalizeProviderKey(llmType);
+    const label = PROVIDER_METADATA?.[normalized]?.label;
+    if (label) return label;
     if (normalized === 'gemini') return 'Gemini';
     if (normalized === 'claude') return 'Claude';
+    if (normalized === 'grok') return 'Grok';
     return 'ChatGPT';
 }
+
+const PROVIDER_METADATA = {
+    chatgpt: {
+        label: 'ChatGPT',
+        openUrl: 'https://chatgpt.com/',
+        expectedHosts: ['chatgpt.com', 'chat.openai.com', 'openai.com', 'platform.openai.com'],
+        urlPatterns: [
+            '*://chat.openai.com/*',
+            '*://chatgpt.com/*',
+            '*://openai.com/chatgpt*',
+            '*://platform.openai.com/*'
+        ]
+    },
+    gemini: {
+        label: 'Gemini',
+        openUrl: 'https://gemini.google.com/',
+        expectedHosts: ['gemini.google.com'],
+        urlPatterns: ['*://gemini.google.com/*']
+    },
+    claude: {
+        label: 'Claude',
+        openUrl: 'https://claude.ai/new',
+        expectedHosts: ['claude.ai'],
+        urlPatterns: ['*://claude.ai/*', '*://*.claude.ai/*']
+    },
+    grok: {
+        label: 'Grok',
+        openUrl: 'https://grok.com/',
+        expectedHosts: ['grok.com'],
+        urlPatterns: ['*://grok.com/*', '*://*.grok.com/*']
+    }
+};
 
 const PROVIDER_CAPABILITIES = {
     chatgpt: {
@@ -2015,6 +2065,12 @@ const PROVIDER_CAPABILITIES = {
     claude: {
         // Claude (claude.ai) exposes a real <input type="file"> in the composer.
         // We attempt programmatic upload via DataTransfer -> input.files + change/input events.
+        attachments: {
+            mode: 'auto'
+        }
+    },
+    grok: {
+        // Grok (grok.com) attachment automation is best-effort. If UI automation fails, we fall back to text-only.
         attachments: {
             mode: 'auto'
         }
@@ -3140,6 +3196,7 @@ async function sendParallelTurn(session, { providers: providersOverride } = {}) 
                 || String(error?.message || '').includes('Attachment upload failed');
             if (attachmentsToSend && attachmentsToSend.length > 0 && isAttachmentFailure) {
                 try {
+                    notifyAttachmentFallback(session, provider);
                     if (sessionHasAttachments) {
                         markSessionAttachmentsSent(session, provider);
                     }
@@ -3232,6 +3289,7 @@ async function sendDebateTurn(session) {
         if (attachmentsToSend && attachmentsToSend.length > 0 && isAttachmentFailure) {
             // Attach failed (DOM drift / provider change). Retry immediately without attachments so the run continues.
             try {
+                notifyAttachmentFallback(session, expectedLLM);
                 markSessionAttachmentsSent(session, expectedLLM);
                 await injectAndExecute(resolution.tabId, expectedLLM, promptText, {
                     sessionId: session.sessionId,
@@ -3647,6 +3705,22 @@ function handleClaudeResponse(message) {
     });
 }
 
+function handleGrokResponse(message) {
+    if (message.sessionId) return;
+
+    if (!message.content || message.content.trim().length === 0) {
+        console.log('[MLC] Received empty Grok response, ignoring.');
+        return;
+    }
+
+    sendMessageToPopup({
+        type: 'LLM_RESPONSE',
+        llm: 'grok',
+        content: message.content,
+        contentHtml: message.contentHtml || undefined
+    });
+}
+
 function triggerFollowUpIfReady() {
     if (
         activeFollowUpState.originalSourceLLM === 'chatgpt' &&
@@ -3738,6 +3812,16 @@ function simpleInteraction_InjectOnly(prompt, llmType) {
                 'div[contenteditable="true"][role="textbox"]',
                 'div[contenteditable="true"]',
                 '[contenteditable="true"]'
+            ],
+            grok: [
+                'textarea[aria-label*="message" i]',
+                'textarea[placeholder*="message" i]',
+                'textarea[placeholder*="ask" i]',
+                'textarea',
+                'div[contenteditable="true"][role="textbox"]',
+                '[contenteditable="true"][role="textbox"]',
+                '[contenteditable="true"]',
+                '[role="textbox"]'
             ]
         };
         const selectors = inputSelectors[llmType] || [];
@@ -3805,18 +3889,8 @@ async function processLLM(llmType, prompt, context = {}) {
 }
 
 async function listLLMTabs(llmType) {
-    const urlPatterns = {
-        gemini: ['*://gemini.google.com/*'],
-        claude: ['*://claude.ai/*', '*://*.claude.ai/*'],
-        chatgpt: [
-            '*://chat.openai.com/*',
-            '*://chatgpt.com/*',
-            '*://openai.com/chatgpt*',
-            '*://platform.openai.com/*'
-        ]
-    };
-
-    const patterns = urlPatterns[llmType];
+    const normalized = normalizeProviderKey(llmType);
+    const patterns = PROVIDER_METADATA?.[normalized]?.urlPatterns;
     if (!patterns) {
         throw new Error(`[MLC Background] Unknown LLM type for listLLMTabs: ${llmType}`);
     }
@@ -5088,6 +5162,18 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                 'div[contenteditable="true"][role="textbox"]',
                 'div[contenteditable="true"]',
                 '[contenteditable="true"]'
+            ],
+            grok: [
+                // Grok UI may use textarea or a contentEditable editor; prefer explicit roles/aria when present.
+                'textarea[aria-label*="message" i]',
+                'textarea[placeholder*="message" i]',
+                'textarea[placeholder*="ask" i]',
+                'textarea[placeholder*="chat" i]',
+                'textarea',
+                'div[contenteditable="true"][role="textbox"]',
+                '[contenteditable="true"][role="textbox"]',
+                '[contenteditable="true"]',
+                '[role="textbox"]'
             ]
         };
 
@@ -5098,8 +5184,36 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             return { success: false, error: errMsg, details: { stage: 'find_input_selectors' } };
         }
 
+        const pickBestVisibleElement = (selector) => {
+            let nodes = [];
+            try {
+                nodes = Array.from(document.querySelectorAll(selector));
+            } catch (error) {
+                nodes = [];
+            }
+            if (nodes.length === 0) return null;
+
+            let best = null;
+            let bestBottom = -Infinity;
+            for (const node of nodes) {
+                if (!(node instanceof HTMLElement)) continue;
+                const style = window.getComputedStyle(node);
+                if (!style || style.display === 'none' || style.visibility === 'hidden') continue;
+                const rect = node.getBoundingClientRect();
+                if (!rect || rect.width < 4 || rect.height < 4) continue;
+                if (rect.bottom < 0 || rect.right < 0) continue;
+                if (rect.top > window.innerHeight + 200) continue;
+                const bottom = Number.isFinite(rect.bottom) ? rect.bottom : 0;
+                if (bottom >= bestBottom) {
+                    bestBottom = bottom;
+                    best = node;
+                }
+            }
+            return best;
+        };
+
         for (const selector of currentInputSelectors) {
-            inputElement = document.querySelector(selector);
+            inputElement = pickBestVisibleElement(selector);
             if (inputElement) {
                 console.log(`[SimpleInteraction INJECTED] Found input for ${llmType} with: ${selector}`, inputElement);
                 break;
@@ -5218,6 +5332,24 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                 ],
                 stopSelectors: [
                     'button[aria-label*="stop" i]',
+                    'button[data-testid*="stop" i]'
+                ]
+            },
+            grok: {
+                sendSelectors: [
+                    'button[aria-label="Send message" i]',
+                    'button[data-testid*="send" i]',
+                    'button[title*="send" i]',
+                    'button[type="submit"]'
+                ],
+                sendFallbackSelectors: [
+                    'button[aria-label*="send" i]',
+                    'button[type="submit"]'
+                ],
+                stopSelectors: [
+                    'button[aria-label*="stop" i]',
+                    'button[aria-label*="cancel" i]',
+                    'button[title*="stop" i]',
                     'button[data-testid*="stop" i]'
                 ]
             },

@@ -26,6 +26,14 @@ const LLM_SELECTORS = {
     responseArea: '[data-testid="conversation-turn"], .conversation-content, [role="main"]',
     lastResponseBlock: '[data-testid="conversation-turn"]:last-child .markdown, .message:last-child, .response:last-child',
     doneIndicator: 'button[aria-label*="Stop"]:not([disabled]), .stop-button:not([style*="display: none"])'
+  },
+
+  grok: {
+    input: 'textarea, [contenteditable="true"][role="textbox"], [role="textbox"]',
+    sendButton: 'button[aria-label*="Send" i], button[type="submit"]',
+    responseArea: 'main, [role="main"]',
+    lastResponseBlock: '[data-testid*="assistant" i], [data-testid*="message" i], article, [role="article"]',
+    doneIndicator: 'button[aria-label*="Stop" i], button[aria-label*="Cancel" i], button[data-testid*="stop" i]'
   }
 };
 
