@@ -116,7 +116,7 @@ function sanitizeRoute(input) {
 
     let kind = 'single';
     if (providers.length >= 2) {
-        if (requestedKind === 'debate' && providers.length === 2) kind = 'debate';
+        if (requestedKind === 'debate') kind = 'debate';
         else kind = 'parallel';
     }
 
@@ -283,7 +283,7 @@ function setRouteKind(kind) {
     const providers = route.providers || [];
     if (providers.length < 2) return;
     const normalizedKind = String(kind || '').trim().toLowerCase();
-    if (normalizedKind === 'debate' && providers.length !== 2) return;
+    if (normalizedKind === 'debate' && providers.length < 2) return;
     if (normalizedKind !== 'parallel' && normalizedKind !== 'debate') return;
     setRoute({ ...route, kind: normalizedKind });
 }
@@ -306,7 +306,7 @@ function applyRoutePreset(preset) {
     if (kind === 'debate') {
         const supported = getSupportedProviders();
         const fallbackPair = supported.length >= 2 ? supported.slice(0, 2) : ['chatgpt', 'gemini'];
-        const providers = route.providers.length === 2 ? route.providers : fallbackPair;
+        const providers = route.providers.length >= 2 ? route.providers : fallbackPair;
         setRoute({ kind: 'debate', providers, rounds: route.rounds || 3 });
     }
 }
@@ -323,8 +323,10 @@ function formatRouteSummary(route) {
     if (providers.length === 0) return 'Select providers…';
     if (providers.length === 1) return formatProviderLabel(providers[0]);
     const names = providers.map(formatProviderLabel);
-    if (route?.kind === 'debate' && providers.length === 2) {
-        return `Debate (${names[0]} ↔ ${names[1]}, ${route.rounds || 1})`;
+    if (route?.kind === 'debate' && providers.length >= 2) {
+        const rounds = route.rounds || 1;
+        const chain = names.length === 2 ? `${names[0]} ↔ ${names[1]}` : names.join(' ↔ ');
+        return `Debate (${chain}, ${rounds})`;
     }
     return names.join(' + ');
 }
@@ -342,17 +344,17 @@ function renderRouteUi() {
     }
 
     if (elements.routeModeDebate) {
-        elements.routeModeDebate.hidden = providerCount !== 2;
+        elements.routeModeDebate.hidden = providerCount < 2;
     }
 
     if (elements.routeModeParallel) {
         elements.routeModeParallel.classList.toggle('is-active', providerCount >= 2 && route.kind === 'parallel');
     }
     if (elements.routeModeDebate) {
-        elements.routeModeDebate.classList.toggle('is-active', providerCount === 2 && route.kind === 'debate');
+        elements.routeModeDebate.classList.toggle('is-active', providerCount >= 2 && route.kind === 'debate');
     }
 
-    const debateEnabled = providerCount === 2 && route.kind === 'debate';
+    const debateEnabled = providerCount >= 2 && route.kind === 'debate';
     if (elements.routeDebateSettings) {
         elements.routeDebateSettings.hidden = !debateEnabled;
     }
@@ -1710,7 +1712,7 @@ function isRouteSupported(route) {
     if (route.kind === 'single') return providers.length === 1;
     const supported = new Set(getSupportedProviders());
     if (providers.some((provider) => !supported.has(provider))) return false;
-    if (route.kind === 'debate') return providers.length === 2;
+    if (route.kind === 'debate') return providers.length >= 2;
     if (route.kind === 'parallel') return providers.length >= 2;
     return false;
 }

@@ -1673,7 +1673,7 @@ function sanitizeUiRoute(input) {
     const rounds = Math.min(12, Math.max(1, parseInt(input.rounds, 10) || 1));
 
     if (kind === 'debate') {
-        if (providers.length !== 2) return null;
+        if (providers.length < 2) return null;
         return { kind: 'debate', providers, rounds };
     }
 
@@ -1855,7 +1855,13 @@ async function handleStartDebateSession(message) {
             ? 1
             : (mode === 'direct'
                 ? (secondLLM ? 2 : 1)
-                : (mode === 'single' ? rounds : rounds * 2));
+                : (mode === 'single'
+                    ? rounds
+                    : (mode === 'debate'
+                        ? rounds * (Array.isArray(route?.providers) && route.providers.length >= 2
+                            ? route.providers.length
+                            : (secondLLM ? 2 : 1))
+                        : rounds * 2)));
         const sessionId = generateSessionId();
         activeDebateState = {
             ...defaultDebateState,
@@ -1951,6 +1957,13 @@ function getRoundIndex(turnIndex, session = null) {
     if (session?.mode === 'single') {
         return Math.max(1, turnIndex);
     }
+    if (session?.mode === 'debate') {
+        const debateProviders = Array.isArray(session?.route?.providers)
+            ? session.route.providers.map(normalizeProviderKey).filter((p) => p && isSupportedProviderKey(p))
+            : [];
+        const divisor = debateProviders.length >= 2 ? debateProviders.length : 2;
+        return Math.ceil(turnIndex / divisor);
+    }
     return Math.ceil(turnIndex / 2);
 }
 
@@ -1964,6 +1977,15 @@ function getTurnLLM(session, turnIndex) {
     }
     if (session?.mode === 'single') {
         return session.firstLLM || 'chatgpt';
+    }
+    if (session?.mode === 'debate') {
+        const debateProviders = Array.isArray(session?.route?.providers)
+            ? session.route.providers.map(normalizeProviderKey).filter((p) => p && isSupportedProviderKey(p))
+            : [];
+        if (debateProviders.length >= 2) {
+            const idx = Math.max(0, (turnIndex - 1) % debateProviders.length);
+            return debateProviders[idx];
+        }
     }
     return turnIndex % 2 === 1 ? session.firstLLM : session.secondLLM;
 }
@@ -2545,15 +2567,22 @@ async function buildDebatePrompt(session, turnIndex) {
         : null;
     const templates = overrides ? { ...baseTemplates, ...overrides } : baseTemplates;
 
+    const debateProviders = Array.isArray(session?.route?.providers)
+        ? session.route.providers.map(normalizeProviderKey).filter((p) => p && isSupportedProviderKey(p))
+        : listSessionProviders(session);
+    const providerCount = debateProviders.length >= 2 ? debateProviders.length : 2;
+
     const roundIndex = getRoundIndex(turnIndex, session);
     const expectedLLM = getTurnLLM(session, turnIndex);
     const expectedLabel = formatLLMLabel(expectedLLM);
-    const otherLLM = expectedLLM === session.firstLLM ? session.secondLLM : session.firstLLM;
+    const prevIdx = turnIndex > 1 ? (turnIndex - 2) % providerCount : 0;
+    const previousLLM = debateProviders[prevIdx] || session.secondLLM || session.firstLLM;
+    const otherLLM = providerCount > 2 ? previousLLM : (expectedLLM === session.firstLLM ? session.secondLLM : session.firstLLM);
     const otherLabel = formatLLMLabel(otherLLM);
     const safeOtherResponse = getLastResponse(session, otherLLM) || '[No prior response captured yet]';
     const safeFirstResponse = getLastResponse(session, session.firstLLM) || '[No prior response captured yet]';
 
-    const totalTurns = Number.isFinite(session.totalTurns) ? session.totalTurns : session.rounds * 2;
+    const totalTurns = Number.isFinite(session.totalTurns) ? session.totalTurns : session.rounds * providerCount;
     const firstLabel = formatLLMLabel(session.firstLLM);
     const secondLabel = formatLLMLabel(session.secondLLM);
     const baseVariables = {
@@ -2604,6 +2633,25 @@ async function buildDebatePrompt(session, turnIndex) {
         intermediary_message: turnInstruction,
         final_message: renderedFinal
     };
+
+    if (providerCount > 2) {
+        const isFinalTurn = turnIndex === totalTurns;
+        const instruction = turnIndex === 1
+            ? renderedInitialInstruction
+            : (isFinalTurn ? renderedFinal : renderedIntermediary);
+
+        const blocks = [
+            header,
+            '',
+            `Iteration ${roundIndex}/${session.rounds}`,
+            '',
+            'User question:',
+            userMsg
+        ];
+        if (turnIndex > 1) blocks.push('', `Previous ${otherLabel} answer:`, safeOtherResponse);
+        blocks.push('', instruction);
+        return blocks.join('\n').trim();
+    }
 
     if (turnIndex === 1) {
         return renderPromptTemplate(templates.turn1, variables).trim();
