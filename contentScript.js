@@ -3,11 +3,12 @@
     const isChatGPT = host.includes('openai.com') || host.includes('chatgpt.com');
     const isGemini = host.includes('gemini.google.com');
     const isClaude = host.includes('claude.ai');
-    if (!isChatGPT && !isGemini && !isClaude) return;
+    const isGrok = host.includes('grok.com');
+    if (!isChatGPT && !isGemini && !isClaude && !isGrok) return;
 
     let forwardEnabled = false;
 	    const forwardTo = isChatGPT ? 'gemini' : (isGemini ? 'chatgpt' : null);
-	    const currentLLM = isChatGPT ? 'chatgpt' : (isGemini ? 'gemini' : 'claude');
+	    const currentLLM = isChatGPT ? 'chatgpt' : (isGemini ? 'gemini' : (isClaude ? 'claude' : 'grok'));
 
 	    console.log(`[MLC ContentScript] Initializing for ${currentLLM}.${forwardTo ? ` Forwarding to ${forwardTo}.` : ''}`);
 
@@ -86,7 +87,7 @@
             'textarea[placeholder*="Ask"]',
             'textarea',
             '[contenteditable="true"]'
-        ] : [
+        ] : (isClaude ? [
             'textarea[placeholder*="Message" i]',
             'textarea[aria-label*="Message" i]',
             'textarea[placeholder*="Send" i]',
@@ -96,7 +97,17 @@
             'div[contenteditable="true"]',
             '[contenteditable="true"]',
             '[role="textbox"]'
-        ]);
+        ] : [
+            'textarea[aria-label*="message" i]',
+            'textarea[placeholder*="message" i]',
+            'textarea[placeholder*="ask" i]',
+            'textarea[placeholder*="chat" i]',
+            'textarea',
+            'div[contenteditable="true"][role="textbox"]',
+            '[contenteditable="true"][role="textbox"]',
+            '[contenteditable="true"]',
+            '[role="textbox"]'
+        ]));
         for (const sel of selectors) {
             const el = document.querySelector(sel);
             if (el) {
@@ -411,10 +422,21 @@
         return false;
     }
 
+    function isGrokGenerating() {
+        const stopButton = document.querySelector(
+            'button[aria-label*=\"Stop\" i], button[aria-label*=\"Cancel\" i], button[title*=\"Stop\" i], button[title*=\"Cancel\" i], button[data-testid*=\"stop\" i]'
+        );
+        if (stopButton && stopButton.offsetParent !== null) return true;
+        const spinner = document.querySelector('[role=\"progressbar\"], .loading, .spinner, .animate-spin');
+        if (spinner && spinner.offsetParent !== null) return true;
+        return false;
+    }
+
     function isGenerating() {
         if (isChatGPT) return isChatGPTGenerating();
         if (isGemini) return isGeminiGenerating();
-        return isClaudeGenerating();
+        if (isClaude) return isClaudeGenerating();
+        return isGrokGenerating();
     }
 
 	    function getTrimmedText(node) {
@@ -952,6 +974,27 @@
         return false;
     }
 
+    function isGrokUserMessage(node) {
+        if (!node) return false;
+        const userSelectors = [
+            '[data-testid*="user" i]',
+            '[data-testid*="human" i]',
+            '[data-role*="user" i]',
+            '[data-author*="user" i]',
+            '[data-message-author-role="user"]',
+            '.user-message',
+            '.human-message',
+            '.message-user',
+            '.from-user'
+        ];
+        for (const sel of userSelectors) {
+            if (node.matches?.(sel) || node.closest?.(sel)) return true;
+        }
+        const aria = node.getAttribute?.('aria-label') || '';
+        if (/\b(you|user)\b/i.test(aria)) return true;
+        return false;
+    }
+
     function extractClaudeResponse(options = {}) {
         const inputEl = findInput({ silent: true });
         const composerRoot = inputEl
@@ -1064,10 +1107,120 @@
         return options.withMeta ? { ...result, meta } : result;
     }
 
+    function extractGrokResponse(options = {}) {
+        const inputEl = findInput({ silent: true });
+        const composerRoot = inputEl
+            ? (inputEl.closest('form') || inputEl.closest('footer') || inputEl.closest('[role="form"]') || inputEl.parentElement)
+            : null;
+        const roots = [document.querySelector('main'), document.querySelector('[role="main"]'), document.body].filter(Boolean);
+
+        const selectors = [
+            '[data-testid*="assistant" i]',
+            '[data-role*="assistant" i]',
+            '[data-author*="assistant" i]',
+            '[data-testid="message-content"]',
+            '[data-testid*="message" i]',
+            '[data-testid*="chat-message" i]',
+            '[data-testid*="conversation" i] [data-testid*="message" i]',
+            '.markdown',
+            '.prose',
+            '[class*="markdown" i]',
+            '[class*="prose" i]',
+            'article',
+            '[role="article"]',
+            '[class*="assistant" i]',
+            '[class*="message" i]'
+        ];
+
+        const candidates = [];
+        const seen = new Set();
+        let sawPromptEcho = false;
+
+        const collect = (root, selector, limit) => {
+            let nodes = [];
+            try {
+                nodes = Array.from(root.querySelectorAll(selector));
+            } catch (error) {
+                nodes = [];
+            }
+            if (nodes.length > limit) nodes = nodes.slice(nodes.length - limit);
+            nodes.forEach((node) => {
+                if (!node || seen.has(node)) return;
+                seen.add(node);
+                candidates.push({ node, selector });
+            });
+        };
+
+        for (const root of roots) {
+            for (const sel of selectors) {
+                collect(root, sel, 50);
+            }
+            if (candidates.length > 0) break;
+        }
+
+        const scored = [];
+        for (const entry of candidates) {
+            const node = entry.node;
+            if (!node) continue;
+            if (inputEl && (node === inputEl || node.contains(inputEl))) continue;
+            if (composerRoot && (composerRoot.contains(node) || node.contains(composerRoot))) continue;
+            if (isGrokUserMessage(node)) continue;
+
+            const text = (node.innerText || node.textContent || '').trim();
+            if (!text) continue;
+            if (looksLikePromptEcho(text)) {
+                sawPromptEcho = true;
+                continue;
+            }
+
+            let rect;
+            try {
+                rect = node.getBoundingClientRect();
+            } catch (error) {
+                rect = null;
+            }
+            const bottom = rect && Number.isFinite(rect.bottom) ? rect.bottom : 0;
+            scored.push({ node, selector: entry.selector, text, bottom });
+        }
+
+        scored.sort((a, b) => b.bottom - a.bottom);
+        const recent = scored.slice(0, 14);
+
+        let best = recent[0] || null;
+        let bestIsReferenceList = false;
+        if (CaptureUtils && typeof CaptureUtils.chooseBestTextCandidate === 'function' && recent.length > 1) {
+            const pick = CaptureUtils.chooseBestTextCandidate(recent.map(item => item.text), { provider: 'grok' });
+            if (Number.isFinite(pick.bestIndex) && pick.bestIndex >= 0 && recent[pick.bestIndex]) {
+                best = recent[pick.bestIndex];
+                bestIsReferenceList = Boolean(pick.best?.isReferenceList);
+            }
+        }
+
+        const bestBottom = best ? best.bottom : -Infinity;
+        const bestLen = best ? best.text.length : null;
+
+        const meta = {
+            provider: 'grok',
+            candidateCount: candidates.length,
+            sawPromptEcho,
+            bestSelector: best?.selector || null,
+            bestBottom: Number.isFinite(bestBottom) ? Math.round(bestBottom) : null,
+            bestLen: Number.isFinite(bestLen) ? bestLen : null,
+            bestIsReferenceList
+        };
+
+        const result = { text: best?.text || '' };
+        if (options.withHtml) {
+            result.html = best?.node ? extractCleanHtmlFromNode(best.node) : '';
+        }
+        return options.withMeta ? { ...result, meta } : result;
+    }
+
 	    function extractLatestResponse(options = {}) {
 	        if (isChatGPT) return extractChatGPTResponse(options);
 	        if (isGemini) return extractGeminiResponse(options);
-	        return extractClaudeResponse(options);
+	        if (isClaude) return extractClaudeResponse(options);
+            return extractGrokResponse(options);
 	    }
 
 	    function extractLatestResponseText() {
@@ -1166,10 +1319,32 @@
         return '';
     }
 
+    function detectGrokModelLabel() {
+        const selectors = [
+            'button[aria-label*="Model" i]',
+            'button[aria-label*="Grok" i]',
+            'button[title*="Model" i]',
+            '[data-testid*="model" i]',
+            '[data-testid*="model" i] button'
+        ];
+        for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            const aria = normalizeInlineText(el.getAttribute('aria-label') || '');
+            const text = normalizeInlineText(el.textContent || '');
+            for (const candidate of [text, aria]) {
+                const label = sanitizeModelLabel(candidate);
+                if (label) return label;
+            }
+        }
+        return '';
+    }
+
     function detectModelLabel() {
         if (isChatGPT) return detectChatGPTModelLabel();
         if (isGemini) return detectGeminiModelLabel();
-        return detectClaudeModelLabel();
+        if (isClaude) return detectClaudeModelLabel();
+        return detectGrokModelLabel();
     }
 
     function shouldConfirmModelLabel(label) {
@@ -1240,7 +1415,9 @@
             ? 'MLC_RESPONSE_CAPTURED'
             : (currentLLM === 'chatgpt'
                 ? 'CHATGPT_RESPONSE_CAPTURED'
-                : (currentLLM === 'gemini' ? 'GEMINI_RESPONSE_CAPTURED' : 'CLAUDE_RESPONSE_CAPTURED'));
+                : (currentLLM === 'gemini'
+                    ? 'GEMINI_RESPONSE_CAPTURED'
+                    : (currentLLM === 'claude' ? 'CLAUDE_RESPONSE_CAPTURED' : 'GROK_RESPONSE_CAPTURED')));
 
         chrome.runtime.sendMessage({ type: messageType, ...responsePayload }, () => {
             if (chrome.runtime.lastError) {

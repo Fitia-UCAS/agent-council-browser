@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Multi-LLM Coder",
   "version": "0.1.0",
-  "description": "Send prompts to multiple LLM providers (ChatGPT, Gemini, Claude) simultaneously and compare responses side-by-side",
+  "description": "Send prompts to multiple LLM providers (ChatGPT, Gemini, Claude, Grok) simultaneously and compare responses side-by-side",
   
   "permissions": [
     "sidePanel",
@@ -16,7 +16,9 @@
     "https://gemini.google.com/*",
     "https://chat.openai.com/*",
     "https://chatgpt.com/*",
-    "https://claude.ai/*"
+    "https://claude.ai/*",
+    "https://grok.com/*",
+    "https://*.grok.com/*"
   ],
 
   "content_scripts": [
@@ -30,6 +32,10 @@
     },
     {
       "matches": ["https://claude.ai/*"],
+      "js": ["captureUtils.js", "contentScript.js"]
+    },
+    {
+      "matches": ["https://grok.com/*", "https://*.grok.com/*"],
       "js": ["captureUtils.js", "contentScript.js"]
     }
   ],

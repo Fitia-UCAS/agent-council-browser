@@ -1,6 +1,6 @@
 /* global chrome */
 
-const DEFAULT_PROVIDER_IDS = ['chatgpt', 'gemini', 'claude'];
+const DEFAULT_PROVIDER_IDS = ['chatgpt', 'gemini', 'claude', 'grok'];
 
 function initProviderMap(value) {
     const out = {};
@@ -3414,6 +3414,7 @@ function formatRoleLabel(role) {
     if (normalized === 'chatgpt') return 'ChatGPT';
     if (normalized === 'gemini') return 'Gemini';
     if (normalized === 'claude') return 'Claude';
+    if (normalized === 'grok') return 'Grok';
     return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
@@ -3423,6 +3424,7 @@ function formatProviderLabel(provider) {
     if (normalized === 'gemini') return 'Gemini';
     if (normalized === 'chatgpt') return 'ChatGPT';
     if (normalized === 'claude') return 'Claude';
+    if (normalized === 'grok') return 'Grok';
     return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 

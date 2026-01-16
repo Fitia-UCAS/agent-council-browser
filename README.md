@@ -4,14 +4,14 @@ Chrome extension side panel that lets you route a prompt to multiple LLM web UIs
 
 It supports:
 
-1. **Single**: send to ChatGPT, Gemini, or Claude.
+1. **Single**: send to ChatGPT, Gemini, Claude, or Grok.
 2. **Compare (Parallel)**: send the same prompt to multiple providers.
 3. **Debate**: multi-round ping-pong between two providers.
 4. **In-page forwarding**: optional ⇄ toggle buttons on ChatGPT/Gemini pages.
 
 ## ✨ Features
 
--   **Multi-LLM Support**: Interact with Gemini, ChatGPT, and Claude.
+-   **Multi-LLM Support**: Interact with Gemini, ChatGPT, Claude, and Grok.
 -   **Route Builder (“To”)**: Choose Single / Compare / Debate, reorder providers, and set debate rounds.
 -   **Connect-on-demand**: The side panel only asks you to connect the providers required for your route (plus **Connect all**).
 -   **Encrypted Chat History (Local-First)**: Chats and messages are stored in IndexedDB and encrypted with a user passphrase.
@@ -21,7 +21,8 @@ It supports:
 -   **Attachments**: Attach files/images in the side panel.
     - ChatGPT: best-effort auto-upload.
     - Gemini: manual upload (text-only is sent from the side panel when files are attached).
-    - Claude: manual upload (text-only is sent from the side panel when files are attached).
+    - Claude: best-effort auto-upload.
+    - Grok: best-effort auto-upload (falls back to text-only if Grok blocks automation).
 -   **Dark Theme**: Professional dark theme optimized for developers.
 -   **Real-time Status**: Live connection status in the side panel.
 -   **Syntax Highlighting**: Code blocks are automatically highlighted in the side panel.

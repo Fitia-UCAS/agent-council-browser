@@ -37,7 +37,7 @@ const selectorsTests = {
     }
     
     // Test that we have both LLM providers
-    const expectedProviders = ['gemini', 'chatgpt', 'claude'];
+    const expectedProviders = ['gemini', 'chatgpt', 'claude', 'grok'];
     for (const provider of expectedProviders) {
       if (!LLM_SELECTORS[provider]) {
         throw new Error(`Missing provider: ${provider}`);
@@ -138,13 +138,44 @@ const selectorsTests = {
     return true;
   },
 
+  testGrokSelectors() {
+    console.log('Testing Grok selectors...');
+    const grok = LLM_SELECTORS.grok;
+
+    const requiredSelectors = [
+      'input',
+      'sendButton',
+      'responseArea',
+      'lastResponseBlock',
+      'doneIndicator'
+    ];
+
+    for (const selector of requiredSelectors) {
+      if (!grok[selector]) {
+        throw new Error(`Missing Grok selector: ${selector}`);
+      }
+
+      if (typeof grok[selector] !== 'string') {
+        throw new Error(`Grok selector ${selector} must be a string`);
+      }
+
+      if (grok[selector].trim() === '') {
+        throw new Error(`Grok selector ${selector} cannot be empty`);
+      }
+    }
+
+    console.log('✅ All Grok selectors present and valid');
+    return true;
+  },
+
   testSelectorFormat() {
     console.log('Testing selector format...');
     
     const allSelectors = [
       ...Object.values(LLM_SELECTORS.gemini),
       ...Object.values(LLM_SELECTORS.chatgpt),
-      ...Object.values(LLM_SELECTORS.claude)
+      ...Object.values(LLM_SELECTORS.claude),
+      ...Object.values(LLM_SELECTORS.grok)
     ];
     
     for (const selector of allSelectors) {
@@ -164,11 +195,13 @@ const selectorsTests = {
     const geminiSelectors = Object.values(LLM_SELECTORS.gemini);
     const chatgptSelectors = Object.values(LLM_SELECTORS.chatgpt);
     const claudeSelectors = Object.values(LLM_SELECTORS.claude);
+    const grokSelectors = Object.values(LLM_SELECTORS.grok);
     
     // Check for duplicates within each provider
     const geminiSet = new Set(geminiSelectors);
     const chatgptSet = new Set(chatgptSelectors);
     const claudeSet = new Set(claudeSelectors);
+    const grokSet = new Set(grokSelectors);
     
     if (geminiSet.size !== geminiSelectors.length) {
       throw new Error('Duplicate selectors found in Gemini configuration');
@@ -180,6 +213,10 @@ const selectorsTests = {
 
     if (claudeSet.size !== claudeSelectors.length) {
       throw new Error('Duplicate selectors found in Claude configuration');
+    }
+
+    if (grokSet.size !== grokSelectors.length) {
+      throw new Error('Duplicate selectors found in Grok configuration');
     }
     
     console.log('✅ All selectors are unique within their providers');
@@ -231,6 +268,7 @@ async function runSelectorsTests() {
     selectorsTests.testGeminiSelectors();
     selectorsTests.testChatGPTSelectors();
     selectorsTests.testClaudeSelectors();
+    selectorsTests.testGrokSelectors();
     selectorsTests.testSelectorFormat();
     selectorsTests.testSelectorUniqueness();
     selectorsTests.testMetadata();
@@ -252,4 +290,11 @@ if (typeof module !== 'undefined' && module.exports) {
 // Auto-run if this file is loaded directly
 if (typeof window !== 'undefined') {
   document.addEventListener('DOMContentLoaded', runSelectorsTests);
+}
+
+// Auto-run in Node.js when executed directly (e.g. `node tests/test-selectors.js`)
+if (typeof window === 'undefined' && typeof require !== 'undefined' && require.main === module) {
+  runSelectorsTests().then((ok) => {
+    if (!ok) process.exitCode = 1;
+  });
 }

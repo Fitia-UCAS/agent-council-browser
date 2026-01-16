@@ -12,6 +12,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - ChatGPT: attachments are auto-uploaded when possible (best-effort pre-upload may start while another provider is answering).
   - Claude: attachments are auto-uploaded when possible (uploaded first, then the prompt is sent).
   - Gemini: attachments are **not auto-uploaded**; Gemini receives text-only when files are attached in the side panel (UI warns before sending).
+  - Grok: attachments are **best-effort auto-uploaded**; if Grok blocks automation, Grok receives text-only and the UI logs a notice.
 - It can also **forward prompts between LLM pages** via injected toggle buttons (legacy flow, still present).
 - The side panel is the primary UI: clicking the extension icon opens the side panel (no popup).
 
