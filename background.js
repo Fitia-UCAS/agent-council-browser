@@ -5221,28 +5221,6 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                     'button[data-testid*="stop" i]'
                 ]
             },
-            claude: {
-                sendSelectors: [
-                    // Claude uses a <button type="button"> with localized aria-label (e.g. "Send message", "Envoyer le message").
-                    // Prefer "message" which is stable across at least EN/FR, plus a few common verb variants.
-                    'button[aria-label*="message" i]',
-                    'button[aria-label*="send" i]',
-                    'button[aria-label*="envoyer" i]',
-                    'button[type="submit"]'
-                ],
-                sendFallbackSelectors: [
-                    'button[aria-label*="message" i]',
-                    'button[type="submit"]',
-                    'button[aria-label*="send" i]',
-                    'button[aria-label*="envoyer" i]'
-                ],
-                stopSelectors: [
-                    'button[aria-label*="stop" i]',
-                    'button[aria-label*="cancel" i]',
-                    'button[title*="stop" i]',
-                    'button[data-testid*="stop" i]'
-                ]
-            },
             generic: {
                 sendSelectors: [
                     'button[type="submit"]',
@@ -5391,77 +5369,6 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, composed: true }));
         };
 
-        const waitForEnabledSendButton = async ({ timeoutMs = 1500, pollMs = 120 } = {}) => {
-            const startedAt = Date.now();
-            while (Date.now() - startedAt < timeoutMs) {
-                const btn = findSendButton({ allowDisabled: false, includeFallback: true });
-                if (btn) return btn;
-                await sleep(pollMs);
-            }
-            return null;
-        };
-
-        const getButtonDebugInfo = (btn) => {
-            if (!btn) return null;
-            let pointerEvents = '';
-            try {
-                pointerEvents = window.getComputedStyle(btn)?.pointerEvents || '';
-            } catch (error) {
-                pointerEvents = '';
-            }
-            return {
-                tag: btn.tagName.toLowerCase(),
-                type: btn.getAttribute('type') || '',
-                ariaLabel: btn.getAttribute('aria-label') || '',
-                disabled: Boolean(btn.disabled),
-                ariaDisabled: btn.getAttribute('aria-disabled') || null,
-                pointerEvents
-            };
-        };
-
-        const tryRequestSubmit = async () => {
-            const el = resolveInputElement();
-            const form = el?.closest?.('form') || null;
-            if (!form || typeof form.requestSubmit !== 'function') return false;
-            try {
-                form.requestSubmit();
-                return true;
-            } catch (error) {
-                return false;
-            }
-        };
-
-        const tryForceEnableAndClick = async (btn) => {
-            if (!btn) return false;
-            let prevDisabled = null;
-            let hadDisabledAttr = false;
-            try {
-                prevDisabled = Boolean(btn.disabled);
-                hadDisabledAttr = btn.hasAttribute('disabled');
-                btn.disabled = false;
-                btn.removeAttribute('disabled');
-                if ((btn.getAttribute('aria-disabled') || '').toLowerCase() === 'true') {
-                    btn.setAttribute('aria-disabled', 'false');
-                }
-            } catch (error) {
-                // ignore
-            }
-
-            clickSendButton(btn);
-            const acknowledged = await waitForSendAcknowledged({ timeoutMs: 8000 });
-            if (acknowledged) return true;
-
-            if (prevDisabled !== null && prevDisabled) {
-                try {
-                    btn.disabled = true;
-                    if (hadDisabledAttr) btn.setAttribute('disabled', '');
-                } catch (error) {
-                    // ignore
-                }
-            }
-            return false;
-        };
-
         const hasAttachments = attachmentPayloads.length > 0;
         const wantsLongReadyWait = (() => {
             if (hasAttachments) return true;
@@ -5470,45 +5377,6 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
         })();
         const readyTimeoutMs = wantsLongReadyWait ? 120000 : 6000;
         const maxAttempts = wantsLongReadyWait ? 3 : 2;
-
-        if (llmType === 'claude') {
-            const enabledButton = await waitForEnabledSendButton({ timeoutMs: 1800 });
-            if (enabledButton) {
-                console.log('[SimpleInteraction INJECTED] Clicking enabled Send for claude.', getButtonDebugInfo(enabledButton));
-                clickSendButton(enabledButton);
-                const acknowledged = await waitForSendAcknowledged({ timeoutMs: 10000 });
-                if (acknowledged) {
-                    return { success: true, method: 'button_click_for_claude', details: { stage: 'send', attempts: 1 } };
-                }
-            }
-
-            const disabledButton = findSendButton({ allowDisabled: true, includeFallback: true });
-            console.warn('[SimpleInteraction INJECTED] Claude send button remained disabled; attempting fallback send.', {
-                inputLen: getInputText().trim().length,
-                disabledButton: getButtonDebugInfo(disabledButton)
-            });
-
-            const submitted = await tryRequestSubmit();
-            if (submitted) {
-                const acknowledged = await waitForSendAcknowledged({ timeoutMs: 10000 });
-                if (acknowledged) {
-                    return { success: true, method: 'form_requestsubmit_for_claude', details: { stage: 'send', attempts: 1 } };
-                }
-            }
-
-            if (await tryForceEnableAndClick(disabledButton)) {
-                return { success: true, method: 'forced_click_for_claude', details: { stage: 'send', attempts: 1 } };
-            }
-
-            pressEnterToSend();
-            if (await waitForSendAcknowledged({ timeoutMs: 10000 })) {
-                return { success: true, method: 'enter_key_for_claude', details: { stage: 'send', attempts: 1 } };
-            }
-
-            const errMsg = '[SimpleInteraction INJECTED] Failed to send message for claude: send button stayed disabled and no acknowledgement after fallbacks.';
-            console.error(errMsg, { disabledButton: getButtonDebugInfo(disabledButton) });
-            return { success: false, error: errMsg, details: { stage: 'send_not_acknowledged', provider: 'claude' } };
-        }
 
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
             if (wantsLongReadyWait || attempt > 1) {

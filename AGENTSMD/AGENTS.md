@@ -5,33 +5,33 @@ This file is the durable memory for the repo. It is the canonical reference for 
 ## 1) What this extension does (current behavior)
 
 - Chrome extension that runs a **side panel chat UI** where each message is sent via a **Route**:
-  - **Single**: send to one provider (ChatGPT or Gemini).
-  - **Compare (Parallel)**: send the same prompt to both providers (no debate scaffolding).
-  - **Debate**: multi‑round ping‑pong between two providers.
+  - **Single**: send to one provider (ChatGPT / Gemini / Claude).
+  - **Compare (Parallel)**: send the same prompt to 2+ providers (no debate scaffolding).
+  - **Debate**: multi‑round round‑robin between 2+ providers (often two).
 - Side panel supports **attachments** (files/images) that are delivered via provider web UI automation (no official APIs).
   - ChatGPT: attachments are auto-uploaded when possible (best-effort pre-upload may start while another provider is answering).
+  - Claude: attachments are auto-uploaded when possible (uploaded first, then the prompt is sent).
   - Gemini: attachments are **not auto-uploaded**; Gemini receives text-only when files are attached in the side panel (UI warns before sending).
 - It can also **forward prompts between LLM pages** via injected toggle buttons (legacy flow, still present).
 - The side panel is the primary UI: clicking the extension icon opens the side panel (no popup).
 
 ### Main user flow (runs)
 
-1. User creates **Tab Profiles** for ChatGPT and Gemini in the Provider Manager:
+1. User creates **Tab Profiles** for ChatGPT, Gemini, and Claude in the Provider Manager:
    - Use the current tab, or open a new provider tab and claim it after manual model selection.
 2. In the side panel composer, user selects a **Route** from the `To` pill:
    - Pick providers (chips), drag to reorder, and choose mode (**Parallel** / **Debate**) when applicable.
    - Set **Rounds** only for Debate.
 3. User writes a message and clicks **Send**.
 4. The extension runs a debate (when Route = Debate):
-   - **Round 1**: first LLM gets full context + user query.
-   - **Round 1**: second LLM gets full context + user query + first LLM answer.
-   - **Rounds 2..N**: each new prompt contains only the previous model’s latest answer (the tab thread holds history).
+   - **Turn 1**: provider[0] gets full context + user query.
+   - **Turn 2**: provider[1] gets full context + user query + provider[0] answer.
+   - **Turns 3..N**: round‑robin across providers; each new prompt contains only the previous turn’s latest answer (the tab thread holds history).
 5. The side panel shows a **single linear transcript**:
    - user query
-   - GPT answer 1
-   - Gemini answer 1
-   - GPT answer 2
-   - Gemini answer 2
+   - provider[0] answer 1
+   - provider[1] answer 1
+   - provider[2] answer 1 (if enabled)
    - ...
 6. Sending again in the same chat is treated as a **continuation**:
    - Run settings are prefilled from the previous user message’s stored `meta`.
@@ -41,7 +41,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 ### Provider Manager (Tab Profiles) UX
 
-- Profiles are the only way to run debate sessions. Each provider (ChatGPT, Gemini) needs a valid profile.
+- Profiles are the only way to run debate sessions. Each provider (ChatGPT, Gemini, Claude) needs a valid profile.
 - Profile list is grouped by provider with cards showing:
   - User label (renameable)
   - Status pill (OK / Offline / Wrong host / Unknown)
@@ -56,8 +56,8 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Rebind to current tab (claims the active tab as this profile)
   - Remove (unassigns and deletes the profile)
 - Global actions:
-  - "Use current ChatGPT tab" / "Use current Gemini tab"
-  - "Open new ChatGPT tab" / "Open new Gemini tab"
+  - "Use current ChatGPT tab" / "Use current Gemini tab" / "Use current Claude tab"
+  - "Open new ChatGPT tab" / "Open new Gemini tab" / "Open new Claude tab"
 
 ### Open tab + claim wizard (best effort model selection)
 
@@ -103,7 +103,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 - `manifest.json`
   - MV3 manifest; side panel enabled; no popup.
-  - Content scripts injected into `chatgpt.com`, `chat.openai.com`, `gemini.google.com`.
+  - Content scripts injected into `chatgpt.com`, `chat.openai.com`, `gemini.google.com`, `claude.ai`.
 
 - `background.js`
   - Service worker: session state machine, prompt injection, tab profile store/validation, tab discovery, message routing.
@@ -513,6 +513,7 @@ TAB_PROFILES updates:
 - Host validation rules:
   - ChatGPT: `chatgpt.com`, `chat.openai.com`, `openai.com`, `platform.openai.com`
   - Gemini: `gemini.google.com`
+  - Claude: `claude.ai`
 - Content script responsiveness can be checked via `PING` (used on start/resume).
 - Legacy preferred tabs (`mlc_preferred_tabs`) still exist and are used for non-session prompts and for migration into profiles.
 
@@ -535,7 +536,7 @@ This flow is separate from debate sessions but shares capture logic.
 ### Where to inspect logs
 
 - **Background**: Chrome extensions page → “Service Worker” console.
-- **Content scripts**: open DevTools on ChatGPT/Gemini tabs.
+- **Content scripts**: open DevTools on ChatGPT/Gemini/Claude tabs (note: DevTools on the Claude tab can block `chrome.debugger` sends).
 - **Side panel**: right‑click → Inspect.
 
 ### Useful log prefixes
