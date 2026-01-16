@@ -2013,10 +2013,10 @@ const PROVIDER_CAPABILITIES = {
         }
     },
     claude: {
-        // Claude (claude.ai) attachment automation has not been validated yet.
-        // Start in manual mode for safety; upgrade to 'auto' once selectors + upload flows are proven stable.
+        // Claude (claude.ai) exposes a real <input type="file"> in the composer.
+        // We attempt programmatic upload via DataTransfer -> input.files + change/input events.
         attachments: {
-            mode: 'manual'
+            mode: 'auto'
         }
     }
 };
@@ -3957,11 +3957,16 @@ async function sendTabMessageWithRetry(tabId, message, options = {}) {
     return { ok: false, error: String(lastError?.message || lastError || 'unknown_error') };
 }
 
-async function sendPromptViaClaudeDebugger(tabId, promptText) {
+async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
     const debuggee = { tabId };
     await debuggerAttach(debuggee, '1.3');
     try {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const readyTimeoutMs = (() => {
+            const value = options && typeof options === 'object' ? options.readyTimeoutMs : null;
+            if (!Number.isFinite(value)) return 4000;
+            return Math.min(120000, Math.max(1500, Math.floor(value)));
+        })();
 
         // Make the tab active to maximize the chance CDP input targets the correct frame/element.
         try {
@@ -4341,7 +4346,7 @@ async function sendPromptViaClaudeDebugger(tabId, promptText) {
 
         // Wait for Send to become enabled (or at least clickable).
         const startedAt = Date.now();
-        while (Date.now() - startedAt < 4000) {
+        while (Date.now() - startedAt < readyTimeoutMs) {
             state = await evalState();
             if (state?.ok && state.sendDisabled === false && Number.isFinite(state.sendX) && Number.isFinite(state.sendY)) {
                 break;
@@ -4353,7 +4358,7 @@ async function sendPromptViaClaudeDebugger(tabId, promptText) {
             throw new Error('Claude send readiness check failed (composer missing).');
         }
         if (state.sendDisabled) {
-            throw new Error(`Claude send button stayed disabled after typing. inputLen=${state.inputLen} pointerEvents=${state.sendPointerEvents || 'unknown'} focus=${JSON.stringify(focusMeta)}`);
+            throw new Error(`Claude send button stayed disabled after typing. inputLen=${state.inputLen} pointerEvents=${state.sendPointerEvents || 'unknown'} waitMs=${readyTimeoutMs} focus=${JSON.stringify(focusMeta)}`);
         }
 
         const ackExpr = `(() => {
@@ -4570,8 +4575,22 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
         if (llmType === 'claude') {
             const promptId = context.promptId || generatePromptId();
             try {
+                const attachments = Array.isArray(context.attachments)
+                    ? context.attachments.filter(Boolean)
+                    : [];
+
+                if (attachments.length > 0) {
+                    console.log(`[MLC Background] Preparing ${attachments.length} attachment(s) for Claude before sending...`);
+                    await injectAndPrepareAttachments(tabId, llmType, attachments);
+                    if (context.sessionId) {
+                        markSessionAttachmentsPrepared({ sessionId: context.sessionId }, llmType);
+                    }
+                }
+
                 console.log('[MLC Background] Sending prompt to Claude via chrome.debugger...');
-                const result = await sendPromptViaClaudeDebugger(tabId, prompt);
+                const result = await sendPromptViaClaudeDebugger(tabId, prompt, {
+                    readyTimeoutMs: attachments.length > 0 ? 30000 : undefined
+                });
                 if (result?.ok) {
                     console.log('[MLC Background] Claude debugger send succeeded (verified input cleared).', result?.meta || null);
                     const preview = typeof prompt === 'string' ? prompt.trim().slice(0, 800) : '';
