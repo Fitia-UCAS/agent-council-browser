@@ -960,11 +960,17 @@
         const roots = [document.querySelector('main'), document.querySelector('[role="main"]'), document.body].filter(Boolean);
 
         const selectors = [
+            '[data-testid="chat-message"]',
+            '[data-testid="chat-message-content"]',
+            '[data-testid="message-content"]',
+            '[data-testid*="conversation" i] [data-testid*="message" i]',
             '[data-testid*="assistant" i]',
             '[data-testid*="message" i]',
             '[data-testid*="chat" i]',
             '.markdown',
             '.prose',
+            '[class*="prose" i]',
+            '[class*="markdown" i]',
             'article',
             '[role="article"]',
             '[class*="assistant" i]',
@@ -999,9 +1005,7 @@
             if (candidates.length > 0) break;
         }
 
-        let best = null;
-        let bestBottom = -Infinity;
-        let bestLen = -Infinity;
+        const scored = [];
 
         for (const entry of candidates) {
             const node = entry.node;
@@ -1024,14 +1028,24 @@
                 rect = null;
             }
             const bottom = rect && Number.isFinite(rect.bottom) ? rect.bottom : 0;
-            const len = text.length;
+            scored.push({ node, selector: entry.selector, text, bottom });
+        }
 
-            if (bottom > bestBottom + 1 || (Math.abs(bottom - bestBottom) <= 1 && len > bestLen)) {
-                best = { node, selector: entry.selector, text };
-                bestBottom = bottom;
-                bestLen = len;
+        scored.sort((a, b) => b.bottom - a.bottom);
+        const recent = scored.slice(0, 12);
+
+        let best = recent[0] || null;
+        let bestIsReferenceList = false;
+        if (CaptureUtils && typeof CaptureUtils.chooseBestTextCandidate === 'function' && recent.length > 1) {
+            const pick = CaptureUtils.chooseBestTextCandidate(recent.map(item => item.text), { provider: 'claude' });
+            if (Number.isFinite(pick.bestIndex) && pick.bestIndex >= 0 && recent[pick.bestIndex]) {
+                best = recent[pick.bestIndex];
+                bestIsReferenceList = Boolean(pick.best?.isReferenceList);
             }
         }
+
+        const bestBottom = best ? best.bottom : -Infinity;
+        const bestLen = best ? best.text.length : null;
 
         const meta = {
             provider: 'claude',
@@ -1039,7 +1053,8 @@
             sawPromptEcho,
             bestSelector: best?.selector || null,
             bestBottom: Number.isFinite(bestBottom) ? Math.round(bestBottom) : null,
-            bestLen: Number.isFinite(bestLen) ? bestLen : null
+            bestLen: Number.isFinite(bestLen) ? bestLen : null,
+            bestIsReferenceList
         };
 
         const result = { text: best?.text || '' };

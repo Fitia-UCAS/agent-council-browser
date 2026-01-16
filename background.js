@@ -3890,6 +3890,25 @@ function debuggerSendCommand(debuggee, method, params = {}) {
     });
 }
 
+async function sendTabMessageWithRetry(tabId, message, options = {}) {
+    const retries = Number.isFinite(options.retries) ? Math.max(1, Math.floor(options.retries)) : 10;
+    const delayMs = Number.isFinite(options.delayMs) ? Math.max(50, Math.floor(options.delayMs)) : 450;
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= retries; attempt += 1) {
+        try {
+            await chrome.tabs.sendMessage(tabId, message);
+            return { ok: true, attempt };
+        } catch (error) {
+            lastError = error;
+        }
+        await sleep(delayMs);
+    }
+
+    return { ok: false, error: String(lastError?.message || lastError || 'unknown_error') };
+}
+
 async function sendPromptViaClaudeDebugger(tabId, promptText) {
     const debuggee = { tabId };
     await debuggerAttach(debuggee, '1.3');
@@ -4508,8 +4527,9 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                 if (result?.ok) {
                     console.log('[MLC Background] Claude debugger send succeeded (verified input cleared).', result?.meta || null);
                     const preview = typeof prompt === 'string' ? prompt.trim().slice(0, 800) : '';
+                    const ack = result?.meta?.ack || null;
                     try {
-                        chrome.tabs.sendMessage(tabId, {
+                        const payload = {
                             type: 'MLC_PROMPT_SENT',
                             sessionId: context.sessionId || null,
                             promptId: promptId,
@@ -4517,7 +4537,15 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                             turnIndex: context.turnIndex || null,
                             timestamp: Date.now(),
                             promptPreview: preview
-                        });
+                        };
+                        // Claude often navigates `/new` -> `/chat/...` on send; retry until the content script is ready.
+                        if (ack === 'navigation') {
+                            await new Promise((resolve) => setTimeout(resolve, 600));
+                        }
+                        const notify = await sendTabMessageWithRetry(tabId, payload, { retries: 14, delayMs: 500 });
+                        if (!notify.ok) {
+                            console.warn('[MLC Background] Failed to notify Claude content script about prompt after retries:', notify.error);
+                        }
                     } catch (error) {
                         console.warn('[MLC Background] Failed to notify Claude content script about prompt:', error);
                     }
