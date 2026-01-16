@@ -334,9 +334,14 @@ function formatRouteSummary(route) {
 
 function renderRouteUi() {
     const route = state.route || getDefaultRoute();
+    const summary = formatRouteSummary(route);
 
     if (elements.routePillText) {
-        elements.routePillText.textContent = formatRouteSummary(route);
+        elements.routePillText.textContent = summary;
+    }
+
+    if (elements.routeButton) {
+        elements.routeButton.title = summary;
     }
 
     const providerCount = route.providers.length;
@@ -793,10 +798,10 @@ function bindEvents() {
         elements.attachmentList.addEventListener('click', (event) => {
             const target = event.target;
             if (!(target instanceof HTMLElement)) return;
-            if (target.dataset.action === 'remove-attachment') {
-                const id = target.dataset.attachmentId;
-                if (id) removeAttachment(id);
-            }
+            const removeButton = target.closest('button[data-action="remove-attachment"]');
+            if (!removeButton) return;
+            const id = removeButton.dataset.attachmentId;
+            if (id) removeAttachment(id);
         });
     }
 
@@ -1536,14 +1541,18 @@ function updateAttachmentsUi() {
     const totalBytes = getAttachmentsTotalBytes();
 
     if (elements.attachmentSummary) {
+        let summaryText = '';
+        let showSummary = false;
         if (state.attachmentsLoading) {
-            elements.attachmentSummary.textContent = 'Reading attachments…';
-        } else if (count === 0) {
-            elements.attachmentSummary.textContent = 'No attachments';
-        } else {
+            summaryText = 'Reading…';
+            showSummary = true;
+        } else if (count > 0) {
             const label = count === 1 ? '1 file' : `${count} files`;
-            elements.attachmentSummary.textContent = `${label} • ${formatBytes(totalBytes)}`;
+            summaryText = `${label} • ${formatBytes(totalBytes)}`;
+            showSummary = true;
         }
+        elements.attachmentSummary.textContent = summaryText;
+        elements.attachmentSummary.hidden = !showSummary;
     }
 
     if (elements.attachmentClear) {
@@ -1561,6 +1570,9 @@ function updateAttachmentsUi() {
     state.attachments.forEach((attachment) => {
         const item = document.createElement('div');
         item.className = 'attachment-item';
+        const typeLabel = attachment.type ? attachment.type : 'unknown type';
+        const sizeLabel = Number.isFinite(attachment.size) ? formatBytes(attachment.size) : '';
+        item.title = [typeLabel, sizeLabel].filter(Boolean).join(' • ');
 
         const meta = document.createElement('div');
         meta.className = 'attachment-meta';
@@ -1569,21 +1581,19 @@ function updateAttachmentsUi() {
         name.className = 'attachment-name';
         name.textContent = attachment.name || 'attachment';
 
-        const sub = document.createElement('div');
-        sub.className = 'attachment-sub';
-        const typeLabel = attachment.type ? attachment.type : 'unknown type';
-        const sizeLabel = Number.isFinite(attachment.size) ? formatBytes(attachment.size) : '';
-        sub.textContent = [typeLabel, sizeLabel].filter(Boolean).join(' • ');
-
         meta.appendChild(name);
-        meta.appendChild(sub);
 
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.className = 'attachment-remove';
         remove.dataset.action = 'remove-attachment';
         remove.dataset.attachmentId = attachment.id;
-        remove.textContent = 'Remove';
+        remove.title = 'Remove';
+        remove.setAttribute('aria-label', `Remove ${attachment.name || 'attachment'}`);
+        const icon = document.createElement('span');
+        icon.className = 'material-symbols-rounded';
+        icon.textContent = 'close';
+        remove.appendChild(icon);
 
         item.appendChild(meta);
         item.appendChild(remove);
