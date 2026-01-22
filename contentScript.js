@@ -679,11 +679,15 @@
                 }
                 const raw = String(texts[index] || '').trim();
                 const lines = raw.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+                const urlMatches = raw.match(/\bhttps?:\/\/\S+|\bwww\.\S+/gi) || [];
+                const domainMatches = raw.match(/\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}\b/gi) || [];
                 return {
                     raw,
                     lines,
                     lineCount: lines.length,
                     wordCount: raw ? raw.split(/\s+/).filter(Boolean).length : 0,
+                    urlCount: urlMatches.length,
+                    domainCount: domainMatches.length,
                     urlishLineCount: lines.filter(line => /\bhttps?:\/\/\S+|\bwww\.\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,24}\b/i.test(line)).length,
                     sentenceEndPunctCount: (raw.match(/[.!?](?:\s|$)/g) || []).length,
                     codeFenceCount: (raw.match(/```/g) || []).length,
@@ -772,6 +776,68 @@
 	        const bestIndex = chosenIndex;
             const bestCandidate = candidates[bestIndex] || candidates[rankingBestIndex] || candidates[0] || null;
 	        const bestText = bestCandidate?.text || '';
+            const combined = (() => {
+                if (!bestCandidate || !bestText) {
+                    return { text: bestText, html: bestCandidate?.html || '', supplementalIndices: [] };
+                }
+
+                const combinedTexts = [bestText];
+                const combinedHtmlParts = options.withHtml && bestCandidate?.html ? [bestCandidate.html] : [];
+                const supplementalIndices = [];
+                const normalizedSet = new Set([normalizeCaptureCandidateText(bestText)]);
+                const bestAssistantIndex = Number.isFinite(bestCandidate.assistantIndex) ? bestCandidate.assistantIndex : null;
+                const baselineCount = Number.isFinite(captureState.baselineAssistantCount)
+                    ? captureState.baselineAssistantCount
+                    : null;
+
+                const ordered = candidates.map((candidate, index) => ({
+                    ...candidate,
+                    index,
+                    assistantIndex: Number.isFinite(candidate.assistantIndex) ? candidate.assistantIndex : null
+                })).sort((a, b) => {
+                    const aIdx = a.assistantIndex !== null ? a.assistantIndex : Number.POSITIVE_INFINITY;
+                    const bIdx = b.assistantIndex !== null ? b.assistantIndex : Number.POSITIVE_INFINITY;
+                    if (aIdx !== bIdx) return aIdx - bIdx;
+                    return a.index - b.index;
+                });
+
+                for (const entry of ordered) {
+                    if (entry.index === bestIndex) continue;
+                    if (bestAssistantIndex !== null && entry.assistantIndex !== null && entry.assistantIndex < bestAssistantIndex) {
+                        continue;
+                    }
+                    if (baselineCount !== null && entry.assistantIndex !== null && entry.assistantIndex < baselineCount) {
+                        continue;
+                    }
+
+                    const normalized = normalizeCaptureCandidateText(entry.text || '');
+                    if (!normalized || normalizedSet.has(normalized)) continue;
+
+                    const analysis = getAnalysisForIndex(entry.index) || {};
+                    const urlishRatio = getUrlishRatio(entry.index);
+                    const isReference = isReferenceCandidate(entry.index);
+                    const urlCount = Number.isFinite(analysis.urlCount) ? analysis.urlCount : 0;
+                    const domainCount = Number.isFinite(analysis.domainCount) ? analysis.domainCount : 0;
+                    const hasLinks = urlCount > 0 || domainCount > 0 || urlishRatio >= 0.45;
+                    if (!isReference && !hasLinks) continue;
+
+                    combinedTexts.push(entry.text);
+                    if (options.withHtml && entry.html) combinedHtmlParts.push(entry.html);
+                    supplementalIndices.push(entry.index);
+                    normalizedSet.add(normalized);
+                }
+
+                const combinedText = combinedTexts.join('\n\n').trim();
+                let combinedHtml = '';
+                if (options.withHtml && combinedHtmlParts.length) {
+                    combinedHtml = combinedHtmlParts.join('\n<hr>\n').trim();
+                    const MAX_HTML_CHARS = 120000;
+                    if (combinedHtml.length > MAX_HTML_CHARS) combinedHtml = '';
+                }
+                return { text: combinedText, html: combinedHtml, supplementalIndices };
+            })();
+            const finalText = combined.text || bestText;
+            const finalHtml = options.withHtml ? (combined.html || bestCandidate?.html || '') : '';
 
 	        const meta = {
 	            provider: 'chatgpt',
@@ -792,6 +858,8 @@
 	            bestIsReferenceList: Array.isArray(ranking.ranked)
                     ? (ranking.ranked.find(r => r.index === bestIndex)?.isReferenceList ?? null)
                     : (ranking.best?.isReferenceList ?? null),
+                supplementalIndices: combined.supplementalIndices || [],
+                supplementalCount: combined.supplementalIndices ? combined.supplementalIndices.length : 0,
 	            rankingTop: Array.isArray(ranking.ranked)
 	                ? ranking.ranked.slice(0, 6).map(r => ({
 	                    index: r.index,
@@ -820,10 +888,10 @@
 	        }
 
             const result = {
-                text: bestText
+                text: finalText
             };
             if (options.withHtml) {
-                result.html = bestCandidate?.html || '';
+                result.html = finalHtml;
             }
 	        return options.withMeta ? { ...result, meta } : result;
 	    }
@@ -952,7 +1020,15 @@
         const prefixLen = Math.min(preview.length, 120);
         if (prefixLen < 40) return false;
         const prefix = preview.slice(0, prefixLen);
-        return candidate.startsWith(prefix);
+        if (!candidate.startsWith(prefix)) return false;
+
+        const previewWords = preview.split(/\s+/).filter(Boolean).length;
+        const candidateWords = candidate.split(/\s+/).filter(Boolean).length;
+        const extraWords = Math.max(0, candidateWords - previewWords);
+        const extraChars = Math.max(0, candidate.length - preview.length);
+        if (extraWords <= 6) return true;
+        if (extraChars <= 40) return true;
+        return false;
     }
 
     function isClaudeUserMessage(node) {
@@ -1002,27 +1078,101 @@
             : null;
         const roots = [document.querySelector('main'), document.querySelector('[role="main"]'), document.body].filter(Boolean);
 
-        const selectors = [
+        const rootSelectors = [
             '[data-testid="chat-message"]',
+            '[data-testid*="chat-message" i]',
+            '[data-testid*="assistant" i]',
+            '[data-role*="assistant" i]',
+            '[data-author*="assistant" i]',
+            'article',
+            '[role="article"]',
+            '[class*="assistant" i]'
+        ];
+
+        const contentSelectors = [
             '[data-testid="chat-message-content"]',
             '[data-testid="message-content"]',
-            '[data-testid*="conversation" i] [data-testid*="message" i]',
-            '[data-testid*="assistant" i]',
-            '[data-testid*="message" i]',
-            '[data-testid*="chat" i]',
             '.markdown',
             '.prose',
             '[class*="prose" i]',
-            '[class*="markdown" i]',
-            'article',
-            '[role="article"]',
-            '[class*="assistant" i]',
-            '[class*="message" i]'
+            '[class*="markdown" i]'
         ];
 
         const candidates = [];
-        const seen = new Set();
+        const seenNodes = new Set();
+        const seenText = new Set();
         let sawPromptEcho = false;
+
+        const buildCandidateFromRoot = (node, selector) => {
+            if (!node || seenNodes.has(node)) return;
+            seenNodes.add(node);
+            if (inputEl && (node === inputEl || node.contains(inputEl))) return;
+            if (composerRoot && (composerRoot.contains(node) || node.contains(composerRoot))) return;
+            if (isClaudeUserMessage(node)) return;
+
+            const contentNodes = [];
+            for (const sel of contentSelectors) {
+                try {
+                    node.querySelectorAll(sel).forEach(child => contentNodes.push(child));
+                } catch (error) {
+                    // ignore selector errors
+                }
+            }
+            const topLevel = getTopLevelNodes(contentNodes);
+            const nodes = topLevel.length ? topLevel : [node];
+
+            const parts = [];
+            const htmlParts = [];
+            const localSeen = new Set();
+            for (const child of nodes) {
+                if (!child || isClaudeUserMessage(child)) continue;
+                const text = (child.innerText || child.textContent || '').trim();
+                if (!text) continue;
+                const normalized = normalizeCaptureCandidateText(text);
+                if (!normalized || localSeen.has(normalized)) continue;
+                localSeen.add(normalized);
+                parts.push(text);
+                if (options.withHtml) {
+                    const html = extractCleanHtmlFromNode(child);
+                    if (html) htmlParts.push(html);
+                }
+            }
+
+            const combinedText = parts.join('\n\n').trim();
+            if (!combinedText) return;
+            if (looksLikePromptEcho(combinedText)) {
+                sawPromptEcho = true;
+                return;
+            }
+            const normalizedCombined = normalizeCaptureCandidateText(combinedText);
+            if (!normalizedCombined || seenText.has(normalizedCombined)) return;
+            seenText.add(normalizedCombined);
+
+            let rect;
+            try {
+                rect = node.getBoundingClientRect();
+            } catch (error) {
+                rect = null;
+            }
+            const bottom = rect && Number.isFinite(rect.bottom) ? rect.bottom : 0;
+
+            let combinedHtml = '';
+            if (options.withHtml && htmlParts.length) {
+                combinedHtml = htmlParts.join('\n').trim();
+                const MAX_HTML_CHARS = 120000;
+                if (combinedHtml.length > MAX_HTML_CHARS) combinedHtml = '';
+            }
+
+            candidates.push({
+                node,
+                selector,
+                text: combinedText,
+                html: combinedHtml,
+                bottom,
+                partCount: parts.length,
+                nodeCount: nodes.length
+            });
+        };
 
         const collect = (root, selector, limit) => {
             let nodes = [];
@@ -1035,74 +1185,211 @@
                 nodes = nodes.slice(nodes.length - limit);
             }
             nodes.forEach((node) => {
-                if (!node || seen.has(node)) return;
-                seen.add(node);
-                candidates.push({ node, selector });
+                buildCandidateFromRoot(node, selector);
             });
         };
 
         for (const root of roots) {
-            for (const sel of selectors) {
+            for (const sel of rootSelectors) {
                 collect(root, sel, 40);
             }
             if (candidates.length > 0) break;
         }
 
-        const scored = [];
-
-        for (const entry of candidates) {
-            const node = entry.node;
-            if (!node) continue;
-            if (inputEl && (node === inputEl || node.contains(inputEl))) continue;
-            if (composerRoot && (composerRoot.contains(node) || node.contains(composerRoot))) continue;
-            if (isClaudeUserMessage(node)) continue;
-
-            const text = (node.innerText || node.textContent || '').trim();
-            if (!text) continue;
-            if (looksLikePromptEcho(text)) {
-                sawPromptEcho = true;
-                continue;
-            }
-
-            let rect;
-            try {
-                rect = node.getBoundingClientRect();
-            } catch (error) {
-                rect = null;
-            }
-            const bottom = rect && Number.isFinite(rect.bottom) ? rect.bottom : 0;
-            scored.push({ node, selector: entry.selector, text, bottom });
-        }
-
-        scored.sort((a, b) => b.bottom - a.bottom);
-        const recent = scored.slice(0, 12);
-
-        let best = recent[0] || null;
-        let bestIsReferenceList = false;
-        if (CaptureUtils && typeof CaptureUtils.chooseBestTextCandidate === 'function' && recent.length > 1) {
-            const pick = CaptureUtils.chooseBestTextCandidate(recent.map(item => item.text), { provider: 'claude' });
-            if (Number.isFinite(pick.bestIndex) && pick.bestIndex >= 0 && recent[pick.bestIndex]) {
-                best = recent[pick.bestIndex];
-                bestIsReferenceList = Boolean(pick.best?.isReferenceList);
+        if (candidates.length === 0) {
+            for (const root of roots) {
+                for (const sel of contentSelectors) {
+                    collect(root, sel, 50);
+                }
+                if (candidates.length > 0) break;
             }
         }
 
-        const bestBottom = best ? best.bottom : -Infinity;
-        const bestLen = best ? best.text.length : null;
+        if (candidates.length === 0) {
+            return options.withMeta ? { text: '', meta: null } : { text: '' };
+        }
+
+        const texts = candidates.map(candidate => candidate.text);
+        const ranking = CaptureUtils?.chooseBestTextCandidate
+            ? CaptureUtils.chooseBestTextCandidate(texts, { provider: 'claude' })
+            : { bestIndex: 0, best: { index: 0, score: texts[0]?.length || 0, isReferenceList: false }, ranked: [] };
+
+        const rankingBestIndex = Number.isFinite(ranking.bestIndex) && ranking.bestIndex >= 0
+            ? ranking.bestIndex
+            : 0;
+        let chosenIndex = rankingBestIndex;
+
+        const analysisByIndex = new Map();
+        const referenceByIndex = new Map();
+        if (Array.isArray(ranking.ranked)) {
+            ranking.ranked.forEach(item => {
+                analysisByIndex.set(item.index, item.analysis || null);
+                referenceByIndex.set(item.index, Boolean(item.isReferenceList));
+            });
+        }
+
+        const getAnalysisForIndex = (index) => {
+            if (analysisByIndex.has(index)) return analysisByIndex.get(index);
+            if (CaptureUtils && typeof CaptureUtils.analyzeText === 'function') {
+                try {
+                    return CaptureUtils.analyzeText(texts[index]);
+                } catch (error) {
+                    // ignore
+                }
+            }
+            const raw = String(texts[index] || '').trim();
+            const lines = raw.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+            const urlMatches = raw.match(/\bhttps?:\/\/\S+|\bwww\.\S+/gi) || [];
+            const domainMatches = raw.match(/\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}\b/gi) || [];
+            return {
+                raw,
+                lines,
+                lineCount: lines.length,
+                wordCount: raw ? raw.split(/\s+/).filter(Boolean).length : 0,
+                urlCount: urlMatches.length,
+                domainCount: domainMatches.length,
+                urlishLineCount: lines.filter(line => /\bhttps?:\/\/\S+|\bwww\.\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,24}\b/i.test(line)).length,
+                sentenceEndPunctCount: (raw.match(/[.!?](?:\s|$)/g) || []).length,
+                codeFenceCount: (raw.match(/```/g) || []).length,
+                startsWithSourcesHeading: /^(sources?|references?|citations?)\b[:\s-]*/i.test(lines[0] || '')
+            };
+        };
+
+        const getWordCount = (index) => {
+            const analysis = getAnalysisForIndex(index) || {};
+            const wordCount = Number.isFinite(analysis.wordCount) ? analysis.wordCount : 0;
+            return wordCount;
+        };
+
+        const getUrlishRatio = (index) => {
+            const analysis = getAnalysisForIndex(index) || {};
+            const lineCount = Number.isFinite(analysis.lineCount) ? analysis.lineCount : 0;
+            const urlishLineCount = Number.isFinite(analysis.urlishLineCount) ? analysis.urlishLineCount : 0;
+            return lineCount ? (urlishLineCount / Math.max(1, lineCount)) : 0;
+        };
+
+        const isReferenceCandidate = (index) => {
+            if (referenceByIndex.has(index)) return referenceByIndex.get(index);
+            if (CaptureUtils && typeof CaptureUtils.looksLikeReferenceList === 'function') {
+                return CaptureUtils.looksLikeReferenceList(texts[index], { provider: 'claude' });
+            }
+            return false;
+        };
+
+        const bestIsReference = isReferenceCandidate(chosenIndex);
+        if (bestIsReference && Array.isArray(ranking.ranked)) {
+            const alt = ranking.ranked.find(item => {
+                if (item.index === chosenIndex) return false;
+                if (item.isReferenceList) return false;
+                const analysis = item.analysis || {};
+                const wordCount = analysis.wordCount || 0;
+                const sentenceEndPunctCount = analysis.sentenceEndPunctCount || 0;
+                const codeFenceCount = analysis.codeFenceCount || 0;
+                const lineCount = analysis.lineCount || 0;
+                return wordCount >= 18 || sentenceEndPunctCount >= 2 || codeFenceCount >= 1 || lineCount >= 4;
+            });
+            if (alt && Number.isFinite(alt.index) && alt.index >= 0) {
+                chosenIndex = alt.index;
+            }
+        }
+
+        const chosenWordCount = getWordCount(chosenIndex);
+        if (chosenWordCount > 0 && chosenWordCount < 12) {
+            let bestAltIndex = chosenIndex;
+            let bestAltWordCount = chosenWordCount;
+            for (let i = 0; i < texts.length; i++) {
+                if (i === chosenIndex) continue;
+                const wc = getWordCount(i);
+                if (wc <= bestAltWordCount + 10) continue;
+                if (isReferenceCandidate(i) && !isReferenceCandidate(chosenIndex)) continue;
+                const urlishRatio = getUrlishRatio(i);
+                if (urlishRatio >= 0.95 && wc < 24) continue;
+                bestAltIndex = i;
+                bestAltWordCount = wc;
+            }
+            if (bestAltIndex !== chosenIndex) {
+                chosenIndex = bestAltIndex;
+            }
+        }
+
+        const bestIndex = chosenIndex;
+        const bestCandidate = candidates[bestIndex] || candidates[rankingBestIndex] || candidates[0] || null;
+        const bestText = bestCandidate?.text || '';
+
+        const combined = (() => {
+            if (!bestCandidate || !bestText) {
+                return { text: bestText, html: bestCandidate?.html || '', supplementalIndices: [] };
+            }
+
+            const combinedTexts = [bestText];
+            const combinedHtmlParts = options.withHtml && bestCandidate?.html ? [bestCandidate.html] : [];
+            const supplementalIndices = [];
+            const normalizedSet = new Set([normalizeCaptureCandidateText(bestText)]);
+            const bestBottom = Number.isFinite(bestCandidate?.bottom) ? bestCandidate.bottom : -Infinity;
+
+            const ordered = candidates.map((candidate, index) => ({
+                ...candidate,
+                index
+            })).sort((a, b) => {
+                const aBottom = Number.isFinite(a.bottom) ? a.bottom : -Infinity;
+                const bBottom = Number.isFinite(b.bottom) ? b.bottom : -Infinity;
+                if (aBottom !== bBottom) return aBottom - bBottom;
+                return a.index - b.index;
+            });
+
+            for (const entry of ordered) {
+                if (entry.index === bestIndex) continue;
+                const entryBottom = Number.isFinite(entry.bottom) ? entry.bottom : -Infinity;
+                if (entryBottom < bestBottom) continue;
+
+                const normalized = normalizeCaptureCandidateText(entry.text || '');
+                if (!normalized || normalizedSet.has(normalized)) continue;
+
+                const analysis = getAnalysisForIndex(entry.index) || {};
+                const urlishRatio = getUrlishRatio(entry.index);
+                const isReference = isReferenceCandidate(entry.index);
+                const urlCount = Number.isFinite(analysis.urlCount) ? analysis.urlCount : 0;
+                const domainCount = Number.isFinite(analysis.domainCount) ? analysis.domainCount : 0;
+                const hasLinks = urlCount > 0 || domainCount > 0 || urlishRatio >= 0.45;
+                if (!isReference && !hasLinks) continue;
+
+                combinedTexts.push(entry.text);
+                if (options.withHtml && entry.html) combinedHtmlParts.push(entry.html);
+                supplementalIndices.push(entry.index);
+                normalizedSet.add(normalized);
+            }
+
+            const combinedText = combinedTexts.join('\n\n').trim();
+            let combinedHtml = '';
+            if (options.withHtml && combinedHtmlParts.length) {
+                combinedHtml = combinedHtmlParts.join('\n<hr>\n').trim();
+                const MAX_HTML_CHARS = 120000;
+                if (combinedHtml.length > MAX_HTML_CHARS) combinedHtml = '';
+            }
+            return { text: combinedText, html: combinedHtml, supplementalIndices };
+        })();
+
+        const finalText = combined.text || bestText;
+        const finalHtml = options.withHtml ? (combined.html || bestCandidate?.html || '') : '';
+
+        const bestBottom = bestCandidate ? bestCandidate.bottom : -Infinity;
+        const bestLen = bestCandidate ? bestCandidate.text.length : null;
 
         const meta = {
             provider: 'claude',
             candidateCount: candidates.length,
             sawPromptEcho,
-            bestSelector: best?.selector || null,
+            bestSelector: bestCandidate?.selector || null,
             bestBottom: Number.isFinite(bestBottom) ? Math.round(bestBottom) : null,
             bestLen: Number.isFinite(bestLen) ? bestLen : null,
-            bestIsReferenceList
+            bestIsReferenceList: isReferenceCandidate(bestIndex),
+            supplementalIndices: combined.supplementalIndices || [],
+            supplementalCount: combined.supplementalIndices ? combined.supplementalIndices.length : 0
         };
 
-        const result = { text: best?.text || '' };
+        const result = { text: finalText };
         if (options.withHtml) {
-            result.html = best?.node ? extractCleanHtmlFromNode(best.node) : '';
+            result.html = finalHtml;
         }
         return options.withMeta ? { ...result, meta } : result;
     }

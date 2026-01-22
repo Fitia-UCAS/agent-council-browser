@@ -390,7 +390,14 @@ Current force‑capture thresholds:
 
 - Collects multiple candidate content nodes within the latest `[data-message-author-role="assistant"]` (e.g., `data-testid="message-content"`, `.prose`, `.markdown`, and the message root).
 - Ranks candidates using `captureUtils.js` heuristics to avoid capturing sources-only/reference blocks when a real answer is present.
+- If a newer assistant block looks like link/reference content (e.g., “Sources”), it is appended to the main answer to preserve hyperlinks.
 - Debugging: set `localStorage.mlc_capture_debug = '1'` in the provider tab console to log candidate scoring and capture decisions.
+
+**Claude**:
+
+- Aggregates content inside the most recent assistant message root (`data-testid`/assistant/`article` heuristics), then ranks candidates with the same heuristics.
+- Prompt-echo filtering only excludes near-identical prompt repeats; prompt-prefixed answers still capture.
+- Link/reference-only blocks immediately after the answer are appended to preserve hyperlinks.
 
 **Gemini**:
 
@@ -409,6 +416,8 @@ Current force‑capture thresholds:
 - Non‑session capture:
   - `CHATGPT_RESPONSE_CAPTURED`
   - `GEMINI_RESPONSE_CAPTURED`
+  - `CLAUDE_RESPONSE_CAPTURED`
+  - `GROK_RESPONSE_CAPTURED`
 
 ### Model label detection (best effort)
 

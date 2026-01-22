@@ -156,9 +156,19 @@ Key points:
   - this avoids capturing sources-only/reference blocks when a real answer exists
 - Additional guardrail:
   - If the top-ranked candidate is a reference list, but we have another “meaningful” non-reference candidate (prose/code/multi-line), we select that instead.
+- If a newer assistant block looks like link/reference content, it is appended to the main answer to preserve hyperlinks in the captured text/HTML.
 - Returns:
   - `text` from the best candidate
   - optional `html` from the same best node (`extractCleanHtmlFromNode(bestNode)`)
+
+### Claude extraction (`extractClaudeResponse`)
+Key points:
+
+- Builds candidates from the most recent assistant message roots (`data-testid`/assistant/`article` selectors).
+- Aggregates `.markdown`/`.prose`/`message-content` nodes inside each root to avoid missing multi-part answers.
+- Uses the same `CaptureUtils.chooseBestTextCandidate(...)` ranking and guardrails as ChatGPT.
+- Prompt-echo detection only filters near-identical prompt repeats, so prompt-prefixed answers are still captured.
+- Appends link/reference-only blocks that appear immediately after the main answer.
 
 ### Gemini extraction (`extractGeminiResponse`)
 Key points:
