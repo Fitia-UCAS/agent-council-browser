@@ -399,6 +399,25 @@ const defaultDebateState = {
 let activeDebateState = { ...defaultDebateState };
 let debateResponseChain = Promise.resolve();
 
+const AUTO_FOCUS_SETTINGS = {
+    enabled: true,
+    debateFocus: true,
+    parallelCycleMs: 3500
+};
+
+const AUTO_FOCUS_DEFAULT_STATE = {
+    sessionId: null,
+    mode: null,
+    providers: [],
+    tabIds: {},
+    currentIndex: 0,
+    timerId: null,
+    lastUserTabId: null,
+    lastUserWindowId: null
+};
+
+let autoFocusState = { ...AUTO_FOCUS_DEFAULT_STATE };
+
 function enqueueDebateResponse(message, label) {
     debateResponseChain = debateResponseChain
         .then(() => handleDebateResponse(message))
@@ -1125,6 +1144,118 @@ async function focusTab(tabId) {
         return { ok: true };
     } catch (error) {
         return { ok: false, error: 'Tab not found.' };
+    }
+}
+
+async function captureUserFocusTarget() {
+    try {
+        const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        if (!tab || !Number.isFinite(tab.id)) return null;
+        return { tabId: tab.id, windowId: tab.windowId };
+    } catch (error) {
+        return null;
+    }
+}
+
+async function restoreUserFocusTarget() {
+    if (!Number.isFinite(autoFocusState.lastUserTabId)) return;
+    await focusTab(autoFocusState.lastUserTabId);
+}
+
+async function stopAutoFocus(reason, { restoreFocus } = {}) {
+    if (autoFocusState.timerId) {
+        clearTimeout(autoFocusState.timerId);
+        autoFocusState.timerId = null;
+    }
+    const shouldRestore = typeof restoreFocus === 'boolean'
+        ? restoreFocus
+        : autoFocusState.mode === 'parallel';
+    if (shouldRestore) {
+        await restoreUserFocusTarget();
+    }
+    if (reason) {
+        console.log('[MLC AutoFocus] Stopped:', reason);
+    }
+    autoFocusState = { ...AUTO_FOCUS_DEFAULT_STATE };
+}
+
+async function ensureDebateAutoFocus(session, provider, tabId) {
+    if (!AUTO_FOCUS_SETTINGS.enabled || !AUTO_FOCUS_SETTINGS.debateFocus) return;
+    if (!session?.sessionId || !Number.isFinite(tabId)) return;
+    if (autoFocusState.sessionId && autoFocusState.sessionId !== session.sessionId) {
+        await stopAutoFocus('session_switched', { restoreFocus: false });
+    }
+    if (!autoFocusState.sessionId) {
+        const focusTarget = await captureUserFocusTarget();
+        if (focusTarget) {
+            autoFocusState.lastUserTabId = focusTarget.tabId;
+            autoFocusState.lastUserWindowId = focusTarget.windowId;
+        }
+    }
+    autoFocusState.sessionId = session.sessionId;
+    autoFocusState.mode = 'debate';
+    await focusTab(tabId);
+}
+
+async function startParallelAutoFocus(session, providers, resolvedTabs) {
+    if (!AUTO_FOCUS_SETTINGS.enabled) return;
+    if (!session?.sessionId || !Array.isArray(providers) || providers.length === 0) return;
+    if (autoFocusState.sessionId && autoFocusState.sessionId !== session.sessionId) {
+        await stopAutoFocus('session_switched', { restoreFocus: false });
+    }
+    if (!autoFocusState.sessionId) {
+        const focusTarget = await captureUserFocusTarget();
+        if (focusTarget) {
+            autoFocusState.lastUserTabId = focusTarget.tabId;
+            autoFocusState.lastUserWindowId = focusTarget.windowId;
+        }
+    }
+    autoFocusState.sessionId = session.sessionId;
+    autoFocusState.mode = 'parallel';
+    autoFocusState.providers = providers.map(normalizeProviderKey).filter(Boolean);
+    autoFocusState.tabIds = { ...(resolvedTabs || {}) };
+    autoFocusState.currentIndex = 0;
+    if (autoFocusState.timerId) {
+        clearTimeout(autoFocusState.timerId);
+        autoFocusState.timerId = null;
+    }
+    autoFocusState.timerId = setTimeout(runParallelAutoFocusCycle, 0);
+}
+
+async function runParallelAutoFocusCycle() {
+    if (!AUTO_FOCUS_SETTINGS.enabled) return;
+    const sessionId = autoFocusState.sessionId;
+    if (!sessionId || autoFocusState.mode !== 'parallel') {
+        autoFocusState.timerId = null;
+        return;
+    }
+    const session = await loadActiveDebateState();
+    if (!session?.sessionId || session.sessionId !== sessionId || session.mode !== 'parallel' || session.isPaused) {
+        await stopAutoFocus('session_inactive');
+        return;
+    }
+
+    const waiting = Array.isArray(session.waitingFor)
+        ? session.waitingFor.map(normalizeProviderKey).filter(Boolean)
+        : [];
+    if (waiting.length === 0) {
+        await stopAutoFocus('complete');
+        return;
+    }
+
+    autoFocusState.providers = waiting;
+    const index = autoFocusState.currentIndex % waiting.length;
+    const provider = waiting[index];
+    autoFocusState.currentIndex = (index + 1) % waiting.length;
+    const tabId = autoFocusState.tabIds?.[provider] || session.tabIds?.[provider];
+    if (Number.isFinite(tabId)) {
+        await focusTab(tabId);
+    }
+
+    if (autoFocusState.sessionId === sessionId && autoFocusState.mode === 'parallel') {
+        autoFocusState.timerId = setTimeout(runParallelAutoFocusCycle, AUTO_FOCUS_SETTINGS.parallelCycleMs);
+    } else {
+        autoFocusState.timerId = null;
     }
 }
 
@@ -2937,6 +3068,7 @@ async function pauseDebateSession(reason, provider) {
         provider: provider || null,
         reason: session.pausedReason
     });
+    await stopAutoFocus('paused');
 }
 
 async function resumeDebateSession() {
@@ -3205,6 +3337,8 @@ async function sendParallelTurn(session, { providers: providersOverride } = {}) 
         totalRounds: 1
     });
 
+    await startParallelAutoFocus(session, providers, resolvedTabs);
+
     const sessionHasAttachments = hasSessionAttachments(sessionId);
 
     const results = await Promise.allSettled(providers.map(async (provider) => {
@@ -3287,6 +3421,8 @@ async function sendDebateTurn(session) {
         roundIndex: getRoundIndex(turnIndex, session),
         totalRounds: session.rounds
     });
+
+    await ensureDebateAutoFocus(session, expectedLLM, resolution.tabId);
 
     const sessionHasAttachments = hasSessionAttachments(session.sessionId);
     const attachmentMode = sessionHasAttachments ? getProviderAttachmentMode(expectedLLM) : 'auto';
@@ -3571,6 +3707,8 @@ async function endDebateSession(reason) {
         sessionId: session.sessionId,
         reason: reason || 'Session ended.'
     });
+
+    await stopAutoFocus('ended');
 
     clearSessionAttachments(session.sessionId);
     resetDebateState();
