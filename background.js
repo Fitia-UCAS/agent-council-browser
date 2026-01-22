@@ -367,11 +367,12 @@ async function appendChatMessage(chatId, message) {
 
 const defaultDebateState = {
     isActive: false,
-    isPaused: false,
-    pausedReason: null,
-    pausedProvider: null,
-    pausedAt: 0,
-    mode: 'debate',
+	isPaused: false,
+	pausedReason: null,
+	pausedProvider: null,
+	pausedAt: 0,
+	autoResume: null,
+	mode: 'debate',
     route: null,
     chatId: null,
     sessionId: null,
@@ -398,6 +399,21 @@ const defaultDebateState = {
 
 let activeDebateState = { ...defaultDebateState };
 let debateResponseChain = Promise.resolve();
+
+// Tracks whether any Chrome window is currently focused (i.e., Chrome is the active app).
+// Used to avoid stealing OS focus when auto-focusing provider tabs while the user is in another app.
+let chromeHasFocus = false;
+
+async function refreshChromeFocusState() {
+    try {
+        const windows = await chrome.windows.getAll({ populate: false });
+        chromeHasFocus = Array.isArray(windows) && windows.some((win) => Boolean(win?.focused));
+    } catch (error) {
+        // Best-effort; leave previous value.
+    }
+}
+
+refreshChromeFocusState().catch(() => { });
 
 const AUTO_FOCUS_SETTINGS = {
     enabled: true,
@@ -1133,14 +1149,25 @@ async function setDefaultProfile(provider, profileId) {
     });
 }
 
-async function focusTab(tabId) {
+async function focusTab(tabId, options = {}) {
     if (!Number.isFinite(tabId)) return { ok: false, error: 'Invalid tab ID.' };
+    const activateTab = options.activateTab !== false;
+    const focusWindow = options.focusWindow !== false;
+    const forceWindowFocus = options.forceWindowFocus === true;
+
     try {
         const tab = await chrome.tabs.get(tabId);
-        await chrome.tabs.update(tabId, { active: true });
-        if (tab.windowId) {
+        if (activateTab) {
+            await chrome.tabs.update(tabId, { active: true });
+        }
+
+        // Only focus the Chrome window if explicitly requested OR Chrome is already focused.
+        // This prevents the extension from pulling the user out of other apps (macOS/Windows).
+        const shouldFocusWindow = focusWindow && (forceWindowFocus || chromeHasFocus);
+        if (shouldFocusWindow && tab.windowId) {
             await chrome.windows.update(tab.windowId, { focused: true });
         }
+
         return { ok: true };
     } catch (error) {
         return { ok: false, error: 'Tab not found.' };
@@ -1464,7 +1491,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
             return true;
         case 'FOCUS_TAB':
-            focusTab(message.tabId).then(sendResponse).catch(error => {
+            focusTab(message.tabId, { forceWindowFocus: true }).then(sendResponse).catch(error => {
                 console.error('[MLC Profiles] Error focusing tab:', error);
                 sendResponse({ ok: false, error: error.message });
             });
@@ -3054,13 +3081,14 @@ async function resolveSessionTab(session, provider, { requirePing = false } = {}
     return fallbackValidation;
 }
 
-async function pauseDebateSession(reason, provider) {
+async function pauseDebateSession(reason, provider, options = {}) {
     const session = await loadActiveDebateState();
     if (!session.sessionId) return;
     session.isPaused = true;
     session.pausedReason = reason || 'Session paused.';
     session.pausedProvider = provider || null;
     session.pausedAt = Date.now();
+    session.autoResume = options && typeof options === 'object' ? (options.autoResume || null) : null;
     await persistDebateState();
     sendMessageToPopup({
         type: 'UI_SESSION_PAUSED',
@@ -3092,6 +3120,7 @@ async function resumeDebateSession() {
         session.pausedReason = null;
         session.pausedProvider = null;
         session.pausedAt = 0;
+        session.autoResume = null;
         await persistDebateState();
         sendMessageToPopup({
             type: 'UI_SESSION_RESUMED',
@@ -3111,6 +3140,7 @@ async function resumeDebateSession() {
     session.pausedReason = null;
     session.pausedProvider = null;
     session.pausedAt = 0;
+    session.autoResume = null;
     await persistDebateState();
     sendMessageToPopup({
         type: 'UI_SESSION_RESUMED',
@@ -3198,11 +3228,22 @@ async function handleTabActivated(activeInfo) {
 }
 
 async function handleWindowFocusChanged(windowId) {
-    if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+    chromeHasFocus = windowId !== chrome.windows.WINDOW_ID_NONE;
+    if (!chromeHasFocus) return;
     try {
         const [tab] = await chrome.tabs.query({ active: true, windowId });
         if (tab) {
             await updateProfilesForTab(tab);
+        }
+
+        try {
+            const session = await loadActiveDebateState();
+            if (session?.sessionId && session.isPaused && session.autoResume?.trigger === 'chrome_focus') {
+                console.log('[MLC Debate] Auto-resuming paused session on Chrome focus.', session.autoResume);
+                await resumeDebateSession();
+            }
+        } catch (error) {
+            // ignore auto-resume failures
         }
     } catch (error) {
         // ignore
@@ -3391,7 +3432,14 @@ async function sendParallelTurn(session, { providers: providersOverride } = {}) 
         const failure = firstFailure.reason;
         const provider = normalizeProviderKey(failure?.provider);
         const error = failure?.error || failure;
-        await pauseDebateSession(error?.message || 'Failed to send prompt.', provider || null);
+        const autoResume = provider === 'claude' && error?.code === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED'
+            ? { trigger: 'chrome_focus', provider: 'claude', createdAt: Date.now() }
+            : null;
+        await pauseDebateSession(
+            error?.message || 'Failed to send prompt.',
+            provider || null,
+            autoResume ? { autoResume } : undefined
+        );
     }
 }
 
@@ -3475,12 +3523,27 @@ async function sendDebateTurn(session) {
                 }
                 return;
             } catch (retryError) {
-                await pauseDebateSession(retryError?.message || error?.message || 'Failed to send prompt.', expectedLLM);
+                const rootError = retryError || error;
+                const autoResume = expectedLLM === 'claude' && rootError?.code === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED'
+                    ? { trigger: 'chrome_focus', provider: 'claude', createdAt: Date.now() }
+                    : null;
+                await pauseDebateSession(
+                    retryError?.message || error?.message || 'Failed to send prompt.',
+                    expectedLLM,
+                    autoResume ? { autoResume } : undefined
+                );
                 return;
             }
         }
 
-        await pauseDebateSession(error?.message || 'Failed to send prompt.', expectedLLM);
+        const autoResume = expectedLLM === 'claude' && error?.code === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED'
+            ? { trigger: 'chrome_focus', provider: 'claude', createdAt: Date.now() }
+            : null;
+        await pauseDebateSession(
+            error?.message || 'Failed to send prompt.',
+            expectedLLM,
+            autoResume ? { autoResume } : undefined
+        );
     }
 }
 
@@ -4219,9 +4282,19 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
         })();
 
         // Make the tab active to maximize the chance CDP input targets the correct frame/element.
+        // Only focus the window when Chrome is already focused to avoid stealing OS focus.
         try {
+            await refreshChromeFocusState();
+            const sendingWhileChromeUnfocused = !chromeHasFocus;
+            if (sendingWhileChromeUnfocused) {
+                try {
+                    await debuggerSendCommand(debuggee, 'Emulation.setFocusEmulationEnabled', { enabled: true });
+                } catch (error) {
+                    // Best-effort; not all Chrome builds support this, and the debugger domain may be disabled.
+                }
+            }
             const tab = await chrome.tabs.get(tabId);
-            if (tab?.windowId) {
+            if (tab?.windowId && chromeHasFocus) {
                 await chrome.windows.update(tab.windowId, { focused: true });
             }
             await chrome.tabs.update(tabId, { active: true });
@@ -4555,8 +4628,23 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
                 || String(btn.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
                 || pointerEvents === 'none';
             const rect = btn && isVisible(btn) ? btn.getBoundingClientRect() : null;
+            const sendX = rect ? rect.left + rect.width / 2 : null;
+            const sendY = rect ? rect.top + rect.height / 2 : null;
+            let sendHit = null;
+            try {
+                if (Number.isFinite(sendX) && Number.isFinite(sendY)) {
+                    sendHit = document.elementFromPoint(sendX, sendY);
+                }
+            } catch (error) {
+                sendHit = null;
+            }
             return {
                 ok: Boolean(input) && Boolean(btn),
+                documentHasFocus: Boolean(document.hasFocus && document.hasFocus()),
+                visibilityState: document.visibilityState || null,
+                activeElementTag: document.activeElement?.tagName?.toLowerCase?.() || null,
+                activeElementTestId: document.activeElement?.getAttribute?.('data-testid') || null,
+                activeElementRole: document.activeElement?.getAttribute?.('role') || null,
                 inputConnected: Boolean(input?.isConnected),
                 sendConnected: Boolean(btn?.isConnected),
                 inputTag: input?.tagName?.toLowerCase?.() || null,
@@ -4566,8 +4654,11 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
                 sendDisabled: disabled,
                 sendPointerEvents: pointerEvents,
                 sendLabel: btn?.getAttribute?.('aria-label') || '',
-                sendX: rect ? rect.left + rect.width / 2 : null,
-                sendY: rect ? rect.top + rect.height / 2 : null
+                sendX,
+                sendY,
+                sendHitTag: sendHit?.tagName?.toLowerCase?.() || null,
+                sendHitLabel: sendHit?.getAttribute?.('aria-label') || null,
+                sendHitTestId: sendHit?.getAttribute?.('data-testid') || null
             };
         })()`;
 
@@ -4787,26 +4878,119 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
             return { ok: false, reason: null, current: await evalAck() };
         };
 
-        let ack = await waitForAck(3500);
+        const sendingWhileChromeUnfocused = !chromeHasFocus;
+        const ackTimeoutMs = sendingWhileChromeUnfocused ? 12000 : 3500;
+
+        const domSendExpr = `(() => {
+            const out = { ok: true, clicked: false, dispatched: false, submitted: false, error: null };
+            const root = window.__mlcClaudeComposerRoot || null;
+            const resolveBtn = () => {
+                const btn = window.__mlcClaudeSendBtn || null;
+                if (btn) return btn;
+                const selectors = [
+                    'button[aria-label*="message" i]',
+                    'button[aria-label*="envoyer" i]',
+                    'button[aria-label*="send" i]'
+                ];
+                for (const sel of selectors) {
+                    const found = document.querySelector(sel);
+                    if (found) return found;
+                }
+                return null;
+            };
+
+            const btn = resolveBtn();
+            if (!btn) {
+                out.ok = false;
+                out.error = 'send_btn_not_found';
+                return out;
+            }
+
+            try {
+                btn.scrollIntoView({ block: 'center', inline: 'center' });
+            } catch (error) {
+                // ignore
+            }
+
+            try {
+                btn.click();
+                out.clicked = true;
+            } catch (error) {
+                // ignore
+            }
+
+            try {
+                btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                out.dispatched = true;
+            } catch (error) {
+                // ignore
+            }
+
+            try {
+                const form = btn.closest('form') || (root && typeof root.closest === 'function' ? root.closest('form') : null);
+                if (form && typeof form.requestSubmit === 'function') {
+                    form.requestSubmit();
+                    out.submitted = true;
+                }
+            } catch (error) {
+                // ignore
+            }
+
+            return out;
+        })()`;
+
+        const tryDomSend = async () => {
+            try {
+                const res = await debuggerSendCommand(debuggee, 'Runtime.evaluate', {
+                    expression: domSendExpr,
+                    returnByValue: true
+                });
+                return res?.result?.value || null;
+            } catch (error) {
+                return { ok: false, error: String(error?.message || error || 'dom_send_failed') };
+            }
+        };
+
+        let ack = await waitForAck(ackTimeoutMs);
         if (!ack.ok) {
             await pressEnter();
-            ack = await waitForAck(3500);
+            ack = await waitForAck(ackTimeoutMs);
+        }
+
+        if (!ack.ok) {
+            // When Chrome is not focused (user in another app), CDP mouse events can be flaky.
+            // Fall back to triggering the send action via DOM APIs, then re-check for ack.
+            await tryDomSend();
+            ack = await waitForAck(ackTimeoutMs);
         }
 
         if (ack.ok) {
             return { ok: true, meta: { ...focusMeta, ack: ack.reason } };
         }
 
+        try {
+            await refreshChromeFocusState();
+        } catch (error) {
+            // ignore
+        }
         const finalState = await evalState();
         const finalAck = ack.current;
-        throw new Error(
+        const sendErr = new Error(
             `Claude send could not be confirmed. `
+            + `chromeHasFocus=${chromeHasFocus} `
+            + `docHasFocus=${finalState?.documentHasFocus ?? 'unknown'} `
+            + `visibility=${finalState?.visibilityState ?? 'unknown'} `
+            + `activeEl=${finalState?.activeElementTag ?? 'unknown'} `
+            + `sendHit=${finalState?.sendHitTag ?? 'unknown'} `
             + `inputLen=${finalState?.inputLen ?? 'unknown'} `
             + `sendDisabled=${finalState?.sendDisabled ?? 'unknown'} `
             + `ackBottomLen=${finalAck?.bottomLen ?? 'unknown'} `
             + `ackGenerating=${finalAck?.generating ?? 'unknown'} `
             + `focus=${JSON.stringify(focusMeta)}`
         );
+        sendErr.code = chromeHasFocus ? 'CLAUDE_SEND_UNCONFIRMED' : 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED';
+        sendErr.meta = { focus: focusMeta, state: finalState, ack: finalAck };
+        throw sendErr;
     } finally {
         await debuggerDetach(debuggee);
     }
@@ -4871,6 +5055,7 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                 }
             } catch (error) {
                 const rawMessage = String(error?.message || error || '').trim();
+                const originalCode = typeof error?.code === 'string' ? error.code : null;
                 const tips = [];
                 if (/another debugger|already attached/i.test(rawMessage)) {
                     tips.push('Close DevTools on the Claude tab (only one debugger can attach).');
@@ -4888,9 +5073,14 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                     tips.push('Verify you can type and send manually in that Claude tab; if not, Claude is blocking input (or the composer is not ready).');
                 }
                 const suffix = tips.length ? ` ${tips.join(' ')}` : '';
-                const err = new Error(`Failed to send to Claude via debugger.${rawMessage ? ` (${rawMessage})` : ''}${suffix}`);
-                err.code = 'CLAUDE_DEBUGGER_FAILED';
+                const needsChromeFocus = originalCode === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED';
+                const prefix = needsChromeFocus
+                    ? 'Failed to send to Claude while Chrome is not focused; it will retry automatically when you return to Chrome.'
+                    : 'Failed to send to Claude via debugger.';
+                const err = new Error(`${prefix}${rawMessage ? ` (${rawMessage})` : ''}${suffix}`);
+                err.code = originalCode || 'CLAUDE_DEBUGGER_FAILED';
                 err.provider = 'claude';
+                err.meta = error?.meta || null;
                 throw err;
             }
         }
