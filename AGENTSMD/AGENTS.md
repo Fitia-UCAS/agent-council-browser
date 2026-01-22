@@ -373,6 +373,7 @@ Defaults are intentionally lightweight; additional role reminders can be added v
   - Waits for **new text** (different from baseline).
   - Tracks `stableTicks` and `lastTextChangeAt`.
   - If generation appears to be still ongoing but text is stable for a long time, it forces a capture (`forceCaptureMs`).
+  - ChatGPT guardrail: capture only starts once the selected assistant block is a **new turn** (best assistant index >= baseline assistant count), to avoid accidentally capturing the previous message during ChatGPT Pro UI rerenders / reflection panels.
 
 Current force‑capture thresholds:
 
@@ -391,6 +392,7 @@ Current force‑capture thresholds:
 - Collects multiple candidate content nodes within the latest `[data-message-author-role="assistant"]` (e.g., `data-testid="message-content"`, `.prose`, `.markdown`, and the message root).
 - Ranks candidates using `captureUtils.js` heuristics to avoid capturing sources-only/reference blocks when a real answer is present.
 - If a newer assistant block looks like link/reference content (e.g., “Sources”), it is appended to the main answer to preserve hyperlinks.
+- Pro/Reasoning UI: assistant nodes are scoped to the main conversation area (prefers `[role="log"]`), and side panels (e.g. reflection/reasoning) are excluded via `<aside>`/`role=complementary` and attribute keyword checks.
 - Debugging: set `localStorage.mlc_capture_debug = '1'` in the provider tab console to log candidate scoring and capture decisions.
 
 **Claude**:

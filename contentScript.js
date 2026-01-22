@@ -372,10 +372,17 @@
 	        captureState.turnIndex = message.turnIndex || null;
 	        captureState.startedAt = message.timestamp || Date.now();
 	        captureState.lastText = '';
-	        captureState.baselineAssistantCount = isChatGPT
-	            ? document.querySelectorAll('[data-message-author-role="assistant"]').length
-	            : null;
-	        captureState.baselineText = extractLatestResponseText() || '';
+	        captureState.baselineAssistantCount = null;
+	        const baselineExtraction = extractLatestResponse({ withMeta: true });
+	        captureState.baselineText = baselineExtraction.text || '';
+	        if (isChatGPT) {
+	            const baselineIndex = Number.isFinite(baselineExtraction.meta?.bestAssistantIndex)
+	                ? baselineExtraction.meta.bestAssistantIndex
+	                : null;
+	            captureState.baselineAssistantCount = baselineIndex !== null
+	                ? Math.max(0, baselineIndex + 1)
+	                : getChatGPTConversationAssistantNodes().length;
+	        }
 	        captureState.hasNewText = false;
             captureState.sawGenerating = false;
 	        captureState.lastTextChangeAt = captureState.startedAt;
@@ -395,9 +402,19 @@
 
     function isChatGPTGenerating() {
         const stopButton = document.querySelector(
-            'button[data-testid="stop-button"], button[data-testid="fruitjuice-stop-button"], button[aria-label*="Stop generating" i], button[aria-label*="Stop" i]'
+            'button[data-testid="stop-button"], button[data-testid="fruitjuice-stop-button"], button[data-testid*="stop" i], button[aria-label*="Stop generating" i], button[aria-label*="Stop" i], button[aria-label*="Arrêter" i], button[aria-label*="Annuler" i], button[title*="Stop" i], button[title*="Arrêter" i], button[title*="Annuler" i]'
         );
-        return !!(stopButton && stopButton.offsetParent !== null);
+        if (stopButton && stopButton.offsetParent !== null) return true;
+
+        // Fallback: look for a visible button whose text indicates generation is running.
+        const buttons = Array.from(document.querySelectorAll('button'));
+        for (const button of buttons) {
+            if (!button || button.offsetParent === null) continue;
+            const label = (button.textContent || '').trim().toLowerCase();
+            if (!label) continue;
+            if (label === 'stop' || label === 'arrêter' || label === 'annuler') return true;
+        }
+        return false;
     }
 
     function isGeminiGenerating() {
@@ -505,6 +522,84 @@
 	        return avgLen <= 32;
 	    }
 
+	    function getElementAttributeValue(element, attr) {
+	        if (!element || typeof element.getAttribute !== 'function') return '';
+	        return (element.getAttribute(attr) || '').toLowerCase();
+	    }
+
+	    function hasChatGPTReflectionAncestor(node) {
+	        const keywords = ['reflection', 'réflexion', 'reasoning'];
+	        let current = node;
+	        while (current && current !== document.body) {
+	            const tag = current.tagName?.toLowerCase?.();
+	            if (tag === 'aside' || tag === 'nav') return true;
+	            const role = getElementAttributeValue(current, 'role');
+	            if (role === 'complementary' || role === 'navigation') return true;
+	            const combined = [
+	                getElementAttributeValue(current, 'data-testid'),
+	                getElementAttributeValue(current, 'aria-label'),
+	                getElementAttributeValue(current, 'data-role')
+	            ].join(' ');
+	            if (keywords.some(keyword => combined.includes(keyword))) {
+	                return true;
+	            }
+	            current = current.parentElement;
+	        }
+	        return false;
+	    }
+
+	    function findChatGPTConversationRoots() {
+	        const preferredSelectors = [
+	            '[role="log"]',
+	            '[data-testid="conversation-panel"]',
+	            '[data-testid="conversation-container"]',
+	            '[data-testid="chat-panel"]',
+	            '[data-testid="chat-app"]'
+	        ];
+	        const preferred = [];
+	        for (const selector of preferredSelectors) {
+	            try {
+	                const el = document.querySelector(selector);
+	                if (el && !preferred.includes(el)) preferred.push(el);
+	            } catch (error) {
+	            }
+	        }
+	        if (preferred.length) return preferred;
+
+	        const fallbackSelectors = ['main', '[role="main"]'];
+	        const roots = [];
+	        for (const selector of fallbackSelectors) {
+	            try {
+	                const el = document.querySelector(selector);
+	                if (el && !roots.includes(el)) roots.push(el);
+	            } catch (error) {
+	            }
+	        }
+	        return roots.length ? roots : [document.body];
+	    }
+
+	    function isChatGPTConversationNode(node, roots) {
+	        if (!node) return false;
+	        if (hasChatGPTReflectionAncestor(node)) return false;
+	        if (!roots || !roots.length) return true;
+	        return roots.some(root => root.contains(node));
+	    }
+
+	    function getChatGPTConversationAssistantNodes() {
+	        const rawAssistantNodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+	        if (!rawAssistantNodes.length) return [];
+
+	        const turnScoped = rawAssistantNodes.filter(node => node.closest?.('[data-testid="conversation-turn"]'));
+	        const baseNodes = turnScoped.length ? turnScoped : rawAssistantNodes;
+
+	        const roots = findChatGPTConversationRoots();
+	        const scoped = baseNodes.filter(node => isChatGPTConversationNode(node, roots));
+	        if (scoped.length) return scoped;
+
+	        const noReflection = baseNodes.filter(node => !hasChatGPTReflectionAncestor(node));
+	        return noReflection.length ? noReflection : baseNodes;
+	    }
+
         function normalizeCaptureCandidateText(text) {
             const normalized = CaptureUtils?.normalizeWhitespace
                 ? CaptureUtils.normalizeWhitespace(text)
@@ -580,7 +675,8 @@
         }
 
 	    function extractChatGPTResponse(options = {}) {
-	        const assistantNodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+	        const conversationRoots = findChatGPTConversationRoots();
+	        const assistantNodes = getChatGPTConversationAssistantNodes();
 	        const baselineCount = Number.isFinite(captureState.baselineAssistantCount)
 	            ? captureState.baselineAssistantCount
 	            : null;
@@ -624,7 +720,8 @@
             // Fallback: scan for recent content nodes outside of assistant roots (best effort).
             if (candidates.length === 0) {
                 const selector = '[data-testid="message-content"], .prose, .markdown';
-                const nodes = Array.from(document.querySelectorAll(selector));
+                const searchRoot = conversationRoots && conversationRoots.length ? conversationRoots[0] : document;
+                const nodes = Array.from(searchRoot.querySelectorAll(selector)).filter(node => !hasChatGPTReflectionAncestor(node));
                 const recent = nodes.slice(Math.max(0, nodes.length - 8));
                 for (let i = 0; i < recent.length; i++) {
                     const node = recent[i];
@@ -1740,7 +1837,27 @@
 	        captureState.lastExtractionMeta = extraction.meta || null;
 
 	        if (!captureState.hasNewText) {
-	            if (!text || text === captureState.baselineText) return;
+	            if (!text) return;
+
+	            if (isChatGPT) {
+	                const baselineCount = Number.isFinite(captureState.baselineAssistantCount)
+	                    ? captureState.baselineAssistantCount
+	                    : null;
+	                const bestAssistantIndex = Number.isFinite(captureState.lastExtractionMeta?.bestAssistantIndex)
+	                    ? captureState.lastExtractionMeta.bestAssistantIndex
+	                    : null;
+
+	                // Prevent capturing a pre-turn assistant message (common in Pro mode due to side panels/rerenders).
+	                if (baselineCount !== null) {
+	                    if (bestAssistantIndex === null || bestAssistantIndex < baselineCount) return;
+	                }
+
+	                const baselineNormalized = normalizeCaptureCandidateText(captureState.baselineText || '');
+	                const textNormalized = normalizeCaptureCandidateText(text);
+	                if (baselineNormalized && textNormalized && textNormalized === baselineNormalized) return;
+	            } else {
+	                if (text === captureState.baselineText) return;
+	            }
 	            captureState.hasNewText = true;
 	            captureState.lastText = text;
             captureState.lastTextChangeAt = now;
@@ -1787,13 +1904,25 @@
                 stableCaptureMs = Math.max(stableCaptureMs, 4500);
             }
 
+            const tabHidden = document.visibilityState !== 'visible';
+            const visibilityMultiplier = tabHidden ? 2 : 1;
+            if (tabHidden) {
+                const hiddenStableMin = isChatGPT ? 6000 : 3000;
+                stableCaptureMs = Math.max(stableCaptureMs, hiddenStableMin);
+            }
+            const finalForceCaptureMs = forceCaptureMs * visibilityMultiplier;
+            const finalMaxWaitMs = maxWaitMs * visibilityMultiplier;
+            const minStableForTimeoutMs = tabHidden
+                ? (isChatGPT ? 8000 : 5000)
+                : (isChatGPT ? 6000 : 4000);
+
 	        if (generating) {
-	            if (stableForMs >= forceCaptureMs && text.length >= minTextLen) {
+	            if (stableForMs >= finalForceCaptureMs && text.length >= minTextLen) {
 	                if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
 	                captureDebug('Force capture', {
 	                    llm: currentLLM,
 	                    stableForMs,
-	                    forceCaptureMs,
+	                    forceCaptureMs: finalForceCaptureMs,
 	                    isLikelyReferenceOnly,
 	                    textLen: text.length,
 	                    meta: captureState.lastExtractionMeta
@@ -1804,9 +1933,8 @@
 	        }
 
             if (text.length < minTextLen) return;
-            const minStableForTimeoutMs = isChatGPT ? 6000 : 4000;
             const canStableCapture = stableForMs >= stableCaptureMs;
-            const canTimeoutCapture = totalForMs >= maxWaitMs && stableForMs >= minStableForTimeoutMs;
+            const canTimeoutCapture = totalForMs >= finalMaxWaitMs && stableForMs >= minStableForTimeoutMs;
             if (!canStableCapture && !canTimeoutCapture) return;
             if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
 
@@ -1820,7 +1948,7 @@
                 stableForMs,
                 stableCaptureMs,
                 totalForMs,
-                maxWaitMs,
+                maxWaitMs: finalMaxWaitMs,
                 minStableForTimeoutMs,
                 isLikelyReferenceOnly,
                 generating,
