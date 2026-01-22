@@ -27,7 +27,9 @@ This file is the durable memory for the repo. It is the canonical reference for 
 4. The extension runs a debate (when Route = Debate):
    - **Turn 1**: provider[0] gets full context + user query.
    - **Turn 2**: provider[1] gets full context + user query + provider[0] answer.
-   - **Turns 3..N**: round‑robin across providers; each new prompt contains only the previous turn’s latest answer (the tab thread holds history).
+   - **Turns 3..N**: round‑robin across providers:
+     - **2 providers**: each new prompt includes only the other provider’s latest answer (the tab thread holds history).
+     - **3+ providers**: each new prompt includes **all missing answers since this provider last responded**, so every tab stays in sync.
 5. The side panel shows a **single linear transcript**:
    - user query
    - provider[0] answer 1
