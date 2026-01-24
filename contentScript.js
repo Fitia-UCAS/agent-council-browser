@@ -400,16 +400,82 @@
 	        setTimeout(() => scheduleEvaluateCapture(), 1200);
 	    }
 
+    function isElementVisible(el) {
+        if (!el || !(el instanceof Element)) return false;
+        if (!el.isConnected) return false;
+        let style = null;
+        try {
+            style = window.getComputedStyle(el);
+        } catch (error) {
+            style = null;
+        }
+        if (style) {
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            const opacity = parseFloat(style.opacity || '1');
+            if (Number.isFinite(opacity) && opacity <= 0) return false;
+        }
+
+        let rect = null;
+        try {
+            rect = el.getBoundingClientRect();
+        } catch (error) {
+            rect = null;
+        }
+        if (!rect) return false;
+        if (!(rect.width > 0 && rect.height > 0)) return false;
+
+        return rect.bottom > 0
+            && rect.right > 0
+            && rect.top < window.innerHeight
+            && rect.left < window.innerWidth;
+    }
+
     function isChatGPTGenerating() {
-        const stopButton = document.querySelector(
-            'button[data-testid="stop-button"], button[data-testid="fruitjuice-stop-button"], button[data-testid*="stop" i], button[aria-label*="Stop generating" i], button[aria-label*="Stop" i], button[aria-label*="Arrêter" i], button[aria-label*="Annuler" i], button[title*="Stop" i], button[title*="Arrêter" i], button[title*="Annuler" i]'
-        );
-        if (stopButton && stopButton.offsetParent !== null) return true;
+        const inputEl = findInput({ silent: true });
+        const composerRoot = inputEl
+            ? (inputEl.closest('form') || inputEl.closest('[role="form"]') || inputEl.parentElement)
+            : null;
+
+        const strictStopSelector = [
+            'button[data-testid="stop-button"]',
+            'button[data-testid="fruitjuice-stop-button"]',
+            'button[aria-label*="Stop generating" i]',
+            'button[aria-label*="Stop" i]',
+            'button[aria-label*="Arrêter" i]',
+            'button[aria-label*="Annuler" i]',
+            'button[title*="Stop" i]',
+            'button[title*="Arrêter" i]',
+            'button[title*="Annuler" i]'
+        ].join(', ');
+        const looseStopSelector = `${strictStopSelector}, button[data-testid*="stop" i]`;
+
+        const isBottomViewportControl = (node) => {
+            if (!node) return false;
+            try {
+                const rect = node.getBoundingClientRect();
+                return Number.isFinite(rect.bottom) && rect.bottom >= window.innerHeight - 260;
+            } catch (error) {
+                return false;
+            }
+        };
+
+        if (composerRoot) {
+            const stopButton = composerRoot.querySelector(looseStopSelector);
+            if (stopButton && isElementVisible(stopButton)) return true;
+        }
+
+        const stopCandidates = Array.from(document.querySelectorAll(strictStopSelector));
+        for (const candidate of stopCandidates) {
+            if (!isElementVisible(candidate)) continue;
+            if (composerRoot && composerRoot.contains(candidate)) return true;
+            if (isBottomViewportControl(candidate)) return true;
+        }
 
         // Fallback: look for a visible button whose text indicates generation is running.
-        const buttons = Array.from(document.querySelectorAll('button'));
+        const buttonScope = composerRoot || document;
+        const buttons = Array.from(buttonScope.querySelectorAll('button'));
         for (const button of buttons) {
-            if (!button || button.offsetParent === null) continue;
+            if (!isElementVisible(button)) continue;
             const label = (button.textContent || '').trim().toLowerCase();
             if (!label) continue;
             if (label === 'stop' || label === 'arrêter' || label === 'annuler') return true;
@@ -419,13 +485,13 @@
 
     function isGeminiGenerating() {
         const stopIcon = document.querySelector('mat-icon[fonticon=\"stop\"]');
-        if (stopIcon && stopIcon.offsetParent !== null) return true;
+        if (stopIcon && isElementVisible(stopIcon)) return true;
         const stopButton = document.querySelector('button[aria-label*=\"Stop\" i], button[aria-label*=\"Cancel\" i]');
-        if (stopButton && stopButton.offsetParent !== null) return true;
+        if (stopButton && isElementVisible(stopButton)) return true;
         const spinner = document.querySelector('mat-progress-spinner, mat-spinner, [role=\"progressbar\"], .loading, .spinner');
-        if (spinner && spinner.offsetParent !== null) return true;
+        if (spinner && isElementVisible(spinner)) return true;
         const sendButton = document.querySelector('button[aria-label*=\"Send\" i], button[data-testid=\"send-button\"]');
-        if (sendButton && sendButton.offsetParent !== null && !sendButton.disabled) return false;
+        if (sendButton && isElementVisible(sendButton) && !sendButton.disabled) return false;
         return false;
     }
 
@@ -433,9 +499,9 @@
         const stopButton = document.querySelector(
             'button[aria-label*=\"Stop\" i], button[aria-label*=\"Cancel\" i], button[aria-label*=\"Annuler\" i], button[aria-label*=\"Arrêter\" i], button[title*=\"Stop\" i], button[title*=\"Cancel\" i], button[title*=\"Annuler\" i], button[title*=\"Arrêter\" i], button[data-testid*=\"stop\" i]'
         );
-        if (stopButton && stopButton.offsetParent !== null) return true;
+        if (stopButton && isElementVisible(stopButton)) return true;
         const spinner = document.querySelector('[role=\"progressbar\"], .loading, .spinner, .animate-spin');
-        if (spinner && spinner.offsetParent !== null) return true;
+        if (spinner && isElementVisible(spinner)) return true;
         return false;
     }
 
@@ -443,9 +509,9 @@
         const stopButton = document.querySelector(
             'button[aria-label*=\"Stop\" i], button[aria-label*=\"Cancel\" i], button[title*=\"Stop\" i], button[title*=\"Cancel\" i], button[data-testid*=\"stop\" i]'
         );
-        if (stopButton && stopButton.offsetParent !== null) return true;
+        if (stopButton && isElementVisible(stopButton)) return true;
         const spinner = document.querySelector('[role=\"progressbar\"], .loading, .spinner, .animate-spin');
-        if (spinner && spinner.offsetParent !== null) return true;
+        if (spinner && isElementVisible(spinner)) return true;
         return false;
     }
 
@@ -1904,6 +1970,29 @@
                 stableCaptureMs = Math.max(stableCaptureMs, 4500);
             }
 
+            const nonEmptyLineCount = String(text || '')
+                .split(/\r?\n/)
+                .map(line => line.trim())
+                .filter(Boolean).length;
+
+            // If we never observed ChatGPT's "generating" UI, be more conservative to avoid
+            // prematurely capturing small fragments during UI pauses.
+            if (isChatGPT && !captureState.sawGenerating) {
+                stableCaptureMs = Math.max(stableCaptureMs, 6000);
+            }
+
+            if (isChatGPT && !isLikelyReferenceOnly && !captureState.sawGenerating) {
+                const looksLikeEarlyFragment = wordCount > 0
+                    && wordCount < 8
+                    && nonEmptyLineCount <= 1
+                    && text.length < 40
+                    && !/[.!?](?:\s|$)/.test(text);
+
+                if (looksLikeEarlyFragment) {
+                    stableCaptureMs = Math.max(stableCaptureMs, 12000);
+                }
+            }
+
             const tabHidden = document.visibilityState !== 'visible';
             const visibilityMultiplier = tabHidden ? 2 : 1;
             if (tabHidden) {
@@ -1921,6 +2010,7 @@
 	                if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
 	                captureDebug('Force capture', {
 	                    llm: currentLLM,
+                        sawGenerating: captureState.sawGenerating,
 	                    stableForMs,
 	                    forceCaptureMs: finalForceCaptureMs,
 	                    isLikelyReferenceOnly,
@@ -1945,6 +2035,7 @@
                     : 'Stable capture');
             captureDebug(reason, {
                 llm: currentLLM,
+                sawGenerating: captureState.sawGenerating,
                 stableForMs,
                 stableCaptureMs,
                 totalForMs,

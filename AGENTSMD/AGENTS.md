@@ -377,12 +377,13 @@ Defaults are intentionally lightweight; additional role reminders can be added v
 
 Current force‑capture thresholds:
 
-- ChatGPT: 20s stable (45s stable when extracted text looks like a sources-only/reference list)
-- Gemini: 15s stable
+- ChatGPT: ~45s stable (and ~60s stable when extracted text looks like a sources-only/reference list)
+- Gemini: ~15s stable
+- Hidden tabs: force-capture + timeout thresholds are increased to avoid premature capture under background throttling.
 
 ### Generating detection
 
-- ChatGPT: presence of stop button (`button[data-testid="stop-button"]` or aria Stop).
+- ChatGPT: presence of stop button (`data-testid*="stop"` / aria-label/title Stop/Arrêter/Annuler; best effort).
 - Gemini: stop icon/button, progress spinners, or disabled send button heuristics.
 
 ### Extraction logic

@@ -1,4 +1,4 @@
-# Answer Detection + Rich Rendering (ChatGPT/Gemini)
+# Answer Detection + Rich Rendering (ChatGPT/Gemini/Claude/Grok)
 
 This repo already has a high-level architecture write-up in `AGENTSMD/AGENTS.md`.  
 This document is the “deep memory” for **how we capture LLM answers** (text + rich formatting) and **how we render them safely** in the side panel transcript.
@@ -48,7 +48,7 @@ When a response is captured, the content script sends:
 ### Background session state
 Debate session messages (`activeDebateState.messages[]`) store:
 
-- `role` (`user`, `chatgpt`, `gemini`)
+- `role` (`user`, `chatgpt`, `gemini`, `claude`, `grok`)
 - `content` (plain text)
 - `timestamp`, `turnIndex`, `roundIndex`
 - `contentHtml` (optional; capped; only if present)
@@ -62,15 +62,15 @@ The side panel renders `contentHtml` if present, else falls back to `content`.
 
 ## Capture pipeline overview (content scripts)
 
-The capture code lives in `contentScript.js`. It runs on both `chatgpt.com` and `gemini.google.com`.
+The capture code lives in `contentScript.js`. It runs on `chatgpt.com`/`chat.openai.com`, `gemini.google.com`, `claude.ai`, and `grok.com`.
 
 ### 1) Capture arming
 On `MLC_PROMPT_SENT`, we “arm” capture:
 
 - Store identifiers: `promptId`, `sessionId`, `turnIndex`
 - Capture baselines to avoid re-capturing old content:
-  - `baselineText = extractLatestResponseText()`
-  - ChatGPT-only: `baselineAssistantCount = count([data-message-author-role="assistant"])`
+  - `baselineText` is taken from `extractLatestResponse({ withMeta: true })` (so we can align baselines with what extraction would actually pick).
+  - ChatGPT-only: `baselineAssistantCount` is derived from the **best assistant index** in the current extraction (`bestAssistantIndex + 1`) when available, otherwise falls back to counting **conversation-scoped** assistant nodes.
 - Reset stabilization state:
   - `hasNewText = false`
   - `lastTextChangeAt = startedAt` (used for time-based stability)
@@ -88,7 +88,9 @@ The loop logic is (time-based, not tick-based):
 1. Extract latest response (`extractLatestResponse({ withMeta: true })`):
    - returns `{ text, meta }`
    - `meta` helps debug candidate ranking (ChatGPT) and stability logic
-2. Wait until we see new output (different from baseline).
+2. Wait until we see new output.
+   - General rule: extracted text differs from the baseline.
+   - ChatGPT guardrail (important for Pro/reasoning UI rerenders): we do **not** consider output “new” until the selected block is a **new assistant turn** (`bestAssistantIndex >= baselineAssistantCount`) and the extracted text differs from the baseline after whitespace normalization.
 3. Track stability:
    - if text changes: update `lastTextChangeAt = now`
    - compute `stableForMs = now - lastTextChangeAt`
@@ -103,20 +105,23 @@ Reference-like guardrail (ChatGPT):
 
 Current timing parameters (best-effort, may be tuned as provider UIs change):
 - ChatGPT:
-  - minimum stable capture window (normal): ~1.8s
+  - minimum stable capture window (normal): ~3s (and ~4.5s when the extracted text is a tiny fragment)
   - minimum stable capture window (reference-like): ~9s
-  - force capture while “generating” (normal): ~20s stable
-  - force capture while “generating” (reference-like): ~45s stable
+  - force capture while “generating” (normal): ~45s stable
+  - force capture while “generating” (reference-like): ~60s stable
   - hard timeout (only when stable for a while): ~180s total
 - Gemini:
   - minimum stable capture window (normal): ~1.2s
   - force capture while “generating”: ~15s stable
   - hard timeout (only when stable for a while): ~120s total
 
+Hidden tab behavior (all providers):
+- When the provider tab is not visible (`document.visibilityState !== 'visible'`), stability + timeout thresholds are increased (roughly 2× for force/timeout) to avoid premature capture under background throttling.
+
 ### 3) Generating detection
 Provider-specific heuristics:
 
-- ChatGPT: stop button visible (`button[data-testid="stop-button"]` / aria Stop)
+- ChatGPT: stop button visible (`data-testid*="stop"` and localized aria/title like Stop/Arrêter/Annuler; best effort)
 - Gemini: stop icon/button/spinner heuristics (best effort)
 
 This is intentionally heuristic because provider UIs change.
@@ -149,6 +154,7 @@ Key points:
 - Scans up to the **4 most recent assistant message roots** starting at `baselineAssistantCount`:
   - This fixes an intermittent ChatGPT UI behavior where “Sources/References” can be rendered as a *separate* assistant block after the main answer.
   - If we only looked at the latest assistant block, we could accidentally capture sources-only text.
+- Pro/Reasoning UI: assistant roots and fallback candidate scans are scoped to the main conversation area (prefers `[role="log"]`) and explicitly exclude side panels (e.g. reflection/reasoning) via `<aside>`/`role=complementary`/attribute keyword checks.
 - Collects candidate nodes under each scanned assistant root:
   - `[data-testid="message-content"]`, `.prose`, `.markdown`, plus each message root itself
 - Deduplicates candidates by normalized text
