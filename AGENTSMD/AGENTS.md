@@ -373,15 +373,17 @@ Defaults are intentionally lightweight; additional role reminders can be added v
   - Waits for **new text** (different from baseline).
   - Tracks `stableTicks` and `lastTextChangeAt`.
   - If generation appears to be still ongoing but text is stable for a long time, it forces a capture (`forceCaptureMs`).
+  - ChatGPT guardrail: capture only starts once the selected assistant block is a **new turn** (best assistant index >= baseline assistant count), to avoid accidentally capturing the previous message during ChatGPT Pro UI rerenders / reflection panels.
 
 Current force‑capture thresholds:
 
-- ChatGPT: 20s stable (45s stable when extracted text looks like a sources-only/reference list)
-- Gemini: 15s stable
+- ChatGPT: ~45s stable (and ~60s stable when extracted text looks like a sources-only/reference list)
+- Gemini: ~15s stable
+- Hidden tabs: force-capture + timeout thresholds are increased to avoid premature capture under background throttling.
 
 ### Generating detection
 
-- ChatGPT: presence of stop button (`button[data-testid="stop-button"]` or aria Stop).
+- ChatGPT: presence of stop button (`data-testid*="stop"` / aria-label/title Stop/Arrêter/Annuler; best effort).
 - Gemini: stop icon/button, progress spinners, or disabled send button heuristics.
 
 ### Extraction logic
@@ -390,7 +392,15 @@ Current force‑capture thresholds:
 
 - Collects multiple candidate content nodes within the latest `[data-message-author-role="assistant"]` (e.g., `data-testid="message-content"`, `.prose`, `.markdown`, and the message root).
 - Ranks candidates using `captureUtils.js` heuristics to avoid capturing sources-only/reference blocks when a real answer is present.
+- If a newer assistant block looks like link/reference content (e.g., “Sources”), it is appended to the main answer to preserve hyperlinks.
+- Pro/Reasoning UI: assistant nodes are scoped to the main conversation area (prefers `[role="log"]`), and side panels (e.g. reflection/reasoning) are excluded via `<aside>`/`role=complementary` and attribute keyword checks.
 - Debugging: set `localStorage.mlc_capture_debug = '1'` in the provider tab console to log candidate scoring and capture decisions.
+
+**Claude**:
+
+- Aggregates content inside the most recent assistant message root (`data-testid`/assistant/`article` heuristics), then ranks candidates with the same heuristics.
+- Prompt-echo filtering only excludes near-identical prompt repeats; prompt-prefixed answers still capture.
+- Link/reference-only blocks immediately after the answer are appended to preserve hyperlinks.
 
 **Gemini**:
 
@@ -409,6 +419,8 @@ Current force‑capture thresholds:
 - Non‑session capture:
   - `CHATGPT_RESPONSE_CAPTURED`
   - `GEMINI_RESPONSE_CAPTURED`
+  - `CLAUDE_RESPONSE_CAPTURED`
+  - `GROK_RESPONSE_CAPTURED`
 
 ### Model label detection (best effort)
 

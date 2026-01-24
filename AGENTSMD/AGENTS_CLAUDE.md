@@ -249,6 +249,8 @@ Claude-specific improvements:
 - broader and safer message selectors (preferring bottom-most assistant message nodes)
 - excludes the composer subtree from candidate extraction
 - uses `CaptureUtils.chooseBestTextCandidate()` to avoid returning sources-only fragments when multiple candidates exist
+- aggregates content nodes within the latest assistant message root to avoid truncation
+- appends link/reference-only blocks that appear immediately after the answer
 
 ### 4.7 Capture arming across navigation
 
@@ -415,4 +417,3 @@ Recommended architecture for future providers:
   - Claude extraction + generating detection
 - `captureUtils.js`
   - `chooseBestTextCandidate()` (avoid returning sources-only lists)
-
