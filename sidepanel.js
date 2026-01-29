@@ -12,6 +12,7 @@ function initProviderMap(value) {
 
 const state = {
     sessionId: null,
+    sessionsByChatId: {},
     activeChatId: null,
     activeChat: null,
     activeChatHasMore: false,
@@ -88,6 +89,49 @@ function storageSet(items) {
             resolve();
         }
     });
+}
+
+function cacheSession(session) {
+    if (!session || !session.chatId) return;
+    state.sessionsByChatId[session.chatId] = session;
+}
+
+function upsertCachedSession(chatId, patch) {
+    if (!chatId) return;
+    const current = getCachedSession(chatId) || { chatId };
+    state.sessionsByChatId[chatId] = { ...current, ...patch, chatId };
+}
+
+function clearCachedSession(chatId) {
+    if (!chatId) return;
+    delete state.sessionsByChatId[chatId];
+}
+
+function getCachedSession(chatId) {
+    if (!chatId) return null;
+    return state.sessionsByChatId[chatId] || null;
+}
+
+function syncActiveSessionState() {
+    const cached = getCachedSession(state.activeChatId);
+    hydrateSession(cached);
+}
+
+function findChatIdBySessionId(sessionId) {
+    if (!sessionId) return null;
+    const entries = Object.entries(state.sessionsByChatId);
+    for (const [chatId, session] of entries) {
+        if (session?.sessionId === sessionId) return chatId;
+    }
+    return null;
+}
+
+function isMessageForActiveChat(message) {
+    const chatId = message?.chatId || message?.session?.chatId || null;
+    if (chatId) return chatId === state.activeChatId;
+    if (!chatId && !state.activeChatId) return true;
+    if (message?.sessionId && state.sessionId) return message.sessionId === state.sessionId;
+    return false;
 }
 
 function normalizeProviderId(provider) {
@@ -1833,8 +1877,6 @@ function setSessionState({ running, paused }) {
     if (elements.routeButton) elements.routeButton.disabled = locked;
     if (locked && isRoutePopoverOpen()) closeRoutePopover();
     if (elements.refreshProfiles) elements.refreshProfiles.disabled = locked;
-    if (elements.newChatButton) elements.newChatButton.disabled = locked;
-    if (elements.drawerNewChatButton) elements.drawerNewChatButton.disabled = locked;
     if (elements.attachmentButton) elements.attachmentButton.disabled = locked || state.attachmentsLoading;
     if (elements.attachmentInput) elements.attachmentInput.disabled = locked || state.attachmentsLoading;
     renderRouteUi();
@@ -1901,7 +1943,7 @@ function requestHistoryStatus({ hydrateChats = false, promptUnlock = false } = {
 }
 
 function requestActiveSession() {
-    sendMessage({ type: 'GET_ACTIVE_SESSION' });
+    sendMessage({ type: 'GET_ACTIVE_SESSION', chatId: state.activeChatId || undefined });
 }
 
 function updateSessionWatchdog() {
@@ -1969,6 +2011,9 @@ function handleChatsState(payload) {
     renderChatList();
     if (shouldLoad) {
         loadChat(nextActiveId);
+    } else if (state.activeChatId) {
+        syncActiveSessionState();
+        requestActiveSession();
     }
 }
 
@@ -1983,10 +2028,6 @@ function createNewChat() {
             setSessionStatus('History is off. Enable encryption in Settings → Security to save chats.');
             openSettingsDrawer();
         }
-        return;
-    }
-    if (state.running || state.paused) {
-        setSessionStatus('Stop the current run to start a new chat.');
         return;
     }
     sendMessage({ type: 'CREATE_CHAT' }, (response) => {
@@ -2045,6 +2086,8 @@ function loadChat(chatId) {
         renderChatList();
         applyRunDefaultsFromActiveChat();
         updateSendState();
+        syncActiveSessionState();
+        requestActiveSession();
     });
 }
 
@@ -2065,11 +2108,6 @@ function handleChatListClick(event) {
     if (!item || !item.dataset.chatId) return;
     const chatId = item.dataset.chatId;
     if (chatId === state.activeChatId) {
-        closeChatsDrawer();
-        return;
-    }
-    if (state.running || state.paused) {
-        setSessionStatus('Stop the current run to switch chats.');
         closeChatsDrawer();
         return;
     }
@@ -2645,6 +2683,7 @@ function stopSession() {
     sendMessage({
         type: 'STOP_SESSION',
         sessionId: state.sessionId || undefined,
+        chatId: state.activeChatId || undefined,
         reason: 'User requested stop'
     });
 }
@@ -2652,7 +2691,7 @@ function stopSession() {
 function resumeSession() {
     if (!state.sessionId || !state.paused) return;
     setSessionStatus('Resuming session...');
-    sendMessage({ type: 'RESUME_SESSION' }, handleActionResponse);
+    sendMessage({ type: 'RESUME_SESSION', sessionId: state.sessionId }, handleActionResponse);
 }
 
 function isFullyConnected() {
@@ -2684,26 +2723,59 @@ function handleBackgroundMessage(message) {
             handleChatsState(message);
             break;
         case 'ACTIVE_SESSION':
-            hydrateSession(message.session);
+            if (message.session) {
+                cacheSession(message.session);
+                if (isMessageForActiveChat(message) || !state.activeChatId) {
+                    hydrateSession(message.session);
+                }
+            } else if (state.activeChatId) {
+                clearCachedSession(state.activeChatId);
+                if (state.sessionId || state.running || state.paused) {
+                    hydrateSession(null);
+                }
+            }
             break;
         case 'UI_SESSION_STARTED':
-            state.sessionId = message.sessionId;
-            state.sessionProfiles = message.profileIds && typeof message.profileIds === 'object'
-                ? message.profileIds
-                : state.sessionProfiles;
-            ensureProviderMaps();
-            setSessionState({ running: true, paused: false });
-            setSessionStatus(`Running round 1 of ${message.rounds}`);
-            if (message.chatId && message.chatId !== state.activeChatId) {
-                loadChat(message.chatId);
+            if (message.chatId) {
+                upsertCachedSession(message.chatId, {
+                    sessionId: message.sessionId,
+                    isActive: true,
+                    isPaused: false,
+                    profileIds: message.profileIds && typeof message.profileIds === 'object' ? message.profileIds : undefined,
+                    tabIds: message.tabIds && typeof message.tabIds === 'object' ? message.tabIds : undefined,
+                    rounds: message.rounds
+                });
             }
-            if (state.stopRequested) {
-                state.stopRequested = false;
-                stopSession();
+            if (isMessageForActiveChat(message)) {
+                state.sessionId = message.sessionId;
+                state.sessionProfiles = message.profileIds && typeof message.profileIds === 'object'
+                    ? message.profileIds
+                    : state.sessionProfiles;
+                ensureProviderMaps();
+                setSessionState({ running: true, paused: false });
+                setSessionStatus(`Running round 1 of ${message.rounds}`);
+                if (message.chatId && message.chatId !== state.activeChatId) {
+                    loadChat(message.chatId);
+                }
+                if (state.stopRequested) {
+                    state.stopRequested = false;
+                    stopSession();
+                }
             }
             break;
         case 'UI_SESSION_PROGRESS':
-            handleProgress(message);
+            if (message.chatId) {
+                upsertCachedSession(message.chatId, {
+                    sessionId: message.sessionId,
+                    isActive: true,
+                    isPaused: false,
+                    roundIndex: message.roundIndex,
+                    rounds: message.totalRounds || message.rounds
+                });
+            }
+            if (isMessageForActiveChat(message)) {
+                handleProgress(message);
+            }
             break;
         case 'UI_MESSAGE_ADD':
             if (!message.chatId || message.chatId === state.activeChatId) {
@@ -2724,16 +2796,54 @@ function handleBackgroundMessage(message) {
             }
             break;
         case 'UI_SESSION_PAUSED':
-            handleSessionPaused(message);
+            if (message.chatId) {
+                upsertCachedSession(message.chatId, {
+                    sessionId: message.sessionId,
+                    isActive: true,
+                    isPaused: true,
+                    pausedProvider: message.provider || null,
+                    pausedReason: message.reason || null
+                });
+            }
+            if (isMessageForActiveChat(message)) {
+                handleSessionPaused(message);
+            }
             break;
         case 'UI_SESSION_RESUMED':
-            handleSessionResumed(message);
+            if (message.chatId) {
+                upsertCachedSession(message.chatId, {
+                    sessionId: message.sessionId,
+                    isActive: true,
+                    isPaused: false,
+                    pausedProvider: null,
+                    pausedReason: null
+                });
+            }
+            if (isMessageForActiveChat(message)) {
+                handleSessionResumed(message);
+            }
             break;
         case 'UI_SESSION_ENDED':
-            handleSessionEnded(message);
+            if (message.chatId) {
+                clearCachedSession(message.chatId);
+            } else if (message.sessionId) {
+                const chatId = findChatIdBySessionId(message.sessionId);
+                if (chatId) clearCachedSession(chatId);
+            }
+            if (isMessageForActiveChat(message)) {
+                handleSessionEnded(message);
+            }
             break;
         case 'UI_SESSION_ERROR':
-            handleSessionError(message);
+            if (message.chatId) {
+                clearCachedSession(message.chatId);
+            } else if (message.sessionId) {
+                const chatId = findChatIdBySessionId(message.sessionId);
+                if (chatId) clearCachedSession(chatId);
+            }
+            if (isMessageForActiveChat(message)) {
+                handleSessionError(message);
+            }
             break;
         case 'LLM_ERROR':
             handleSessionError({ error: message.error || 'Unknown error' });

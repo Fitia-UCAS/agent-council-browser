@@ -344,9 +344,11 @@ Defaults are intentionally lightweight; additional role reminders can be added v
   - ChatGPT: `#prompt-textarea`, `textarea[data-testid="prompt-textarea"]`, etc.
   - Gemini: `div.ql-editor[role="textbox"]`, contenteditable fallbacks.
 - Sets value using the correct method:
-  - ChatGPT often uses **contenteditable**; uses `document.execCommand('insertText')`.
+  - ChatGPT often uses **textarea**, Gemini uses **contenteditable**; uses native setters or `document.execCommand('insertText')`.
+  - **Large prompts** (≈8k+ chars) use a faster contenteditable `textContent` set first, with an execCommand fallback if it doesn't stick.
   - Dispatches `input`, `change`, and key events for framework sync.
 - Finds send button using selector lists; if not found, **falls back to Enter key**.
+- Send readiness waits are adaptive: longer when attachments or large prompts are present, shorter otherwise.
 
 ### `simpleInteraction_InjectOnly(...)`
 
@@ -374,6 +376,7 @@ Defaults are intentionally lightweight; additional role reminders can be added v
   - Tracks `stableTicks` and `lastTextChangeAt`.
   - If generation appears to be still ongoing but text is stable for a long time, it forces a capture (`forceCaptureMs`).
   - ChatGPT guardrail: capture only starts once the selected assistant block is a **new turn** (best assistant index >= baseline assistant count), to avoid accidentally capturing the previous message during ChatGPT Pro UI rerenders / reflection panels.
+  - If the ChatGPT “generating” UI is never observed, we delay capture longer for tiny fragments to avoid locking in the first token/heading.
 
 Current force‑capture thresholds:
 
@@ -383,7 +386,7 @@ Current force‑capture thresholds:
 
 ### Generating detection
 
-- ChatGPT: presence of stop button (`data-testid*="stop"` / aria-label/title Stop/Arrêter/Annuler; best effort).
+- ChatGPT: presence of stop button (`data-testid*="stop"` / aria-label/title Stop/Arrêter/Annuler; best effort). Visibility uses computed style + bounding rect (not `offsetParent`) because fixed/overlay UI can break `offsetParent`.
 - Gemini: stop icon/button, progress spinners, or disabled send button heuristics.
 
 ### Extraction logic
