@@ -106,6 +106,7 @@ Reference-like guardrail (ChatGPT):
 Current timing parameters (best-effort, may be tuned as provider UIs change):
 - ChatGPT:
   - minimum stable capture window (normal): ~3s (and ~4.5s when the extracted text is a tiny fragment)
+  - if the generating UI is never observed, tiny fragments wait longer (~12s) before final capture
   - minimum stable capture window (reference-like): ~9s
   - force capture while “generating” (normal): ~45s stable
   - force capture while “generating” (reference-like): ~60s stable
@@ -122,6 +123,7 @@ Hidden tab behavior (all providers):
 Provider-specific heuristics:
 
 - ChatGPT: stop button visible (`data-testid*="stop"` and localized aria/title like Stop/Arrêter/Annuler; best effort)
+- ChatGPT visibility check uses computed style + bounding rect (not `offsetParent`, which is unreliable for fixed/overlay buttons)
 - Gemini: stop icon/button/spinner heuristics (best effort)
 
 This is intentionally heuristic because provider UIs change.

@@ -78,6 +78,7 @@ function generatePromptId() {
 
 // DEBATE SESSION STATE MANAGEMENT
 const ACTIVE_SESSION_KEY = 'mlc_active_session_v2';
+const SESSIONS_KEY = 'mlc_sessions_v1';
 const PREFERRED_TABS_KEY = 'mlc_preferred_tabs';
 const TAB_PROFILES_KEY = 'mlc_tab_profiles_v1';
 const CHATS_KEY = 'mlc_chats_v1';
@@ -397,8 +398,146 @@ const defaultDebateState = {
     endedAt: 0
 };
 
-let activeDebateState = { ...defaultDebateState };
-let debateResponseChain = Promise.resolve();
+let sessionsById = new Map();
+let sessionsByChatId = new Map();
+let sessionsLoaded = false;
+let sessionsLoadPromise = null;
+const responseChainsBySessionId = new Map();
+
+function normalizeSessionState(session) {
+    if (!session || typeof session !== 'object') return null;
+    const sessionId = typeof session.sessionId === 'string' ? session.sessionId : null;
+    if (!sessionId) return null;
+    const normalized = { ...defaultDebateState, ...session, sessionId };
+    normalized.isActive = Boolean(normalized.isActive);
+    normalized.isPaused = Boolean(normalized.isPaused);
+    normalized.messages = Array.isArray(normalized.messages) ? normalized.messages : [];
+    normalized.profileIds = normalized.profileIds && typeof normalized.profileIds === 'object' ? normalized.profileIds : {};
+    normalized.tabIds = normalized.tabIds && typeof normalized.tabIds === 'object' ? normalized.tabIds : {};
+    if (!['debate', 'single', 'direct', 'parallel'].includes(normalized.mode)) {
+        normalized.mode = 'debate';
+    }
+    const providers = getSupportedProviderKeys();
+    for (const provider of providers) {
+        if (!Object.prototype.hasOwnProperty.call(normalized.profileIds, provider)) {
+            normalized.profileIds[provider] = null;
+        }
+        if (!Object.prototype.hasOwnProperty.call(normalized.tabIds, provider)) {
+            normalized.tabIds[provider] = null;
+        }
+    }
+    if (!Object.prototype.hasOwnProperty.call(normalized.profileIds, 'chatgpt')) {
+        normalized.profileIds.chatgpt = null;
+    }
+    if (!Object.prototype.hasOwnProperty.call(normalized.profileIds, 'gemini')) {
+        normalized.profileIds.gemini = null;
+    }
+    if (!Object.prototype.hasOwnProperty.call(normalized.tabIds, 'chatgpt')) {
+        normalized.tabIds.chatgpt = null;
+    }
+    if (!Object.prototype.hasOwnProperty.call(normalized.tabIds, 'gemini')) {
+        normalized.tabIds.gemini = null;
+    }
+    return normalized;
+}
+
+async function persistSessionsState() {
+    const payload = {};
+    for (const [sessionId, session] of sessionsById.entries()) {
+        payload[sessionId] = session;
+    }
+    await chrome.storage.local.set({ [SESSIONS_KEY]: payload });
+}
+
+async function loadSessionsState() {
+    if (sessionsLoaded) return sessionsById;
+    if (sessionsLoadPromise) return sessionsLoadPromise;
+    sessionsLoadPromise = (async () => {
+        const stored = await chrome.storage.local.get([SESSIONS_KEY, ACTIVE_SESSION_KEY]);
+        const rawSessions = stored?.[SESSIONS_KEY];
+        sessionsById = new Map();
+        sessionsByChatId = new Map();
+
+        const ingest = (raw) => {
+            const normalized = normalizeSessionState(raw);
+            if (!normalized || (!normalized.isActive && !normalized.isPaused)) return;
+            sessionsById.set(normalized.sessionId, normalized);
+            if (normalized.chatId) {
+                sessionsByChatId.set(normalized.chatId, normalized.sessionId);
+            }
+        };
+
+        if (rawSessions && typeof rawSessions === 'object') {
+            for (const session of Object.values(rawSessions)) {
+                ingest(session);
+            }
+        }
+
+        const legacy = stored?.[ACTIVE_SESSION_KEY];
+        if (legacy && (!rawSessions || Object.keys(rawSessions).length === 0)) {
+            ingest(legacy);
+        }
+
+        sessionsLoaded = true;
+        sessionsLoadPromise = null;
+
+        if (legacy) {
+            await chrome.storage.local.remove(ACTIVE_SESSION_KEY);
+            await persistSessionsState();
+        }
+
+        return sessionsById;
+    })();
+    return sessionsLoadPromise;
+}
+
+async function getSessionById(sessionId) {
+    if (!sessionId) return null;
+    await loadSessionsState();
+    return sessionsById.get(sessionId) || null;
+}
+
+async function getSessionForChat(chatId) {
+    if (!chatId) return null;
+    await loadSessionsState();
+    const sessionId = sessionsByChatId.get(chatId);
+    if (!sessionId) return null;
+    return sessionsById.get(sessionId) || null;
+}
+
+function pickMostRecentSession() {
+    let best = null;
+    for (const session of sessionsById.values()) {
+        if (!session.isActive && !session.isPaused) continue;
+        if (!best || (session.startedAt || 0) > (best.startedAt || 0)) {
+            best = session;
+        }
+    }
+    return best;
+}
+
+async function saveSession(session) {
+    if (!session?.sessionId) return null;
+    await loadSessionsState();
+    sessionsById.set(session.sessionId, session);
+    if (session.chatId) {
+        sessionsByChatId.set(session.chatId, session.sessionId);
+    }
+    await persistSessionsState();
+    return session;
+}
+
+async function removeSession(sessionId) {
+    if (!sessionId) return;
+    await loadSessionsState();
+    const existing = sessionsById.get(sessionId);
+    if (existing?.chatId && sessionsByChatId.get(existing.chatId) === sessionId) {
+        sessionsByChatId.delete(existing.chatId);
+    }
+    sessionsById.delete(sessionId);
+    responseChainsBySessionId.delete(sessionId);
+    await persistSessionsState();
+}
 
 // Tracks whether any Chrome window is currently focused (i.e., Chrome is the active app).
 // Used to avoid stealing OS focus when auto-focusing provider tabs while the user is in another app.
@@ -435,18 +574,22 @@ const AUTO_FOCUS_DEFAULT_STATE = {
 let autoFocusState = { ...AUTO_FOCUS_DEFAULT_STATE };
 
 function enqueueDebateResponse(message, label) {
-    debateResponseChain = debateResponseChain
+    const sessionId = message?.sessionId;
+    if (!sessionId) return;
+    const chain = responseChainsBySessionId.get(sessionId) || Promise.resolve();
+    const next = chain
         .then(() => handleDebateResponse(message))
         .catch((error) => {
             console.error(`[MLC Debate] Error handling ${label || 'response'}:`, error);
         });
+    responseChainsBySessionId.set(sessionId, next);
 }
 
 // Attachment payloads are intentionally kept out of chrome.storage.local (quota + privacy).
-// They live in-memory for the active session only and are cleared once delivered.
+// They live in-memory per session only and are cleared once delivered.
 // sentTo: attachments have been accounted for that provider (uploaded+sent, or intentionally skipped).
 // preparedTo: attachments have been pre-attached to the provider UI but not necessarily sent yet.
-let activeSessionAttachments = null; // { sessionId, attachments: [...], sentTo: { [provider]: boolean }, preparedTo: { [provider]: boolean } }
+const sessionAttachmentsById = new Map(); // sessionId -> { sessionId, attachments, sentTo, preparedTo }
 
 function normalizeProviderKey(provider) {
     return String(provider || '').trim().toLowerCase();
@@ -552,76 +695,75 @@ function normalizeIncomingAttachments(input) {
 function setActiveSessionAttachments(sessionId, attachments, providers = null) {
     const sanitized = normalizeIncomingAttachments(attachments);
     if (!sessionId || sanitized.length === 0) {
-        activeSessionAttachments = null;
+        sessionAttachmentsById.delete(sessionId);
         return;
     }
-    activeSessionAttachments = {
+    sessionAttachmentsById.set(sessionId, {
         sessionId,
         attachments: sanitized,
         sentTo: initProviderFlagMap(providers, false),
         preparedTo: initProviderFlagMap(providers, false)
-    };
+    });
 }
 
 function hasSessionAttachments(sessionId) {
-    return Boolean(
-        activeSessionAttachments &&
-        activeSessionAttachments.sessionId === sessionId &&
-        Array.isArray(activeSessionAttachments.attachments) &&
-        activeSessionAttachments.attachments.length > 0
-    );
+    const record = sessionAttachmentsById.get(sessionId);
+    return Boolean(record && Array.isArray(record.attachments) && record.attachments.length > 0);
 }
 
 function getPendingSessionAttachments(sessionId, provider, { includePrepared = false } = {}) {
-    if (!activeSessionAttachments || activeSessionAttachments.sessionId !== sessionId) return null;
+    const record = sessionAttachmentsById.get(sessionId);
+    if (!record) return null;
     const normalizedProvider = normalizeProviderKey(provider);
     if (!normalizedProvider) return null;
-    if (activeSessionAttachments.sentTo?.[normalizedProvider]) return null;
-    if (!includePrepared && activeSessionAttachments.preparedTo?.[normalizedProvider]) return null;
-    return activeSessionAttachments.attachments || null;
+    if (record.sentTo?.[normalizedProvider]) return null;
+    if (!includePrepared && record.preparedTo?.[normalizedProvider]) return null;
+    return record.attachments || null;
 }
 
 function markSessionAttachmentsPrepared(session, provider) {
-    if (!session?.sessionId || !activeSessionAttachments || activeSessionAttachments.sessionId !== session.sessionId) return;
+    if (!session?.sessionId) return;
+    const record = sessionAttachmentsById.get(session.sessionId);
+    if (!record) return;
     const normalizedProvider = normalizeProviderKey(provider);
     if (!normalizedProvider) return;
-    if (!activeSessionAttachments.preparedTo || typeof activeSessionAttachments.preparedTo !== 'object') {
-        activeSessionAttachments.preparedTo = {};
+    if (!record.preparedTo || typeof record.preparedTo !== 'object') {
+        record.preparedTo = {};
     }
-    activeSessionAttachments.preparedTo[normalizedProvider] = true;
-    if (!activeSessionAttachments.sentTo || typeof activeSessionAttachments.sentTo !== 'object') {
-        activeSessionAttachments.sentTo = {};
+    record.preparedTo[normalizedProvider] = true;
+    if (!record.sentTo || typeof record.sentTo !== 'object') {
+        record.sentTo = {};
     }
-    if (typeof activeSessionAttachments.sentTo[normalizedProvider] !== 'boolean') {
-        activeSessionAttachments.sentTo[normalizedProvider] = false;
+    if (typeof record.sentTo[normalizedProvider] !== 'boolean') {
+        record.sentTo[normalizedProvider] = false;
     }
 }
 
 function markSessionAttachmentsSent(session, provider) {
-    if (!session?.sessionId || !activeSessionAttachments || activeSessionAttachments.sessionId !== session.sessionId) return;
+    if (!session?.sessionId) return;
+    const record = sessionAttachmentsById.get(session.sessionId);
+    if (!record) return;
     const normalizedProvider = normalizeProviderKey(provider);
     if (!normalizedProvider) return;
-    if (!activeSessionAttachments.sentTo || typeof activeSessionAttachments.sentTo !== 'object') {
-        activeSessionAttachments.sentTo = {};
+    if (!record.sentTo || typeof record.sentTo !== 'object') {
+        record.sentTo = {};
     }
-    activeSessionAttachments.sentTo[normalizedProvider] = true;
-    if (!activeSessionAttachments.preparedTo || typeof activeSessionAttachments.preparedTo !== 'object') {
-        activeSessionAttachments.preparedTo = {};
+    record.sentTo[normalizedProvider] = true;
+    if (!record.preparedTo || typeof record.preparedTo !== 'object') {
+        record.preparedTo = {};
     }
-    activeSessionAttachments.preparedTo[normalizedProvider] = true;
+    record.preparedTo[normalizedProvider] = true;
 
     const requiredProviders = getSessionProviders(session, normalizedProvider);
-    const allSent = requiredProviders.every((p) => activeSessionAttachments.sentTo?.[p]);
+    const allSent = requiredProviders.every((p) => record.sentTo?.[p]);
     if (allSent) {
-        activeSessionAttachments = null;
+        sessionAttachmentsById.delete(session.sessionId);
     }
 }
 
 function clearSessionAttachments(sessionId) {
-    if (!activeSessionAttachments) return;
-    if (!sessionId || activeSessionAttachments.sessionId === sessionId) {
-        activeSessionAttachments = null;
-    }
+    if (!sessionId) return;
+    sessionAttachmentsById.delete(sessionId);
 }
 
 function notifyAttachmentFallback(session, provider) {
@@ -640,49 +782,8 @@ function notifyAttachmentFallback(session, provider) {
     });
 }
 
-function resetDebateState() {
-    activeDebateState = { ...defaultDebateState };
-    console.log('[MLC Debate] State reset.');
-}
-
 function generateSessionId() {
     return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-}
-
-async function loadActiveDebateState() {
-    if (activeDebateState.sessionId) {
-        return activeDebateState;
-    }
-    const stored = await chrome.storage.local.get(ACTIVE_SESSION_KEY);
-    if (stored && stored[ACTIVE_SESSION_KEY]) {
-        activeDebateState = stored[ACTIVE_SESSION_KEY];
-        if (!activeDebateState.profileIds) {
-            activeDebateState.profileIds = { chatgpt: null, gemini: null };
-        }
-        if (typeof activeDebateState.isPaused !== 'boolean') {
-            activeDebateState.isPaused = false;
-        }
-        if (!['debate', 'single', 'direct', 'parallel'].includes(activeDebateState.mode)) {
-            activeDebateState.mode = 'debate';
-        }
-        if (typeof activeDebateState.isFollowUp !== 'boolean') {
-            activeDebateState.isFollowUp = false;
-        }
-        if (typeof activeDebateState.conversationContext !== 'string') {
-            activeDebateState.conversationContext = '';
-        }
-        if (!Number.isFinite(activeDebateState.userMessageSequence)) {
-            activeDebateState.userMessageSequence = null;
-        }
-        if (!activeDebateState.promptOverrides || typeof activeDebateState.promptOverrides !== 'object') {
-            activeDebateState.promptOverrides = null;
-        }
-    }
-    return activeDebateState;
-}
-
-async function persistDebateState() {
-    await chrome.storage.local.set({ [ACTIVE_SESSION_KEY]: activeDebateState });
 }
 
 async function getPreferredTabs() {
@@ -1123,7 +1224,7 @@ async function deleteTabProfile(profileId) {
         }
         await saveTabProfiles(state);
         if (profile.inUseBySessionId) {
-            await pauseDebateSession(`Profile "${profile.label}" was removed.`, profile.provider);
+            await pauseDebateSession(profile.inUseBySessionId, `Profile "${profile.label}" was removed.`, profile.provider);
         }
         await notifyTabProfiles(state);
         return { ok: true };
@@ -1256,8 +1357,8 @@ async function runParallelAutoFocusCycle() {
         autoFocusState.timerId = null;
         return;
     }
-    const session = await loadActiveDebateState();
-    if (!session?.sessionId || session.sessionId !== sessionId || session.mode !== 'parallel' || session.isPaused) {
+    const session = await getSessionById(sessionId);
+    if (!session || session.mode !== 'parallel' || session.isPaused) {
         await stopAutoFocus('session_inactive');
         return;
     }
@@ -1323,11 +1424,12 @@ async function connectProvider(provider, options = {}) {
 }
 
 async function syncSessionProfileBinding(profile) {
-    const session = await loadActiveDebateState();
-    if (!session.sessionId || !profile) return;
+    if (!profile?.inUseBySessionId) return;
+    const session = await getSessionById(profile.inUseBySessionId);
+    if (!session) return;
     if (session.profileIds?.[profile.provider] === profile.profileId) {
         session.tabIds[profile.provider] = profile.tabId || null;
-        await persistDebateState();
+        await saveSession(session);
     }
 }
 
@@ -1581,7 +1683,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ status: 'preferred_tabs_saved', type: message.type });
             break;
         case 'GET_ACTIVE_SESSION':
-            handleGetActiveSession().catch(error => {
+            handleGetActiveSession(message).catch(error => {
                 console.error('[MLC Debate] Error getting active session:', error);
             });
             sendResponse({ status: 'active_session_sent', type: message.type });
@@ -1745,7 +1847,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ status: 'run_started', type: message.type });
             break;
         case 'RESUME_SESSION':
-            resumeDebateSession().then(sendResponse).catch(error => {
+            resumeDebateSession(message.sessionId, message.chatId || null).then(sendResponse).catch(error => {
                 console.error('[MLC Debate] Error resuming session:', error);
                 sendResponse({ ok: false, error: error.message });
             });
@@ -1803,13 +1905,17 @@ async function handleListLLMTabs() {
     });
 }
 
-async function handleGetActiveSession() {
-    const session = await loadActiveDebateState();
-    if (!session || !session.sessionId) {
-        sendMessageToPopup({ type: 'ACTIVE_SESSION', session: null });
-        return;
+async function handleGetActiveSession(message = {}) {
+    const chatId = typeof message.chatId === 'string' ? message.chatId : null;
+    let session = null;
+    if (chatId) {
+        session = await getSessionForChat(chatId);
     }
-    sendMessageToPopup({ type: 'ACTIVE_SESSION', session: session });
+    if (!session && !chatId) {
+        await loadSessionsState();
+        session = pickMostRecentSession();
+    }
+    sendMessageToPopup({ type: 'ACTIVE_SESSION', session: session || null });
 }
 
 function sanitizeSessionPromptOverrides(input) {
@@ -1915,7 +2021,7 @@ async function handleStartDebateSession(message) {
         const promptOverrides = sanitizeSessionPromptOverrides(message.promptOverrides);
 
         if (!prompt) {
-            sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: 'Prompt is empty.' });
+            sendMessageToPopup({ type: 'UI_SESSION_ERROR', chatId: requestedChatId || null, error: 'Prompt is empty.' });
             return;
         }
 
@@ -1924,10 +2030,6 @@ async function handleStartDebateSession(message) {
 	            historyStore = await requireHistoryUnlocked();
 	        } catch (error) {
 	            historyStore = null;
-	        }
-
-	        if (activeDebateState.isActive) {
-	            await endDebateSession('Session replaced by a new request.');
 	        }
 
 	        const profileIds = {};
@@ -1948,6 +2050,13 @@ async function handleStartDebateSession(message) {
 	                await setActiveChat(chatId);
 	            }
 	        }
+
+        if (chatId) {
+            const existingSession = await getSessionForChat(chatId);
+            if (existingSession && (existingSession.isActive || existingSession.isPaused)) {
+                await endDebateSession('Session replaced by a new request.', existingSession.sessionId);
+            }
+        }
 
         let isFollowUp = false;
         let conversationContext = '';
@@ -1980,14 +2089,27 @@ async function handleStartDebateSession(message) {
                 if (!profileIds[provider]) {
                     sendMessageToPopup({
                         type: 'UI_SESSION_ERROR',
+                        chatId: chatId || requestedChatId || null,
                         error: `${formatLLMLabel(provider)} profile is required to start.`
                     });
                     return;
                 }
                 const validation = await validateProfileForSession(provider, profileIds[provider], { requirePing: true });
                 if (!validation.ok) {
-                    sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: validation.error });
+                    sendMessageToPopup({ type: 'UI_SESSION_ERROR', chatId: chatId || requestedChatId || null, error: validation.error });
                     return;
+                }
+                const inUseBy = validation.profile?.inUseBySessionId;
+                if (inUseBy) {
+                    const inUseSession = await getSessionById(inUseBy);
+                    if (inUseSession && (inUseSession.isActive || inUseSession.isPaused)) {
+                        sendMessageToPopup({
+                            type: 'UI_SESSION_ERROR',
+                            chatId: chatId || requestedChatId || null,
+                            error: `${formatLLMLabel(provider)} profile is already in use by another session.`
+                        });
+                        return;
+                    }
                 }
                 tabIds[provider] = validation.profile.tabId;
             }
@@ -2011,7 +2133,16 @@ async function handleStartDebateSession(message) {
                 if (!resolved) {
                     sendMessageToPopup({
                         type: 'UI_SESSION_ERROR',
+                        chatId: chatId || requestedChatId || null,
                         error: `${formatLLMLabel(provider)} tab not found. Please open it and try again.`
+                    });
+                    return;
+                }
+                if (await isTabInUse(resolved.id)) {
+                    sendMessageToPopup({
+                        type: 'UI_SESSION_ERROR',
+                        chatId: chatId || requestedChatId || null,
+                        error: `${formatLLMLabel(provider)} tab is already in use by another session.`
                     });
                     return;
                 }
@@ -2042,7 +2173,7 @@ async function handleStartDebateSession(message) {
                             : (secondLLM ? 2 : 1))
                         : rounds * 2)));
         const sessionId = generateSessionId();
-        activeDebateState = {
+        const session = {
             ...defaultDebateState,
             isActive: true,
             mode,
@@ -2065,68 +2196,86 @@ async function handleStartDebateSession(message) {
         };
 
         setActiveSessionAttachments(sessionId, message.attachments, requiredProviders);
-        const attachmentsMeta = activeSessionAttachments?.sessionId === sessionId
-            ? activeSessionAttachments.attachments.map(({ name, type, size }) => ({ name, type, size }))
+        const attachmentsRecord = sessionAttachmentsById.get(sessionId);
+        const attachmentsMeta = attachmentsRecord
+            ? attachmentsRecord.attachments.map(({ name, type, size }) => ({ name, type, size }))
             : null;
 
-        await persistDebateState();
+        await saveSession(session);
 
         sendMessageToPopup({
             type: 'UI_SESSION_STARTED',
-            sessionId: activeDebateState.sessionId,
-            chatId: activeDebateState.chatId,
+            sessionId: session.sessionId,
+            chatId: session.chatId,
             rounds: rounds,
             mode,
             firstLLM: firstLLM,
             target: mode === 'direct' ? directTarget : undefined,
-            tabIds: activeDebateState.tabIds,
-            profileIds: activeDebateState.profileIds
+            tabIds: session.tabIds,
+            profileIds: session.profileIds
         });
 
         sendMessageToPopup({
             type: 'UI_MESSAGE_ADD',
-            chatId: activeDebateState.chatId,
+            chatId: session.chatId,
             role: 'user',
             content: prompt,
             timestamp: now,
             turnIndex: 0,
-            sessionId: activeDebateState.sessionId,
+            sessionId: session.sessionId,
             meta: { runConfig, isFollowUp, promptOverrides, attachments: attachmentsMeta || undefined }
         });
 
-        if (activeDebateState.chatId) {
-            const appendResult = await appendChatMessage(activeDebateState.chatId, {
+        if (session.chatId) {
+            const appendResult = await appendChatMessage(session.chatId, {
                 role: 'user',
                 content: prompt,
                 timestamp: now,
                 turnIndex: 0,
-                sessionId: activeDebateState.sessionId,
+                sessionId: session.sessionId,
                 meta: { runConfig, isFollowUp, promptOverrides, attachments: attachmentsMeta || undefined }
             });
             if (appendResult?.ok && Number.isFinite(appendResult?.message?.sequence)) {
-                activeDebateState.userMessageSequence = appendResult.message.sequence;
-                await persistDebateState();
+                session.userMessageSequence = appendResult.message.sequence;
+                await saveSession(session);
             }
         }
 
-        await lockProfilesForSession(activeDebateState.sessionId, activeDebateState.profileIds);
-        if (activeDebateState.mode === 'parallel') {
-            await sendParallelTurn(activeDebateState);
+        await lockProfilesForSession(session.sessionId, session.profileIds);
+        if (session.mode === 'parallel') {
+            await sendParallelTurn(session);
         } else {
-            await sendDebateTurn(activeDebateState);
+            await sendDebateTurn(session);
         }
     } catch (error) {
         console.error('[MLC Debate] Error starting session:', error);
-        sendMessageToPopup({ type: 'UI_SESSION_ERROR', error: error?.message || 'Failed to start session.' });
+        sendMessageToPopup({
+            type: 'UI_SESSION_ERROR',
+            chatId: typeof message?.chatId === 'string' ? message.chatId : null,
+            error: error?.message || 'Failed to start session.'
+        });
     }
 }
 
 async function handleStopDebateSession(message) {
     const reason = message.reason || 'Session stopped.';
-    if (message.sessionId && activeDebateState.sessionId && message.sessionId !== activeDebateState.sessionId) {
+    const sessionId = message.sessionId || null;
+    if (sessionId) {
+        await endDebateSession(reason, sessionId);
         return;
     }
-    await endDebateSession(reason);
+    const chatId = typeof message.chatId === 'string' ? message.chatId : null;
+    if (chatId) {
+        const session = await getSessionForChat(chatId);
+        if (session) {
+            await endDebateSession(reason, session.sessionId);
+        }
+        return;
+    }
+    const fallback = pickMostRecentSession();
+    if (fallback) {
+        await endDebateSession(reason, fallback.sessionId);
+    }
 }
 
 function getRoundIndex(turnIndex, session = null) {
@@ -3072,36 +3221,66 @@ async function resolveSessionTab(session, provider, { requirePing = false } = {}
         if (!validation.ok) {
             return { ok: false, error: validation.error };
         }
+        if (validation.profile?.inUseBySessionId && validation.profile.inUseBySessionId !== session.sessionId) {
+            return { ok: false, error: `${validation.profile.label} is already in use by another session.` };
+        }
         session.tabIds[provider] = validation.profile.tabId;
-        await persistDebateState();
+        await saveSession(session);
         return { ok: true, tabId: validation.profile.tabId };
     }
 
     const fallbackValidation = await validateTabForProvider(session.tabIds?.[provider], provider);
+    if (fallbackValidation.ok) {
+        const inUse = await isTabInUse(fallbackValidation.tabId, { excludeSessionId: session.sessionId });
+        if (inUse) {
+            return { ok: false, error: `${formatLLMLabel(provider)} tab is already in use by another session.` };
+        }
+    }
     return fallbackValidation;
 }
 
-async function pauseDebateSession(reason, provider, options = {}) {
-    const session = await loadActiveDebateState();
-    if (!session.sessionId) return;
+async function isTabInUse(tabId, { excludeSessionId } = {}) {
+    if (!Number.isFinite(tabId)) return false;
+    await loadSessionsState();
+    for (const session of sessionsById.values()) {
+        if (!session || (!session.isActive && !session.isPaused)) continue;
+        if (excludeSessionId && session.sessionId === excludeSessionId) continue;
+        const tabIds = session.tabIds && typeof session.tabIds === 'object' ? session.tabIds : {};
+        for (const id of Object.values(tabIds)) {
+            if (Number.isFinite(id) && id === tabId) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+async function pauseDebateSession(sessionId, reason, provider, options = {}) {
+    const session = await getSessionById(sessionId);
+    if (!session) return;
     session.isPaused = true;
     session.pausedReason = reason || 'Session paused.';
     session.pausedProvider = provider || null;
     session.pausedAt = Date.now();
     session.autoResume = options && typeof options === 'object' ? (options.autoResume || null) : null;
-    await persistDebateState();
+    await saveSession(session);
     sendMessageToPopup({
         type: 'UI_SESSION_PAUSED',
+        chatId: session.chatId || null,
         sessionId: session.sessionId,
         provider: provider || null,
         reason: session.pausedReason
     });
-    await stopAutoFocus('paused');
+    if (autoFocusState.sessionId === session.sessionId) {
+        await stopAutoFocus('paused');
+    }
 }
 
-async function resumeDebateSession() {
-    const session = await loadActiveDebateState();
-    if (!session.sessionId || !session.isPaused) {
+async function resumeDebateSession(sessionId, chatId = null) {
+    const session = sessionId
+        ? await getSessionById(sessionId)
+        : (chatId ? await getSessionForChat(chatId) : null);
+    if (!session || !session.isPaused) {
         return { ok: false, error: 'No paused session to resume.' };
     }
 
@@ -3112,7 +3291,7 @@ async function resumeDebateSession() {
         for (const provider of providers) {
             const validation = await resolveSessionTab(session, provider, { requirePing: true });
             if (!validation.ok) {
-                await pauseDebateSession(validation.error, provider);
+                await pauseDebateSession(session.sessionId, validation.error, provider);
                 return { ok: false, error: validation.error };
             }
         }
@@ -3121,9 +3300,10 @@ async function resumeDebateSession() {
         session.pausedProvider = null;
         session.pausedAt = 0;
         session.autoResume = null;
-        await persistDebateState();
+        await saveSession(session);
         sendMessageToPopup({
             type: 'UI_SESSION_RESUMED',
+            chatId: session.chatId || null,
             sessionId: session.sessionId
         });
         await sendParallelTurn(session, { providers });
@@ -3133,7 +3313,7 @@ async function resumeDebateSession() {
     const expectedLLM = getTurnLLM(session, session.turnIndex);
     const validation = await resolveSessionTab(session, expectedLLM, { requirePing: true });
     if (!validation.ok) {
-        await pauseDebateSession(validation.error, expectedLLM);
+        await pauseDebateSession(session.sessionId, validation.error, expectedLLM);
         return { ok: false, error: validation.error };
     }
     session.isPaused = false;
@@ -3141,9 +3321,10 @@ async function resumeDebateSession() {
     session.pausedProvider = null;
     session.pausedAt = 0;
     session.autoResume = null;
-    await persistDebateState();
+    await saveSession(session);
     sendMessageToPopup({
         type: 'UI_SESSION_RESUMED',
+        chatId: session.chatId || null,
         sessionId: session.sessionId
     });
     await sendDebateTurn(session);
@@ -3180,7 +3361,7 @@ async function updateProfilesForTab(tab) {
             await notifyTabProfiles(state);
             for (const profile of affected) {
                 if (profile.inUseBySessionId && profile.status !== 'ok') {
-                    await pauseDebateSession(`Profile "${profile.label}" is ${profile.status}.`, profile.provider);
+                    await pauseDebateSession(profile.inUseBySessionId, `Profile "${profile.label}" is ${profile.status}.`, profile.provider);
                 }
             }
         }
@@ -3210,7 +3391,7 @@ async function handleTabRemoved(tabId) {
             await notifyTabProfiles(state);
             for (const profile of affected) {
                 if (profile.inUseBySessionId) {
-                    await pauseDebateSession(`Profile "${profile.label}" went offline.`, profile.provider);
+                    await pauseDebateSession(profile.inUseBySessionId, `Profile "${profile.label}" went offline.`, profile.provider);
                 }
             }
         }
@@ -3237,10 +3418,11 @@ async function handleWindowFocusChanged(windowId) {
         }
 
         try {
-            const session = await loadActiveDebateState();
-            if (session?.sessionId && session.isPaused && session.autoResume?.trigger === 'chrome_focus') {
+            await loadSessionsState();
+            for (const session of sessionsById.values()) {
+                if (!session.isPaused || session.autoResume?.trigger !== 'chrome_focus') continue;
                 console.log('[MLC Debate] Auto-resuming paused session on Chrome focus.', session.autoResume);
-                await resumeDebateSession();
+                await resumeDebateSession(session.sessionId);
             }
         } catch (error) {
             // ignore auto-resume failures
@@ -3282,9 +3464,10 @@ async function prefetchSessionAttachments(session, excludeProvider) {
         const sessionId = session?.sessionId;
         if (!sessionId) return;
         if (!hasSessionAttachments(sessionId)) return;
-        if (!activeSessionAttachments || activeSessionAttachments.sessionId !== sessionId) return;
+        const record = sessionAttachmentsById.get(sessionId);
+        if (!record) return;
 
-        const attachments = activeSessionAttachments.attachments;
+        const attachments = record.attachments;
         if (!Array.isArray(attachments) || attachments.length === 0) return;
 
         const excludeKey = normalizeProviderKey(excludeProvider);
@@ -3293,8 +3476,8 @@ async function prefetchSessionAttachments(session, excludeProvider) {
         for (const provider of providers) {
             if (!hasSessionAttachments(sessionId)) return;
             if (getProviderAttachmentMode(provider) !== 'auto') continue;
-            if (activeSessionAttachments.sentTo?.[provider]) continue;
-            if (activeSessionAttachments.preparedTo?.[provider]) continue;
+            if (record.sentTo?.[provider]) continue;
+            if (record.preparedTo?.[provider]) continue;
 
             const resolution = await resolveSessionTab(session, provider);
             if (!resolution.ok) {
@@ -3351,7 +3534,7 @@ async function sendParallelTurn(session, { providers: providersOverride } = {}) 
     for (const provider of providers) {
         const resolution = await resolveSessionTab(session, provider);
         if (!resolution.ok) {
-            await pauseDebateSession(resolution.error || 'Tab validation failed.', provider);
+            await pauseDebateSession(session.sessionId, resolution.error || 'Tab validation failed.', provider);
             return;
         }
         resolvedTabs[provider] = resolution.tabId;
@@ -3364,13 +3547,14 @@ async function sendParallelTurn(session, { providers: providersOverride } = {}) 
     });
 
     const nextWaiting = waitingProviders.length > 0 ? waitingProviders : allProviders;
-    activeDebateState.waitingFor = nextWaiting;
-    activeDebateState.parallelPromptIds = { ...(activeDebateState.parallelPromptIds || {}), ...promptIds };
-    activeDebateState.lastPromptTimestamp = Date.now();
-    await persistDebateState();
+    session.waitingFor = nextWaiting;
+    session.parallelPromptIds = { ...(session.parallelPromptIds || {}), ...promptIds };
+    session.lastPromptTimestamp = Date.now();
+    await saveSession(session);
 
     sendMessageToPopup({
         type: 'UI_SESSION_PROGRESS',
+        chatId: session.chatId || null,
         sessionId,
         waitingFor: nextWaiting,
         waitingForLabel: formatProvidersForUi(nextWaiting),
@@ -3436,6 +3620,7 @@ async function sendParallelTurn(session, { providers: providersOverride } = {}) 
             ? { trigger: 'chrome_focus', provider: 'claude', createdAt: Date.now() }
             : null;
         await pauseDebateSession(
+            session.sessionId,
             error?.message || 'Failed to send prompt.',
             provider || null,
             autoResume ? { autoResume } : undefined
@@ -3449,21 +3634,22 @@ async function sendDebateTurn(session) {
     const expectedLLM = getTurnLLM(session, turnIndex);
     const resolution = await resolveSessionTab(session, expectedLLM);
     if (!resolution.ok) {
-        await pauseDebateSession(resolution.error || 'Tab validation failed.', expectedLLM);
+        await pauseDebateSession(session.sessionId, resolution.error || 'Tab validation failed.', expectedLLM);
         return;
     }
 
     const promptText = await buildSessionPrompt(session, turnIndex);
     const promptId = `${session.sessionId}:turn:${turnIndex}`;
 
-    activeDebateState.waitingFor = expectedLLM;
-    activeDebateState.lastPromptId = promptId;
-    activeDebateState.lastPromptTimestamp = Date.now();
+    session.waitingFor = expectedLLM;
+    session.lastPromptId = promptId;
+    session.lastPromptTimestamp = Date.now();
 
-    await persistDebateState();
+    await saveSession(session);
 
     sendMessageToPopup({
         type: 'UI_SESSION_PROGRESS',
+        chatId: session.chatId || null,
         sessionId: session.sessionId,
         waitingFor: expectedLLM,
         roundIndex: getRoundIndex(turnIndex, session),
@@ -3528,6 +3714,7 @@ async function sendDebateTurn(session) {
                     ? { trigger: 'chrome_focus', provider: 'claude', createdAt: Date.now() }
                     : null;
                 await pauseDebateSession(
+                    session.sessionId,
                     retryError?.message || error?.message || 'Failed to send prompt.',
                     expectedLLM,
                     autoResume ? { autoResume } : undefined
@@ -3540,6 +3727,7 @@ async function sendDebateTurn(session) {
             ? { trigger: 'chrome_focus', provider: 'claude', createdAt: Date.now() }
             : null;
         await pauseDebateSession(
+            session.sessionId,
             error?.message || 'Failed to send prompt.',
             expectedLLM,
             autoResume ? { autoResume } : undefined
@@ -3592,7 +3780,7 @@ async function handleParallelResponse(session, message) {
 
     session.waitingFor = waitingFor.filter((item) => item !== provider);
 
-    await persistDebateState();
+    await saveSession(session);
 
     sendMessageToPopup({
         type: 'UI_MESSAGE_ADD',
@@ -3617,12 +3805,13 @@ async function handleParallelResponse(session, message) {
     }
 
     if (Array.isArray(session.waitingFor) && session.waitingFor.length === 0) {
-        await endDebateSession('Session completed.');
+        await endDebateSession('Session completed.', session.sessionId);
         return;
     }
 
     sendMessageToPopup({
         type: 'UI_SESSION_PROGRESS',
+        chatId: session.chatId || null,
         sessionId,
         waitingFor: session.waitingFor,
         waitingForLabel: formatProvidersForUi(session.waitingFor)
@@ -3632,8 +3821,8 @@ async function handleParallelResponse(session, message) {
 async function handleDebateResponse(message) {
     if (!message.sessionId) return;
 
-    const session = await loadActiveDebateState();
-    if (!session.isActive || session.sessionId !== message.sessionId) {
+    const session = await getSessionById(message.sessionId);
+    if (!session || !session.isActive) {
         console.log('[MLC Debate] Ignoring response: session not active or mismatch.');
         return;
     }
@@ -3698,7 +3887,7 @@ async function handleDebateResponse(message) {
     session.lastPromptId = null;
     session.lastPromptTimestamp = 0;
 
-    await persistDebateState();
+    await saveSession(session);
 
     sendMessageToPopup({
         type: 'UI_MESSAGE_ADD',
@@ -3742,39 +3931,41 @@ async function handleDebateResponse(message) {
     }
 
     if (turnIndex >= session.totalTurns) {
-        await endDebateSession('Session completed.');
+        await endDebateSession('Session completed.', session.sessionId);
         return;
     }
 
     session.turnIndex = turnIndex + 1;
-    await persistDebateState();
+    await saveSession(session);
     if (!session.isPaused) {
         await sendDebateTurn(session);
     }
 }
 
-async function endDebateSession(reason) {
-    const session = await loadActiveDebateState();
-    if (!session.sessionId) return;
+async function endDebateSession(reason, sessionId) {
+    const session = sessionId ? await getSessionById(sessionId) : null;
+    if (!session) return;
 
     session.isActive = false;
     session.isPaused = false;
     session.waitingFor = null;
     session.endedAt = Date.now();
-    await persistDebateState();
 
     await releaseProfilesForSession(session.sessionId);
 
     sendMessageToPopup({
         type: 'UI_SESSION_ENDED',
+        chatId: session.chatId || null,
         sessionId: session.sessionId,
         reason: reason || 'Session ended.'
     });
 
-    await stopAutoFocus('ended');
+    if (autoFocusState.sessionId === session.sessionId) {
+        await stopAutoFocus('ended');
+    }
 
     clearSessionAttachments(session.sessionId);
-    resetDebateState();
+    await removeSession(session.sessionId);
 }
 
 async function handleSendPrompt(message) {
@@ -4024,7 +4215,10 @@ async function injectFollowUpIntoGemini(tabId, promptText) {
 
 // Inject-only variant: sets text but does NOT send.
 function simpleInteraction_InjectOnly(prompt, llmType) {
-    console.log(`[SimpleInteraction_InjectOnly INJECTED] (${llmType}) attempting to set prompt length ${prompt.length}.`);
+    const promptText = typeof prompt === 'string' ? prompt : String(prompt || '');
+    const LARGE_PROMPT_THRESHOLD = 8000;
+    const isLargePrompt = promptText.length >= LARGE_PROMPT_THRESHOLD;
+    console.log(`[SimpleInteraction_InjectOnly INJECTED] (${llmType}) attempting to set prompt length ${promptText.length}.`);
     try {
         const inputSelectors = {
             chatgpt: [
@@ -4076,14 +4270,18 @@ function simpleInteraction_InjectOnly(prompt, llmType) {
         inputEl.focus();
         if (inputEl.tagName === 'TEXTAREA') {
             const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-            setter ? setter.call(inputEl, prompt) : (inputEl.value = prompt);
+            setter ? setter.call(inputEl, promptText) : (inputEl.value = promptText);
             inputEl.dispatchEvent(new Event('input', { bubbles:true, composed:true }));
         } else if (inputEl.isContentEditable || inputEl.contentEditable === 'true') {
-            document.execCommand('selectAll', false, null);
-            document.execCommand('insertText', false, prompt);
+            if (isLargePrompt) {
+                inputEl.textContent = promptText;
+            } else {
+                document.execCommand('selectAll', false, null);
+                document.execCommand('insertText', false, promptText);
+            }
             inputEl.dispatchEvent(new Event('input', { bubbles:true, composed:true }));
         } else {
-            inputEl.value = prompt;
+            inputEl.value = promptText;
             inputEl.dispatchEvent(new Event('input', { bubbles:true, composed:true }));
         }
         return { success:true };
@@ -5221,6 +5419,8 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
     const mode = options && typeof options === 'object' ? options.mode : null;
     const prepareAttachmentsOnly = mode === 'prepare_attachments';
     const promptText = typeof prompt === 'string' ? prompt : String(prompt || '');
+    const LARGE_PROMPT_THRESHOLD = 8000;
+    const isLargePrompt = promptText.length >= LARGE_PROMPT_THRESHOLD;
 
     console.log(`[SimpleInteraction INJECTED] Attempting on ${llmType} (mode=${prepareAttachmentsOnly ? 'prepare_attachments' : 'send'}) with prompt: "${promptText.substring(0, 50)}..."`);
 
@@ -5636,6 +5836,22 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             }
         };
 
+        const setContentEditableValue = (el, value, { fast = false } = {}) => {
+            if (!el) return false;
+            if (fast) {
+                el.textContent = value;
+                dispatchInputEvents(el, value);
+                return true;
+            }
+            document.execCommand('selectAll', false, null);
+            const insertSuccess = document.execCommand('insertText', false, value);
+            el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            return insertSuccess;
+        };
+
+        const isContentEditable = inputElement.isContentEditable || inputElement.contentEditable === 'true';
+        let usedFastContentEditable = false;
+
         if (inputElement.tagName === 'TEXTAREA') {
             console.log(`[SimpleInteraction INJECTED] Setting prompt for TEXTAREA element (${llmType})`);
             setNativeValue(inputElement, promptText);
@@ -5645,13 +5861,15 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                 inputElement.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', keyCode: 32, which: 32, bubbles: true, composed: true }));
                 console.log(`[SimpleInteraction INJECTED] Dispatched extra key events for ${llmType} TEXTAREA.`);
             }
-        } else if ((llmType === 'gemini' && (inputElement.isContentEditable || inputElement.contentEditable === 'true')) ||
-                   (inputElement.isContentEditable || inputElement.contentEditable === 'true')) { // General contentEditable case
+        } else if ((llmType === 'gemini' && isContentEditable) || isContentEditable) { // General contentEditable case
             console.log(`[SimpleInteraction INJECTED] Setting prompt for contentEditable element (${llmType})`);
-            document.execCommand('selectAll', false, null);
-            const insertSuccess = document.execCommand('insertText', false, promptText);
-            console.log(`[SimpleInteraction INJECTED] Used document.execCommand('insertText'). Success: ${insertSuccess}.`);
-            inputElement.dispatchEvent(new Event('input', { bubbles: true, composed: true })); // Ensure input event fires for contentEditable too
+            if (isLargePrompt) {
+                usedFastContentEditable = true;
+                setContentEditableValue(inputElement, promptText, { fast: true });
+            } else {
+                const insertSuccess = setContentEditableValue(inputElement, promptText, { fast: false });
+                console.log(`[SimpleInteraction INJECTED] Used document.execCommand('insertText'). Success: ${insertSuccess}.`);
+            }
         } else { // Fallback for other input types (e.g. Gemini using a textarea which is rare)
             console.log(`[SimpleInteraction INJECTED] Setting prompt for standard input element (${llmType})`);
             setNativeValue(inputElement, promptText);
@@ -5660,9 +5878,17 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
 
         // Verification Step
         await new Promise(resolve => setTimeout(resolve, 50));
-        const currentText = (inputElement.isContentEditable || inputElement.contentEditable === 'true') ? inputElement.textContent : inputElement.value;
+        const expectedPrefix = promptText.substring(0, Math.min(promptText.length, 50));
+        let currentText = isContentEditable ? inputElement.textContent : inputElement.value;
+        if (usedFastContentEditable && expectedPrefix && !String(currentText || '').includes(expectedPrefix)) {
+            console.warn(`[SimpleInteraction INJECTED] Fast contentEditable set may have failed for ${llmType}; retrying with execCommand.`);
+            const retrySuccess = setContentEditableValue(inputElement, promptText, { fast: false });
+            console.log(`[SimpleInteraction INJECTED] Retry with execCommand success: ${retrySuccess}.`);
+            await new Promise(resolve => setTimeout(resolve, 50));
+            currentText = isContentEditable ? inputElement.textContent : inputElement.value;
+        }
         console.log(`[SimpleInteraction INJECTED] Text in input field for ${llmType} after setting: "${currentText.substring(0,100)}..."`);
-        if (!currentText.includes(promptText.substring(0, Math.min(promptText.length, 50)))) {
+        if (expectedPrefix && !currentText.includes(expectedPrefix)) {
             console.warn(`[SimpleInteraction INJECTED] WARNING: Prompt may not have been set correctly for ${llmType}. Expected start: "${promptText.substring(0,50)}...", Got: "${currentText.substring(0,50)}..."`);
         }
 
@@ -5868,21 +6094,22 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
         };
 
         const hasAttachments = attachmentPayloads.length > 0;
-        const wantsLongReadyWait = (() => {
-            if (hasAttachments) return true;
+        const readyTimeoutMs = hasAttachments ? 120000 : (isLargePrompt ? 20000 : 6000);
+        const maxAttempts = hasAttachments ? 3 : (isLargePrompt ? 3 : 2);
+        const disabledCandidate = (() => {
             const candidate = findSendButton({ allowDisabled: true, includeFallback: true });
             return Boolean(candidate && isVisible(candidate) && isDisabledButton(candidate));
         })();
-        const readyTimeoutMs = wantsLongReadyWait ? 120000 : 6000;
-        const maxAttempts = wantsLongReadyWait ? 3 : 2;
+        const shouldWaitForReadyFirst = hasAttachments || isLargePrompt || disabledCandidate;
+        const initialWaitMs = isLargePrompt ? 150 : 75;
 
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            if (wantsLongReadyWait || attempt > 1) {
+            if (shouldWaitForReadyFirst || attempt > 1) {
                 console.log(`[SimpleInteraction INJECTED] Waiting for Send to be ready for ${llmType} (attempt ${attempt}/${maxAttempts})...`);
                 await waitForSendReady({ timeoutMs: readyTimeoutMs });
             } else {
                 // Allow the UI to enable the Send button after we set the prompt.
-                await sleep(75);
+                await sleep(initialWaitMs);
             }
 
             const button = findSendButton({ allowDisabled: false, includeFallback: true });
@@ -5894,7 +6121,7 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                 pressEnterToSend();
             }
 
-            const acknowledged = await waitForSendAcknowledged();
+            const acknowledged = await waitForSendAcknowledged({ timeoutMs: isLargePrompt ? 12000 : 10000 });
             if (acknowledged) {
                 return {
                     success: true,
