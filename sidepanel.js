@@ -23,11 +23,15 @@ const state = {
     paused: false,
     stopRequested: false,
     pausedProvider: null,
+    pausedAgentId: null,
+    pausedProfileId: null,
+    pausedAgentLabel: null,
     pausedReason: null,
     autoScroll: true,
     historyStatus: { configured: false, unlocked: false },
     historyUnlockPrompted: false,
     connectionStatus: initProviderMap(false),
+    profileConnectionStatus: {},
     connecting: initProviderMap(false),
     profiles: [],
     defaults: initProviderMap(null),
@@ -47,7 +51,8 @@ const state = {
 const elements = {};
 const HISTORY_PAGE_SIZE = 60;
 
-const ROUTE_STORAGE_KEY = 'mlc_last_route_v1';
+const ROUTE_STORAGE_KEY_V1 = 'mlc_last_route_v1';
+const ROUTE_STORAGE_KEY_V2 = 'mlc_last_route_v2';
 
 const ATTACHMENTS_MAX_FILES = 10;
 const ATTACHMENTS_MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -145,14 +150,49 @@ function normalizeProviderId(provider) {
     return null;
 }
 
+function generateRouteAgentId() {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `agent_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+function normalizeProfileSelection(value) {
+    if (value === null || value === undefined) return null;
+    const text = String(value).trim();
+    if (!text) return null;
+    if (text === 'default') return 'default';
+    if (text.startsWith('profile_')) return text;
+    return text;
+}
+
+function normalizeRouteAgent(input) {
+    const raw = input && typeof input === 'object' ? input : {};
+    const provider = normalizeProviderId(raw.provider || raw.llm);
+    if (!provider) return null;
+    const profileId = normalizeProfileSelection(raw.profileId ?? raw.profile ?? raw.profile_id);
+    const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : generateRouteAgentId();
+    return { id, provider, profileId: profileId || null };
+}
+
 function sanitizeRoute(input) {
     const route = input && typeof input === 'object' ? input : {};
-    const providers = [];
-    const rawProviders = Array.isArray(route.providers) ? route.providers : [];
-    for (const item of rawProviders) {
-        const normalized = normalizeProviderId(item);
-        if (!normalized) continue;
-        if (!providers.includes(normalized)) providers.push(normalized);
+    const agents = [];
+    const rawAgents = Array.isArray(route.agents) ? route.agents : null;
+    if (rawAgents) {
+        rawAgents.forEach((item) => {
+            if (typeof item === 'string') {
+                const provider = normalizeProviderId(item);
+                if (provider) agents.push({ id: generateRouteAgentId(), provider, profileId: 'default' });
+                return;
+            }
+            const normalized = normalizeRouteAgent(item);
+            if (normalized) agents.push(normalized);
+        });
+    } else {
+        const rawProviders = Array.isArray(route.providers) ? route.providers : [];
+        rawProviders.forEach((item) => {
+            const provider = normalizeProviderId(item);
+            if (provider) agents.push({ id: generateRouteAgentId(), provider, profileId: 'default' });
+        });
     }
 
     const requestedKind = String(route.kind || '').trim().toLowerCase();
@@ -160,20 +200,20 @@ function sanitizeRoute(input) {
     const rounds = clampInt(roundsValue, 1, 12);
 
     let kind = 'single';
-    if (providers.length >= 2) {
+    if (agents.length >= 2) {
         if (requestedKind === 'debate') kind = 'debate';
         else kind = 'parallel';
     }
 
     return {
         kind,
-        providers,
+        agents,
         rounds
     };
 }
 
 function getDefaultRoute() {
-    return { kind: 'single', providers: [], rounds: 3 };
+    return { kind: 'single', agents: [], rounds: 3 };
 }
 
 function routeFromRunConfig(runConfig) {
@@ -204,8 +244,10 @@ function routeFromRunConfig(runConfig) {
 }
 
 async function loadRoutePreference() {
-    const stored = await storageGet([ROUTE_STORAGE_KEY]);
-    const savedRoute = stored?.[ROUTE_STORAGE_KEY];
+    const stored = await storageGet([ROUTE_STORAGE_KEY_V2, ROUTE_STORAGE_KEY_V1]);
+    const savedRouteV2 = stored?.[ROUTE_STORAGE_KEY_V2];
+    const savedRouteV1 = stored?.[ROUTE_STORAGE_KEY_V1];
+    const savedRoute = savedRouteV2 || savedRouteV1;
     state.route = savedRoute ? sanitizeRoute(savedRoute) : getDefaultRoute();
     state.routeLoaded = true;
 }
@@ -213,10 +255,11 @@ async function loadRoutePreference() {
 function saveRoutePreference(route) {
     const next = sanitizeRoute(route);
     state.route = next;
-    return storageSet({ [ROUTE_STORAGE_KEY]: next });
+    return storageSet({ [ROUTE_STORAGE_KEY_V2]: next });
 }
 
-let routeDragProvider = null;
+let routeDragAgentId = null;
+let routeConnectionStatusTimer = null;
 let routeOutsideClickHandler = null;
 let routeEscapeHandler = null;
 
@@ -308,27 +351,161 @@ function resetSessionProfiles() {
     state.sessionProfiles = next;
 }
 
+function getRouteAgents(route) {
+    return Array.isArray(route?.agents) ? route.agents : [];
+}
+
+function countRouteAgentsByProvider(route) {
+    const counts = {};
+    getRouteAgents(route).forEach((agent) => {
+        const provider = normalizeProviderId(agent?.provider);
+        if (!provider) return;
+        counts[provider] = (counts[provider] || 0) + 1;
+    });
+    return counts;
+}
+
 function isRouteProviderSelected(provider) {
     const route = state.route || getDefaultRoute();
-    return route.providers.includes(provider);
+    return getRouteAgents(route).some((agent) => agent.provider === provider);
+}
+
+function getRouteAgentById(route, agentId) {
+    const agents = getRouteAgents(route);
+    return agents.find((agent) => agent?.id === agentId) || null;
+}
+
+function resolveAgentProfileId(agent) {
+    const provider = normalizeProviderId(agent?.provider);
+    if (!provider) return null;
+    const selection = normalizeProfileSelection(agent?.profileId);
+    if (!selection || selection === 'default') {
+        return state.defaults?.[provider] || null;
+    }
+    return selection;
+}
+
+function escapeRegExp(text) {
+    return String(text || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stripProviderPrefix(label, providerLabel) {
+    const text = normalizeInlineText(label);
+    if (!text) return '';
+    const re = new RegExp(`^${escapeRegExp(providerLabel)}\\s*[-–—:]\\s*`, 'i');
+    return text.replace(re, '').trim();
+}
+
+function formatRouteAgentLabel(agent) {
+    const provider = normalizeProviderId(agent?.provider);
+    if (!provider) return 'Agent';
+    const providerLabel = formatProviderLabel(provider);
+    const selection = normalizeProfileSelection(agent?.profileId);
+
+    let suffix = '';
+    if (!selection) {
+        suffix = 'Pick profile';
+    } else if (selection === 'default') {
+        const profile = getDefaultProfile(provider);
+        const raw = profile?.label ? stripProviderPrefix(profile.label, providerLabel) : '';
+        suffix = raw || 'Default';
+    } else {
+        const profile = getProfileById(selection);
+        const raw = profile?.label ? stripProviderPrefix(profile.label, providerLabel) : '';
+        suffix = raw || 'Profile';
+    }
+
+    if (!suffix || suffix.toLowerCase() === providerLabel.toLowerCase()) return providerLabel;
+    return `${providerLabel} • ${suffix}`;
+}
+
+function isProfileRoutable(profile, provider) {
+    if (!profile || typeof profile !== 'object') return false;
+    const normalizedProvider = normalizeProviderId(provider || profile.provider);
+    if (!normalizedProvider) return false;
+    if (profile.provider !== normalizedProvider) return false;
+    if (profile.inUseBySessionId) return false;
+    if (!Number.isFinite(profile.tabId)) return false;
+    if (profile.status === 'offline') return false;
+    if (profile.status === 'wrong_host') return false;
+    return true;
+}
+
+function suggestProfileSelectionForNewAgent(provider, route) {
+    const normalizedProvider = normalizeProviderId(provider);
+    if (!normalizedProvider) return null;
+    const agents = getRouteAgents(route).filter((agent) => agent?.provider === normalizedProvider);
+    if (agents.length === 0) return 'default';
+
+    const used = new Set();
+    agents.forEach((agent) => {
+        const resolved = resolveAgentProfileId(agent);
+        if (resolved) used.add(resolved);
+    });
+
+    const profiles = getProfilesForProvider(normalizedProvider);
+    const usable = profiles.filter((profile) => isProfileRoutable(profile, normalizedProvider));
+    const candidate = usable.find((profile) => profile.status === 'ok' && !used.has(profile.profileId))
+        || usable.find((profile) => !used.has(profile.profileId))
+        || null;
+    return candidate ? candidate.profileId : null;
+}
+
+function addRouteAgent(provider, { profileId } = {}) {
+    const normalizedProvider = normalizeProviderId(provider);
+    if (!normalizedProvider) return;
+    const route = state.route || getDefaultRoute();
+    const agents = getRouteAgents(route);
+    const selection = profileId === undefined ? 'default' : normalizeProfileSelection(profileId);
+    const nextAgent = {
+        id: generateRouteAgentId(),
+        provider: normalizedProvider,
+        profileId: selection || null
+    };
+    setRoute({ ...route, agents: [...agents, nextAgent] });
 }
 
 function setRoute(route, { persist = true } = {}) {
     const next = sanitizeRoute(route);
     state.route = next;
     if (persist) {
-        storageSet({ [ROUTE_STORAGE_KEY]: next }).catch(() => {});
+        storageSet({ [ROUTE_STORAGE_KEY_V2]: next }).catch(() => {});
     }
     renderRouteUi();
     updateSendState();
+    scheduleRouteConnectionStatusCheck(next);
+}
+
+function getRouteProfileIdsForConnection(route) {
+    const ids = [];
+    const requiredAgents = getRouteRequiredAgents(route);
+    requiredAgents.forEach((agent) => {
+        const selection = normalizeProfileSelection(agent?.profileId);
+        if (!selection || selection === 'default') return;
+        if (!ids.includes(selection)) ids.push(selection);
+    });
+    return ids;
+}
+
+function scheduleRouteConnectionStatusCheck(route) {
+    const nextRoute = route || getRoute();
+    if (routeConnectionStatusTimer) {
+        window.clearTimeout(routeConnectionStatusTimer);
+        routeConnectionStatusTimer = null;
+    }
+    routeConnectionStatusTimer = window.setTimeout(() => {
+        routeConnectionStatusTimer = null;
+        const profileIds = getRouteProfileIdsForConnection(nextRoute);
+        requestConnectionStatus(profileIds.length ? { profileIds } : undefined);
+    }, 280);
 }
 
 function setRouteKind(kind) {
     const route = state.route || getDefaultRoute();
-    const providers = route.providers || [];
-    if (providers.length < 2) return;
+    const agents = getRouteAgents(route);
+    if (agents.length < 2) return;
     const normalizedKind = String(kind || '').trim().toLowerCase();
-    if (normalizedKind === 'debate' && providers.length < 2) return;
+    if (normalizedKind === 'debate' && agents.length < 2) return;
     if (normalizedKind !== 'parallel' && normalizedKind !== 'debate') return;
     setRoute({ ...route, kind: normalizedKind });
 }
@@ -337,43 +514,55 @@ function applyRoutePreset(preset) {
     const route = state.route || getDefaultRoute();
     const kind = String(preset || '').trim().toLowerCase();
     if (kind === 'single') {
-        const provider = normalizeProviderId(route.providers?.[0]) || 'chatgpt';
-        setRoute({ kind: 'single', providers: [provider], rounds: route.rounds });
+        const first = getRouteAgents(route)[0] || null;
+        const provider = normalizeProviderId(first?.provider) || 'chatgpt';
+        setRoute({ kind: 'single', agents: [{ id: generateRouteAgentId(), provider, profileId: 'default' }], rounds: route.rounds });
         return;
     }
     if (kind === 'compare') {
         const supported = getSupportedProviders();
-        const baseProviders = route.providers.length >= 2 ? route.providers : supported;
-        const providers = baseProviders.length >= 2 ? baseProviders : ['chatgpt', 'gemini'];
-        setRoute({ kind: 'parallel', providers, rounds: route.rounds });
+        const providers = supported.length >= 2 ? supported : ['chatgpt', 'gemini'];
+        setRoute({
+            kind: 'parallel',
+            agents: providers.map((provider) => ({ id: generateRouteAgentId(), provider, profileId: 'default' })),
+            rounds: route.rounds
+        });
         return;
     }
     if (kind === 'debate') {
         const supported = getSupportedProviders();
         const fallbackPair = supported.length >= 2 ? supported.slice(0, 2) : ['chatgpt', 'gemini'];
-        const providers = route.providers.length >= 2 ? route.providers : fallbackPair;
-        setRoute({ kind: 'debate', providers, rounds: route.rounds || 3 });
+        setRoute({
+            kind: 'debate',
+            agents: fallbackPair.map((provider) => ({ id: generateRouteAgentId(), provider, profileId: 'default' })),
+            rounds: route.rounds || 3
+        });
     }
 }
 
 function swapRouteProviders() {
     const route = state.route || getDefaultRoute();
-    if (!Array.isArray(route.providers) || route.providers.length < 2) return;
-    const next = [...route.providers].reverse();
-    setRoute({ ...route, providers: next });
+    const agents = getRouteAgents(route);
+    if (agents.length < 2) return;
+    setRoute({ ...route, agents: [...agents].reverse() });
 }
 
 function formatRouteSummary(route) {
-    const providers = Array.isArray(route?.providers) ? route.providers : [];
-    if (providers.length === 0) return 'Select providers…';
-    if (providers.length === 1) return formatProviderLabel(providers[0]);
-    const names = providers.map(formatProviderLabel);
-    if (route?.kind === 'debate' && providers.length >= 2) {
+    const agents = getRouteAgents(route);
+    if (agents.length === 0) return 'Select agents…';
+    if (agents.length === 1) return formatRouteAgentLabel(agents[0]);
+
+    const counts = countRouteAgentsByProvider(route);
+    const summary = Object.entries(counts).map(([provider, count]) => {
+        const label = formatProviderLabel(provider);
+        return count > 1 ? `${label} ×${count}` : label;
+    }).join(' + ');
+
+    if (route?.kind === 'debate' && agents.length >= 2) {
         const rounds = route.rounds || 1;
-        const chain = names.length === 2 ? `${names[0]} ↔ ${names[1]}` : names.join(' ↔ ');
-        return `Debate (${chain}, ${rounds})`;
+        return `Debate (${summary}, ${rounds})`;
     }
-    return names.join(' + ');
+    return summary;
 }
 
 function renderRouteUi() {
@@ -388,23 +577,23 @@ function renderRouteUi() {
         elements.routeButton.title = summary;
     }
 
-    const providerCount = route.providers.length;
+    const agentCount = getRouteAgents(route).length;
     if (elements.routeModeSection) {
-        elements.routeModeSection.hidden = providerCount < 2;
+        elements.routeModeSection.hidden = agentCount < 2;
     }
 
     if (elements.routeModeDebate) {
-        elements.routeModeDebate.hidden = providerCount < 2;
+        elements.routeModeDebate.hidden = agentCount < 2;
     }
 
     if (elements.routeModeParallel) {
-        elements.routeModeParallel.classList.toggle('is-active', providerCount >= 2 && route.kind === 'parallel');
+        elements.routeModeParallel.classList.toggle('is-active', agentCount >= 2 && route.kind === 'parallel');
     }
     if (elements.routeModeDebate) {
-        elements.routeModeDebate.classList.toggle('is-active', providerCount >= 2 && route.kind === 'debate');
+        elements.routeModeDebate.classList.toggle('is-active', agentCount >= 2 && route.kind === 'debate');
     }
 
-    const debateEnabled = providerCount >= 2 && route.kind === 'debate';
+    const debateEnabled = agentCount >= 2 && route.kind === 'debate';
     if (elements.routeDebateSettings) {
         elements.routeDebateSettings.hidden = !debateEnabled;
     }
@@ -439,36 +628,133 @@ function updateRouteConnectAllUi() {
 function renderRouteSelectedChips(route) {
     if (!elements.routeSelected) return;
     elements.routeSelected.innerHTML = '';
-    const providers = Array.isArray(route?.providers) ? route.providers : [];
-    if (providers.length === 0) {
+    const agents = getRouteAgents(route);
+    if (agents.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'route-help';
-        empty.textContent = 'No providers selected.';
+        empty.textContent = 'No agents selected.';
         elements.routeSelected.appendChild(empty);
         return;
     }
 
-    providers.forEach((provider) => {
-        const chip = document.createElement('div');
-        chip.className = 'route-chip';
-        chip.draggable = true;
-        chip.dataset.provider = provider;
-        chip.textContent = formatProviderLabel(provider);
+    const usedResolvedProfiles = new Map();
+    agents.forEach((agent) => {
+        const resolved = resolveAgentProfileId(agent);
+        if (!resolved) return;
+        if (!usedResolvedProfiles.has(resolved)) usedResolvedProfiles.set(resolved, agent.id);
+    });
+
+    agents.forEach((agent) => {
+        const provider = normalizeProviderId(agent?.provider);
+        if (!provider) return;
+
+        const row = document.createElement('div');
+        row.className = 'route-agent';
+        row.dataset.agentId = agent.id;
+
+        const handle = document.createElement('span');
+        handle.className = 'material-symbols-rounded route-agent-handle';
+        handle.textContent = 'drag_indicator';
+        handle.draggable = true;
+        handle.dataset.agentId = agent.id;
+        handle.setAttribute('aria-label', 'Drag to reorder');
+        row.appendChild(handle);
+
+        const name = document.createElement('span');
+        name.className = 'route-agent-name';
+        name.textContent = formatProviderLabel(provider);
+        row.appendChild(name);
+
+        const select = document.createElement('select');
+        select.className = 'route-agent-select';
+        select.dataset.action = 'set-route-agent-profile';
+        select.dataset.agentId = agent.id;
+        select.setAttribute('aria-label', `Profile for ${formatProviderLabel(provider)}`);
+
+        const selection = normalizeProfileSelection(agent.profileId);
+        const currentValue = selection || '';
+        const resolvedCurrent = resolveAgentProfileId(agent);
+        const currentProfile = resolvedCurrent ? getProfileById(resolvedCurrent) : null;
+
+        const placeholderOption = document.createElement('option');
+        placeholderOption.value = '';
+        placeholderOption.textContent = 'Pick profile…';
+        select.appendChild(placeholderOption);
+
+        const defaultProfileId = state.defaults?.[provider] || null;
+        const defaultProfile = defaultProfileId ? getProfileById(defaultProfileId) : null;
+        const defaultLabel = defaultProfile?.label
+            ? stripProviderPrefix(defaultProfile.label, formatProviderLabel(provider))
+            : '';
+        const defaultOption = document.createElement('option');
+        defaultOption.value = 'default';
+        const defaultStatusSuffix = defaultProfile?.status && defaultProfile.status !== 'ok'
+            ? ` • ${formatStatusLabel(defaultProfile.status)}`
+            : '';
+        defaultOption.textContent = defaultLabel ? `Default (${defaultLabel})${defaultStatusSuffix}` : `Default${defaultStatusSuffix}`;
+        if (!defaultProfileId) {
+            defaultOption.disabled = true;
+            defaultOption.textContent = 'Default (missing)';
+        } else {
+            const usedBy = usedResolvedProfiles.get(defaultProfileId);
+            if (usedBy && usedBy !== agent.id) defaultOption.disabled = true;
+        }
+        select.appendChild(defaultOption);
+
+        const profiles = getProfilesForProvider(provider);
+        const routableProfiles = profiles
+            .filter((profile) => isProfileRoutable(profile, provider))
+            .filter((profile) => profile.profileId !== defaultProfileId);
+        const extraProfiles = profiles.filter((profile) => profile && currentProfile && profile.profileId === currentProfile.profileId)
+            .filter((profile) => !routableProfiles.some((p) => p.profileId === profile.profileId));
+        const profilesToShow = [...routableProfiles, ...extraProfiles];
+        profilesToShow.forEach((profile) => {
+            const option = document.createElement('option');
+            option.value = profile.profileId;
+            const statusSuffix = profile.status && profile.status !== 'ok'
+                ? ` • ${formatStatusLabel(profile.status)}`
+                : (profile.inUseBySessionId ? ' • In use' : '');
+            const detail = formatProfileTabLabel(profile);
+            const baseLabel = profile.label || formatProviderLabel(provider);
+            option.textContent = detail ? `${baseLabel} • ${detail}${statusSuffix}` : `${baseLabel}${statusSuffix}`;
+
+            const usedBy = usedResolvedProfiles.get(profile.profileId);
+            if (usedBy && usedBy !== agent.id) option.disabled = true;
+            if (profile.inUseBySessionId) option.disabled = true;
+
+            select.appendChild(option);
+        });
+
+        const manageOption = document.createElement('option');
+        manageOption.value = '__manage_profiles__';
+        manageOption.textContent = 'Manage profiles…';
+        select.appendChild(manageOption);
+
+        select.value = currentValue;
+        if (!select.value && selection === 'default') select.value = 'default';
+
+        const resolvedSelected = selection === 'default' ? defaultProfileId : selection;
+        const usedBySelected = resolvedSelected ? usedResolvedProfiles.get(resolvedSelected) : null;
+        const isDuplicate = Boolean(resolvedSelected && usedBySelected && usedBySelected !== agent.id);
+        const isRoutable = resolvedCurrent ? isProfileRoutable(currentProfile, provider) : false;
+        row.classList.toggle('is-invalid', !resolvedCurrent || isDuplicate || (resolvedCurrent && !isRoutable));
+
+        row.appendChild(select);
 
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.className = 'route-chip-remove';
-        remove.dataset.action = 'remove-route-provider';
-        remove.dataset.provider = provider;
-        remove.setAttribute('aria-label', `Remove ${formatProviderLabel(provider)}`);
+        remove.dataset.action = 'remove-route-agent';
+        remove.dataset.agentId = agent.id;
+        remove.setAttribute('aria-label', `Remove ${formatRouteAgentLabel(agent)}`);
 
         const icon = document.createElement('span');
         icon.className = 'material-symbols-rounded';
         icon.textContent = 'close';
         remove.appendChild(icon);
 
-        chip.appendChild(remove);
-        elements.routeSelected.appendChild(chip);
+        row.appendChild(remove);
+        elements.routeSelected.appendChild(row);
     });
 }
 
@@ -476,8 +762,9 @@ function renderRouteProviderList(route) {
     if (!elements.routeProviderList) return;
     elements.routeProviderList.innerHTML = '';
     const supported = getSupportedProviders();
+    const agentCounts = countRouteAgentsByProvider(route);
     supported.forEach((provider) => {
-        const selected = isRouteProviderSelected(provider);
+        const selectedCount = agentCounts[provider] || 0;
         const ready = Boolean(state.connectionStatus?.[provider]);
         const connecting = Boolean(state.connecting?.[provider]);
         const profile = getDefaultProfile(provider);
@@ -536,13 +823,12 @@ function renderRouteProviderList(route) {
             connect.disabled = connecting;
             actions.appendChild(connect);
         } else {
-            const toggle = document.createElement('button');
-            toggle.type = 'button';
-            toggle.className = 'ghost-button';
-            toggle.dataset.action = 'toggle-provider';
-            toggle.dataset.provider = provider;
-            toggle.textContent = selected ? 'Remove' : 'Add';
-            toggle.setAttribute('aria-pressed', selected ? 'true' : 'false');
+            const addAgent = document.createElement('button');
+            addAgent.type = 'button';
+            addAgent.className = 'ghost-button';
+            addAgent.dataset.action = 'add-agent';
+            addAgent.dataset.provider = provider;
+            addAgent.textContent = selectedCount > 0 ? `Add agent (${selectedCount})` : 'Add agent';
 
             const focus = document.createElement('button');
             focus.type = 'button';
@@ -560,7 +846,7 @@ function renderRouteProviderList(route) {
             newTab.textContent = connecting ? 'Opening…' : 'New tab';
             newTab.disabled = connecting;
 
-            actions.appendChild(toggle);
+            actions.appendChild(addAgent);
             actions.appendChild(focus);
             actions.appendChild(newTab);
         }
@@ -582,96 +868,122 @@ function handleRouteProviderListClick(event) {
 
     const connectAndAdd = () => {
         const route = state.route || getDefaultRoute();
-        const providers = [...(route.providers || [])];
-        if (!providers.includes(provider)) {
-            providers.push(provider);
-            setRoute({ ...route, providers });
+        const hasAgent = getRouteAgents(route).some((agent) => agent?.provider === provider);
+        if (!hasAgent) {
+            addRouteAgent(provider, { profileId: 'default' });
         }
         connectProvider(provider);
     };
 
-    if (action === 'focus-provider') {
-        focusProvider(provider);
-        return;
-    }
-    if (action === 'new-tab') {
-        connectProvider(provider);
-        return;
-    }
+    const addAgent = () => {
+        const route = state.route || getDefaultRoute();
+        const suggestion = suggestProfileSelectionForNewAgent(provider, route);
+        addRouteAgent(provider, { profileId: suggestion });
+    };
+
+	if (action === 'focus-provider') {
+	    focusProvider(provider);
+	    return;
+	}
+	if (action === 'new-tab') {
+	    openNewTabAndBindAgent(provider);
+	    return;
+	}
     if (action === 'connect-provider') {
         connectAndAdd();
         return;
     }
-    if (action === 'toggle-provider' || !action) {
-        const profile = getDefaultProfile(provider);
-        const connected = Boolean(profile?.tabId && Boolean(state.connectionStatus?.[provider]));
-        if (!action && !connected) {
-            connectAndAdd();
-            return;
-        }
-        const route = state.route || getDefaultRoute();
-        const providers = [...(route.providers || [])];
-        const existingIndex = providers.indexOf(provider);
-        if (existingIndex >= 0) {
-            providers.splice(existingIndex, 1);
-        } else {
-            providers.push(provider);
-        }
-        setRoute({ ...route, providers });
+    if (action === 'add-agent') {
+        addAgent();
+        return;
     }
+
+    const profile = getDefaultProfile(provider);
+    const connected = Boolean(profile?.tabId && Boolean(state.connectionStatus?.[provider]));
+    if (!connected) {
+        connectAndAdd();
+        return;
+    }
+    addAgent();
 }
 
 function handleRouteSelectedClick(event) {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
-    const removeButton = target.closest('button[data-action="remove-route-provider"]');
+    const removeButton = target.closest('button[data-action="remove-route-agent"]');
     if (!removeButton) return;
-    const provider = normalizeProviderId(removeButton.dataset.provider);
-    if (!provider) return;
+    const agentId = removeButton.dataset.agentId;
+    if (!agentId) return;
     const route = state.route || getDefaultRoute();
-    const providers = [...(route.providers || [])].filter((item) => item !== provider);
-    setRoute({ ...route, providers });
+    const agents = getRouteAgents(route).filter((agent) => agent?.id !== agentId);
+    setRoute({ ...route, agents });
+}
+
+function handleRouteSelectedChange(event) {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (target.tagName !== 'SELECT') return;
+    if (target.dataset.action !== 'set-route-agent-profile') return;
+    const agentId = target.dataset.agentId;
+    if (!agentId) return;
+    const route = state.route || getDefaultRoute();
+    const agents = getRouteAgents(route);
+    const index = agents.findIndex((agent) => agent?.id === agentId);
+    if (index < 0) return;
+    const rawValue = String(target.value || '');
+    if (rawValue === '__manage_profiles__') {
+        const prior = normalizeProfileSelection(agents[index]?.profileId);
+        target.value = prior || (agents[index]?.profileId === 'default' ? 'default' : '');
+        openSettingsDrawer();
+        return;
+    }
+    const selection = normalizeProfileSelection(rawValue);
+    const nextAgents = [...agents];
+    nextAgents[index] = { ...nextAgents[index], profileId: selection || null };
+    setRoute({ ...route, agents: nextAgents });
 }
 
 function handleRouteChipDragStart(event) {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
-    const chip = target.closest('.route-chip');
-    const provider = normalizeProviderId(chip?.dataset.provider);
-    if (!chip || !provider) return;
-    routeDragProvider = provider;
+    const handle = target.closest('.route-agent-handle');
+    const row = target.closest('.route-agent');
+    const agentId = handle?.dataset.agentId || row?.dataset.agentId || '';
+    if (!agentId) return;
+    routeDragAgentId = agentId;
     try {
-        event.dataTransfer?.setData('text/plain', provider);
-        event.dataTransfer?.setDragImage(chip, 10, 10);
+        event.dataTransfer?.setData('text/plain', agentId);
+        if (row) event.dataTransfer?.setDragImage(row, 10, 10);
     } catch (error) {
         // Ignore DataTransfer restrictions.
     }
 }
 
 function handleRouteChipDragOver(event) {
-    if (!routeDragProvider) return;
+    if (!routeDragAgentId) return;
     event.preventDefault();
 }
 
 function handleRouteChipDrop(event) {
-    if (!routeDragProvider) return;
+    if (!routeDragAgentId) return;
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
-    const chip = target.closest('.route-chip');
-    const dropProvider = normalizeProviderId(chip?.dataset.provider);
-    if (!dropProvider || dropProvider === routeDragProvider) return;
+    const row = target.closest('.route-agent');
+    const dropAgentId = row?.dataset.agentId || '';
+    if (!dropAgentId || dropAgentId === routeDragAgentId) return;
     const route = state.route || getDefaultRoute();
-    const providers = [...(route.providers || [])];
-    const fromIndex = providers.indexOf(routeDragProvider);
-    const toIndex = providers.indexOf(dropProvider);
+    const agents = getRouteAgents(route);
+    const fromIndex = agents.findIndex((agent) => agent?.id === routeDragAgentId);
+    const toIndex = agents.findIndex((agent) => agent?.id === dropAgentId);
     if (fromIndex === -1 || toIndex === -1) return;
-    providers.splice(fromIndex, 1);
-    providers.splice(toIndex, 0, routeDragProvider);
-    setRoute({ ...route, providers });
+    const nextAgents = [...agents];
+    const [moved] = nextAgents.splice(fromIndex, 1);
+    nextAgents.splice(toIndex, 0, moved);
+    setRoute({ ...route, agents: nextAgents });
 }
 
 function handleRouteChipDragEnd() {
-    routeDragProvider = null;
+    routeDragAgentId = null;
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -778,12 +1090,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 	    bindEvents();
         ensureProviderMaps();
         renderProviderSettingsUi();
-        await loadRoutePreference();
-        renderRouteUi();
-	    updateHistoryUi();
-	    updateCharCount();
-        updateAttachmentsUi();
-        updateSendState();
+	    await loadRoutePreference();
+	    renderRouteUi();
+	    scheduleRouteConnectionStatusCheck();
+		    updateHistoryUi();
+		    updateCharCount();
+	        updateAttachmentsUi();
+	        updateSendState();
 
     requestProfiles();
     requestConnectionStatus();
@@ -897,6 +1210,7 @@ function bindEvents() {
 
     if (elements.routeSelected) {
         elements.routeSelected.addEventListener('click', handleRouteSelectedClick);
+        elements.routeSelected.addEventListener('change', handleRouteSelectedChange);
         elements.routeSelected.addEventListener('dragstart', handleRouteChipDragStart);
         elements.routeSelected.addEventListener('dragover', handleRouteChipDragOver);
         elements.routeSelected.addEventListener('drop', handleRouteChipDrop);
@@ -1752,26 +2066,86 @@ function getRoute() {
 }
 
 function isRouteValid(route) {
-    const providers = Array.isArray(route?.providers) ? route.providers : [];
-    return providers.length > 0;
+    return getRouteAgents(route).length > 0;
 }
 
 function isRouteSupported(route) {
     if (!isRouteValid(route)) return false;
-    const providers = Array.isArray(route?.providers) ? route.providers : [];
-    if (route.kind === 'single') return providers.length === 1;
+    const agents = getRouteAgents(route);
+    if (route.kind === 'single') return agents.length === 1;
     const supported = new Set(getSupportedProviders());
-    if (providers.some((provider) => !supported.has(provider))) return false;
-    if (route.kind === 'debate') return providers.length >= 2;
-    if (route.kind === 'parallel') return providers.length >= 2;
+    if (agents.some((agent) => !supported.has(agent.provider))) return false;
+    if (route.kind === 'debate') return agents.length >= 2;
+    if (route.kind === 'parallel') return agents.length >= 2;
     return false;
 }
 
 function getRouteRequiredProviders(route) {
     if (!isRouteValid(route)) return [];
-    const providers = Array.isArray(route?.providers) ? route.providers : [];
-    if (route.kind === 'single') return [providers[0]];
-    return [...providers];
+    const agents = getRouteAgents(route);
+    const requiredAgents = route.kind === 'single' ? agents.slice(0, 1) : agents;
+    const providers = [];
+    requiredAgents.forEach((agent) => {
+        const provider = normalizeProviderId(agent?.provider);
+        if (!provider) return;
+        if (!providers.includes(provider)) providers.push(provider);
+    });
+    return providers;
+}
+
+function getRouteRequiredAgents(route) {
+    if (!isRouteValid(route)) return [];
+    const agents = getRouteAgents(route);
+    return route.kind === 'single' ? agents.slice(0, 1) : agents;
+}
+
+function isProfileConnected(provider, profileId) {
+    const normalizedProvider = normalizeProviderId(provider);
+    if (!normalizedProvider || !profileId) return false;
+    const defaultProfileId = state.defaults?.[normalizedProvider] || null;
+    if (defaultProfileId && profileId === defaultProfileId) {
+        return Boolean(state.connectionStatus?.[normalizedProvider]);
+    }
+    return Boolean(state.profileConnectionStatus?.[profileId]);
+}
+
+function isRouteConfigured(route) {
+    if (!isRouteValid(route)) return false;
+    const requiredAgents = getRouteRequiredAgents(route);
+    const seen = new Set();
+    for (const agent of requiredAgents) {
+        const provider = normalizeProviderId(agent?.provider);
+        if (!provider) return false;
+        const resolvedProfileId = resolveAgentProfileId(agent);
+        if (!resolvedProfileId) return false;
+        if (seen.has(resolvedProfileId)) return false;
+        const profile = getProfileById(resolvedProfileId);
+        if (!profile) return false;
+        if (!isProfileRoutable(profile, provider)) return false;
+        seen.add(resolvedProfileId);
+    }
+    return true;
+}
+
+function getRouteConfigurationIssue(route) {
+    if (!isRouteValid(route)) return 'Choose an agent to start.';
+    const requiredAgents = getRouteRequiredAgents(route);
+    const seen = new Set();
+    for (const agent of requiredAgents) {
+        const provider = normalizeProviderId(agent?.provider);
+        if (!provider) return 'Choose a supported provider.';
+        const resolvedProfileId = resolveAgentProfileId(agent);
+        if (!resolvedProfileId) return 'Pick a profile for each agent.';
+        if (seen.has(resolvedProfileId)) return 'Each agent must use a different profile/tab.';
+        const profile = getProfileById(resolvedProfileId);
+        if (!profile) return 'A selected profile no longer exists. Refresh providers.';
+        if (profile.provider !== provider) return 'A selected profile does not match the provider.';
+        if (profile.status === 'wrong_host') return 'A selected profile is on the wrong site. Rebind it to the correct provider.';
+        if (!Number.isFinite(profile.tabId) || profile.status === 'offline') return 'A selected profile is offline/unbound. Open a provider tab and rebind that profile.';
+        if (profile.inUseBySessionId) return 'A selected profile is already in use by another session.';
+        seen.add(resolvedProfileId);
+    }
+    return '';
 }
 
 function getProviderAttachmentMode(provider) {
@@ -1783,7 +2157,10 @@ function getProviderAttachmentMode(provider) {
 
 function buildManualUploadAckKey(route, attachments, manualProviders) {
     const roundsKey = route?.kind === 'debate' ? (route?.rounds || 1) : 1;
-    const routeKey = `${route?.kind || 'single'}|${Array.isArray(route?.providers) ? route.providers.join('>') : ''}|${roundsKey}`;
+    const agentKey = getRouteRequiredAgents(route)
+        .map((agent) => `${normalizeProviderId(agent?.provider) || ''}:${normalizeProfileSelection(agent?.profileId) || ''}`)
+        .join('>');
+    const routeKey = `${route?.kind || 'single'}|${agentKey}|${roundsKey}`;
     const providersKey = Array.isArray(manualProviders) ? [...manualProviders].sort().join(',') : '';
     const attachmentKey = Array.isArray(attachments)
         ? attachments.map((item) => String(item?.id || '')).filter(Boolean).join(',')
@@ -1799,7 +2176,15 @@ function getAttachmentProviderPlan(route) {
 }
 
 function isRouteConnected(route) {
-    return getRouteRequiredProviders(route).every((provider) => Boolean(state.connectionStatus?.[provider]));
+    if (!isRouteValid(route)) return false;
+    const requiredAgents = getRouteRequiredAgents(route);
+    return requiredAgents.every((agent) => {
+        const provider = normalizeProviderId(agent?.provider);
+        if (!provider) return false;
+        const resolvedProfileId = resolveAgentProfileId(agent);
+        if (!resolvedProfileId) return false;
+        return isProfileConnected(provider, resolvedProfileId);
+    });
 }
 
 function clampInt(value, min, max) {
@@ -1860,10 +2245,15 @@ function updateSendState() {
     const route = getRoute();
     const validRoute = isRouteValid(route);
     const supportedRoute = isRouteSupported(route);
-    const connected = validRoute && supportedRoute && isRouteConnected(route);
+    const configuredRoute = validRoute && supportedRoute && isRouteConfigured(route);
+    const connected = configuredRoute && isRouteConnected(route);
     const historyBlocked = isHistoryBlocked();
     const readyForPrimaryAction = hasPrompt && attachmentsReady && validRoute && supportedRoute && !historyBlocked;
-    elements.sendButton.textContent = connected ? 'Send' : (validRoute && supportedRoute ? 'Connect' : 'Send');
+    elements.sendButton.textContent = connected
+        ? 'Send'
+        : (validRoute && supportedRoute
+            ? (configuredRoute ? 'Connect' : 'Fix route')
+            : 'Send');
     elements.sendButton.disabled = !readyForPrimaryAction;
     updateComposerHint();
     updateEmptyState();
@@ -1901,8 +2291,15 @@ function requestProfiles() {
     sendMessage({ type: 'GET_TAB_PROFILES' });
 }
 
-function requestConnectionStatus() {
-    sendMessage({ type: 'CHECK_CONNECTION' });
+function requestConnectionStatus(options = {}) {
+    const payload = { type: 'CHECK_CONNECTION' };
+    const profileIds = Array.isArray(options?.profileIds)
+        ? options.profileIds.map((id) => String(id || '').trim()).filter(Boolean)
+        : [];
+    if (profileIds.length > 0) {
+        payload.profileIds = [...new Set(profileIds)];
+    }
+    sendMessage(payload);
 }
 
 function requestProviderCapabilities() {
@@ -2229,18 +2626,84 @@ function connectProvider(provider) {
     state.lastFocusedProvider = provider;
     state.connecting[provider] = true;
     updateProviderUi();
-    sendMessage({ type: 'CONNECT_PROVIDER', provider }, (response) => {
-        state.connecting[provider] = false;
-        updateProviderUi();
-        if (!response || response.ok === false) {
-            handleActionResponse(response || { ok: false, error: 'Failed to connect.' });
-            return;
+	    sendMessage({ type: 'CONNECT_PROVIDER', provider }, (response) => {
+	        state.connecting[provider] = false;
+	        updateProviderUi();
+	        if (!response || response.ok === false) {
+	            handleActionResponse(response || { ok: false, error: 'Failed to connect.' });
+	            return;
+	        }
+	        requestProfiles();
+	        scheduleRouteConnectionStatusCheck();
+	        window.setTimeout(scheduleRouteConnectionStatusCheck, 2500);
+	        window.setTimeout(scheduleRouteConnectionStatusCheck, 8000);
+	    });
+	}
+
+function upsertProfileInState(profile) {
+    if (!profile || typeof profile !== 'object') return;
+    const profileId = typeof profile.profileId === 'string' ? profile.profileId : '';
+    if (!profileId) return;
+    const existing = Array.isArray(state.profiles)
+        ? state.profiles.findIndex((item) => item?.profileId === profileId)
+        : -1;
+    if (!Array.isArray(state.profiles)) state.profiles = [];
+    if (existing >= 0) {
+        state.profiles[existing] = profile;
+    } else {
+        state.profiles = [...state.profiles, profile];
+    }
+    ensureProviderMaps();
+}
+
+async function openNewTabAndBindAgent(provider) {
+    const normalizedProvider = normalizeProviderId(provider);
+    if (!normalizedProvider) return;
+    ensureProviderMaps();
+    if (state.connecting[normalizedProvider]) return;
+
+    state.lastFocusedProvider = normalizedProvider;
+    state.connecting[normalizedProvider] = true;
+    updateProviderUi();
+
+    try {
+        const opened = await sendMessageAsync({ type: 'OPEN_PROVIDER_TAB', provider: normalizedProvider, focus: true });
+        if (!opened || opened.ok === false || !Number.isFinite(opened.tabId)) {
+            throw new Error(opened?.error || 'Failed to open provider tab.');
         }
+
+        const claimed = await sendMessageAsync({
+            type: 'CLAIM_TAB_AS_PROFILE',
+            provider: normalizedProvider,
+            tabId: opened.tabId,
+            setDefault: false
+        });
+        if (!claimed || claimed.ok === false || !claimed.profile?.profileId) {
+            throw new Error(claimed?.error || 'Failed to bind provider tab.');
+        }
+
+        upsertProfileInState(claimed.profile);
+
+        const route = state.route || getDefaultRoute();
+        const agents = [...getRouteAgents(route)];
+        const unassignedIndex = agents.findIndex((agent) => agent?.provider === normalizedProvider && !normalizeProfileSelection(agent?.profileId));
+        if (unassignedIndex >= 0) {
+            agents[unassignedIndex] = { ...agents[unassignedIndex], profileId: claimed.profile.profileId };
+        } else {
+            agents.push({ id: generateRouteAgentId(), provider: normalizedProvider, profileId: claimed.profile.profileId });
+        }
+        setRoute({ ...route, agents });
+
         requestProfiles();
-        requestConnectionStatus();
-        window.setTimeout(requestConnectionStatus, 2500);
-        window.setTimeout(requestConnectionStatus, 8000);
-    });
+        scheduleRouteConnectionStatusCheck();
+        window.setTimeout(scheduleRouteConnectionStatusCheck, 2500);
+        window.setTimeout(scheduleRouteConnectionStatusCheck, 8000);
+    } catch (error) {
+        handleActionResponse({ ok: false, error: error?.message || String(error) });
+    } finally {
+        state.connecting[normalizedProvider] = false;
+        updateProviderUi();
+    }
 }
 
 function connectAllProviders() {
@@ -2248,18 +2711,19 @@ function connectAllProviders() {
     if (supported.length === 0) return;
 
     const route = state.route || getDefaultRoute();
-    const providers = [...(route.providers || [])];
+    const agents = [...getRouteAgents(route)];
     let didChangeRoute = false;
 
     supported.forEach((provider) => {
-        if (!providers.includes(provider)) {
-            providers.push(provider);
+        const alreadyIncluded = agents.some((agent) => agent?.provider === provider);
+        if (!alreadyIncluded) {
+            agents.push({ id: generateRouteAgentId(), provider, profileId: 'default' });
             didChangeRoute = true;
         }
     });
 
     if (didChangeRoute) {
-        setRoute({ ...route, providers });
+        setRoute({ ...route, agents });
     }
 
     supported.forEach((provider) => {
@@ -2448,19 +2912,22 @@ function updateComposerHint() {
     const route = getRoute();
     const validRoute = isRouteValid(route);
     const supportedRoute = isRouteSupported(route);
+    const configuredRoute = validRoute && supportedRoute && isRouteConfigured(route);
     const requiredProviders = getRouteRequiredProviders(route);
     const requiredLabel = requiredProviders.length > 0
         ? requiredProviders.map(formatProviderLabel).join(' + ')
         : '';
-    const connected = validRoute && supportedRoute && isRouteConnected(route);
+    const connected = configuredRoute && isRouteConnected(route);
     const historyBlocked = isHistoryBlocked();
     const hasPrompt = elements.promptInput.value.trim().length > 0;
 
     let hint = '';
     if (!validRoute) {
-        hint = 'Choose a provider in To to start.';
+        hint = 'Choose an agent in To to start.';
     } else if (!supportedRoute) {
         hint = 'This route is not supported yet.';
+    } else if (!configuredRoute) {
+        hint = getRouteConfigurationIssue(route) || 'Pick profiles to start.';
     } else if (!connected) {
         hint = `Connect ${requiredLabel} to start.`;
     } else if (historyBlocked) {
@@ -2486,12 +2953,14 @@ function updateComposerHint() {
     elements.composerHint.textContent = hint;
     elements.composerHint.hidden = !hint;
     elements.promptInput.placeholder = !validRoute
-        ? 'Choose a provider in To…'
+        ? 'Choose an agent in To…'
         : (!supportedRoute
             ? 'Choose a supported route…'
-            : (!connected
-                ? `Connect ${requiredLabel} to start...`
-                : (historyBlocked ? 'Unlock history to continue...' : 'Send a message...')));
+            : (!configuredRoute
+                ? 'Pick profiles to start…'
+                : (!connected
+                    ? `Connect ${requiredLabel} to start...`
+                    : (historyBlocked ? 'Unlock history to continue...' : 'Send a message...'))));
 }
 
 function updateEmptyState() {
@@ -2509,7 +2978,7 @@ function updateEmptyState() {
     }
 
     const route = getRoute();
-    const ready = isRouteValid(route) && isRouteSupported(route) && isRouteConnected(route);
+    const ready = isRouteValid(route) && isRouteSupported(route) && isRouteConfigured(route) && isRouteConnected(route);
     const historyBlocked = isHistoryBlocked();
     const titleEl = elements.emptyState.querySelector('.empty-title');
     const subtitleEl = elements.emptyState.querySelector('.empty-subtitle');
@@ -2539,6 +3008,12 @@ function updateEmptyState() {
     }
 
     if (!ready) {
+        if (!isRouteConfigured(route)) {
+            if (titleEl) titleEl.textContent = 'Pick profiles';
+            if (subtitleEl) subtitleEl.textContent = getRouteConfigurationIssue(route) || 'Pick profiles to start.';
+            if (actionsEl) actionsEl.hidden = false;
+            return;
+        }
         const label = getRouteRequiredProviders(route).map(formatProviderLabel).join(' + ');
         if (titleEl) titleEl.textContent = 'Connect to start';
         if (subtitleEl) subtitleEl.textContent = `Connect ${label} to start.`;
@@ -2580,7 +3055,7 @@ async function startSession() {
 
     const route = getRoute();
     if (!isRouteValid(route)) {
-        setSessionStatus('Choose a provider to start.');
+        setSessionStatus('Choose an agent to start.');
         openRoutePopover();
         return;
     }
@@ -2590,9 +3065,46 @@ async function startSession() {
         return;
     }
 
+    if (!isRouteConfigured(route)) {
+        setSessionStatus(getRouteConfigurationIssue(route) || 'Pick profiles to start.');
+        openRoutePopover();
+        return;
+    }
+
     const required = getRouteRequiredProviders(route);
     if (!isRouteConnected(route)) {
-        required.forEach((provider) => connectProvider(provider));
+        const autoConnect = [];
+        const manualFix = [];
+        const requiredAgents = getRouteRequiredAgents(route);
+
+        requiredAgents.forEach((agent) => {
+            const provider = normalizeProviderId(agent?.provider);
+            if (!provider) return;
+            const resolvedProfileId = resolveAgentProfileId(agent);
+            const connected = resolvedProfileId ? isProfileConnected(provider, resolvedProfileId) : false;
+            if (connected) return;
+            const selection = normalizeProfileSelection(agent?.profileId);
+            if (selection === 'default') {
+                if (!autoConnect.includes(provider)) autoConnect.push(provider);
+            } else if (resolvedProfileId) {
+                manualFix.push({ agent, provider, profileId: resolvedProfileId });
+            }
+        });
+
+        if (autoConnect.length > 0) {
+            autoConnect.forEach((provider) => connectProvider(provider));
+            setSessionStatus(`Connect ${autoConnect.map(formatProviderLabel).join(' + ')} to start.`);
+            return;
+        }
+
+        if (manualFix.length > 0) {
+            const first = manualFix[0]?.agent;
+            const label = first ? formatRouteAgentLabel(first) : 'Selected agent';
+            setSessionStatus(`${label} is not responding. Focus that tab, refresh, then try again.`);
+            openSettingsDrawer();
+            return;
+        }
+
         setSessionStatus(`Connect ${required.map(formatProviderLabel).join(' + ')} to start.`);
         return;
     }
@@ -2658,13 +3170,19 @@ async function startSession() {
         }));
     }
 
-    payload.route = { kind: route.kind, providers: route.providers, rounds };
+    const routeAgents = getRouteRequiredAgents(route);
+    payload.route = {
+        kind: route.kind,
+        agents: routeAgents,
+        providers: routeAgents.map((agent) => agent.provider),
+        rounds
+    };
     if (route.kind === 'debate') {
         payload.mode = 'debate';
-        payload.firstLLM = route.providers[0] || 'chatgpt';
+        payload.firstLLM = routeAgents[0]?.provider || 'chatgpt';
     } else {
         payload.mode = 'direct';
-        payload.target = route.kind === 'parallel' ? 'both' : (route.providers[0] || 'chatgpt');
+        payload.target = route.kind === 'parallel' ? 'both' : (routeAgents[0]?.provider || 'chatgpt');
     }
     sendMessage(payload);
 
@@ -2779,19 +3297,21 @@ function handleBackgroundMessage(message) {
             break;
         case 'UI_MESSAGE_ADD':
             if (!message.chatId || message.chatId === state.activeChatId) {
-                if (state.activeChat && (!message.chatId || message.chatId === state.activeChat.chatId)) {
-                    if (!Array.isArray(state.activeChat.messages)) state.activeChat.messages = [];
-                    state.activeChat.messages.push({
-                        role: message.role,
-                        content: message.content,
-                        contentHtml: message.contentHtml,
-                        timestamp: message.timestamp,
-                        sessionId: message.sessionId,
-                        turnIndex: message.turnIndex,
-                        roundIndex: message.roundIndex,
-                        meta: message.meta
-                    });
-                }
+                    if (state.activeChat && (!message.chatId || message.chatId === state.activeChat.chatId)) {
+                        if (!Array.isArray(state.activeChat.messages)) state.activeChat.messages = [];
+                        state.activeChat.messages.push({
+                            role: message.role,
+                            agentId: message.agentId,
+                            agentLabel: message.agentLabel,
+                            content: message.content,
+                            contentHtml: message.contentHtml,
+                            timestamp: message.timestamp,
+                            sessionId: message.sessionId,
+                            turnIndex: message.turnIndex,
+                            roundIndex: message.roundIndex,
+                            meta: message.meta
+                        });
+                    }
                 addMessage(message);
             }
             break;
@@ -2802,6 +3322,9 @@ function handleBackgroundMessage(message) {
                     isActive: true,
                     isPaused: true,
                     pausedProvider: message.provider || null,
+                    pausedAgentId: message.agentId || null,
+                    pausedProfileId: message.profileId || null,
+                    pausedAgentLabel: message.agentLabel || null,
                     pausedReason: message.reason || null
                 });
             }
@@ -2816,6 +3339,9 @@ function handleBackgroundMessage(message) {
                     isActive: true,
                     isPaused: false,
                     pausedProvider: null,
+                    pausedAgentId: null,
+                    pausedProfileId: null,
+                    pausedAgentLabel: null,
                     pausedReason: null
                 });
             }
@@ -2868,6 +3394,7 @@ function handleProfileList(message) {
     renderProfileLists();
     updateProviderUi();
     updateSendState();
+    scheduleRouteConnectionStatusCheck();
 }
 
 function renderProfileLists() {
@@ -3037,32 +3564,45 @@ function updatePausedActions() {
 }
 
 function focusPausedProvider() {
-    if (!state.pausedProvider) return;
-    const profileId = state.sessionProfiles[state.pausedProvider];
+    const profileId = state.pausedProfileId || (state.pausedProvider ? state.sessionProfiles[state.pausedProvider] : null);
     const profile = getProfileById(profileId);
     if (!profile?.tabId) return;
     sendMessage({ type: 'FOCUS_TAB', tabId: profile.tabId }, handleActionResponse);
 }
 
 function rebindPausedProvider() {
-    if (!state.pausedProvider) return;
-    const profileId = state.sessionProfiles[state.pausedProvider];
+    const profileId = state.pausedProfileId || (state.pausedProvider ? state.sessionProfiles[state.pausedProvider] : null);
     if (!profileId) return;
+    const profile = getProfileById(profileId);
+    const provider = profile?.provider || state.pausedProvider;
+    if (!provider) return;
     sendMessage({
         type: 'CREATE_PROFILE_FROM_ACTIVE_TAB',
-        provider: state.pausedProvider,
+        provider,
         profileId
     }, handleActionResponse);
 }
 
 function handleConnectionStatus(message) {
     const incoming = message.status && typeof message.status === 'object' ? message.status : {};
+    const profileIncoming = message.profileStatus && typeof message.profileStatus === 'object'
+        ? message.profileStatus
+        : (message.profileConnectionStatus && typeof message.profileConnectionStatus === 'object'
+            ? message.profileConnectionStatus
+            : null);
     ensureProviderMaps();
     const next = { ...state.connectionStatus };
     getSupportedProviders().forEach((provider) => {
         next[provider] = Boolean(incoming[provider]);
     });
     state.connectionStatus = next;
+    if (profileIncoming) {
+        const mergedProfiles = { ...(state.profileConnectionStatus || {}) };
+        Object.entries(profileIncoming).forEach(([profileId, value]) => {
+            mergedProfiles[profileId] = Boolean(value);
+        });
+        state.profileConnectionStatus = mergedProfiles;
+    }
     updateProviderUi();
     updateSendState();
 }
@@ -3073,6 +3613,9 @@ function hydrateSession(session) {
         state.sessionId = null;
         resetSessionProfiles();
         state.pausedProvider = null;
+        state.pausedAgentId = null;
+        state.pausedProfileId = null;
+        state.pausedAgentLabel = null;
         state.pausedReason = null;
         setSessionStatus('Idle');
         return;
@@ -3085,11 +3628,24 @@ function hydrateSession(session) {
     ensureProviderMaps();
     state.paused = Boolean(session.isPaused);
     state.pausedProvider = session.pausedProvider || null;
+    state.pausedAgentId = session.pausedAgentId || null;
+    state.pausedProfileId = session.pausedProfileId || null;
     state.pausedReason = session.pausedReason || null;
+    state.pausedAgentLabel = null;
+    if (state.paused) {
+        const profile = state.pausedProfileId ? getProfileById(state.pausedProfileId) : null;
+        if (profile?.label) {
+            state.pausedAgentLabel = profile.label;
+        } else if (state.pausedAgentId && Array.isArray(session.participants)) {
+            const match = session.participants.find((p) => p?.agentId === state.pausedAgentId);
+            if (match?.label) state.pausedAgentLabel = match.label;
+        }
+    }
 
     if (session.isPaused) {
         setSessionState({ running: false, paused: true });
-        setSessionStatus(`Paused: ${state.pausedReason || 'Needs attention'}`);
+        const label = normalizeInlineText(state.pausedAgentLabel || '');
+        setSessionStatus(`Paused${label ? ` (${label})` : ''}: ${state.pausedReason || 'Needs attention'}`);
     } else {
         setSessionState({ running: session.isActive, paused: false });
         setSessionStatus(session.isActive ? `Resumed round ${session.roundIndex || 1} of ${session.rounds}` : 'Idle');
@@ -3102,9 +3658,11 @@ function hydrateSession(session) {
 
 function handleProgress(message) {
     if (!message) return;
-    const waitingFor = Array.isArray(message.waitingFor)
-        ? message.waitingFor.map(formatProviderLabel).join(' + ')
-        : String(message.waitingFor || message.waitingForLabel || '').trim();
+    const explicitLabel = String(message.waitingForLabel || '').trim();
+    const waitingFor = explicitLabel
+        || (Array.isArray(message.waitingFor)
+            ? message.waitingFor.map(formatProviderLabel).join(' + ')
+            : formatProviderLabel(message.waitingFor));
     if (message.roundIndex && message.totalRounds) {
         setSessionStatus(`Running round ${message.roundIndex} of ${message.totalRounds} - waiting for ${waitingFor}`);
     } else if (waitingFor) {
@@ -3115,14 +3673,21 @@ function handleProgress(message) {
 function handleSessionPaused(message) {
     state.paused = true;
     state.pausedProvider = message.provider || null;
+    state.pausedAgentId = message.agentId || null;
+    state.pausedProfileId = message.profileId || null;
+    state.pausedAgentLabel = message.agentLabel || null;
     state.pausedReason = message.reason || 'Session paused.';
     setSessionState({ running: false, paused: true });
-    setSessionStatus(`Paused: ${state.pausedReason}`);
+    const label = normalizeInlineText(state.pausedAgentLabel || '');
+    setSessionStatus(`Paused${label ? ` (${label})` : ''}: ${state.pausedReason}`);
 }
 
 function handleSessionResumed() {
     state.paused = false;
     state.pausedProvider = null;
+    state.pausedAgentId = null;
+    state.pausedProfileId = null;
+    state.pausedAgentLabel = null;
     state.pausedReason = null;
     setSessionState({ running: true, paused: false });
     setSessionStatus('Resumed session.');
@@ -3133,6 +3698,11 @@ function handleSessionEnded(message) {
     setSessionStatus(message?.reason || 'Session completed');
     state.sessionId = null;
     state.stopRequested = false;
+    state.pausedProvider = null;
+    state.pausedAgentId = null;
+    state.pausedProfileId = null;
+    state.pausedAgentLabel = null;
+    state.pausedReason = null;
     resetSessionProfiles();
 }
 
@@ -3141,6 +3711,11 @@ function handleSessionError(message) {
     setSessionStatus(`Error: ${message?.error || 'Unknown error'}`);
     state.sessionId = null;
     state.stopRequested = false;
+    state.pausedProvider = null;
+    state.pausedAgentId = null;
+    state.pausedProfileId = null;
+    state.pausedAgentLabel = null;
+    state.pausedReason = null;
 }
 
 function clearTranscript() {
@@ -3456,9 +4031,10 @@ function buildMessageElement(message) {
     role.textContent = formatRoleLabel(message.role || message.llm || 'system');
 
     const label = document.createElement('span');
+    const agent = normalizeInlineText(message.agentLabel || '');
     const round = message.roundIndex ? `Round ${message.roundIndex}` : null;
     const turn = message.turnIndex ? `Turn ${message.turnIndex}` : null;
-    label.textContent = [round, turn].filter(Boolean).join(' | ');
+    label.textContent = [agent || null, round, turn].filter(Boolean).join(' | ');
 
     meta.appendChild(role);
     meta.appendChild(label);

@@ -13,7 +13,9 @@ function runTest(name, fn) {
   }
 }
 
-function roleLabel(role) {
+function roleLabel(role, message) {
+  const agentLabel = message && typeof message.agentLabel === 'string' ? message.agentLabel.trim() : '';
+  if (agentLabel) return agentLabel;
   const key = String(role || '').toLowerCase();
   if (key === 'user') return 'User';
   if (key === 'chatgpt') return 'ChatGPT';
@@ -205,4 +207,32 @@ runTest('multi-provider: supports 4 providers (delta size = N-1)', () => {
   assert.ok(grokTurn2.includes('Claude:\nC2'));
   assert.ok(grokTurn2.includes('Gemini:\nM2'));
   assert.ok(!grokTurn2.includes('Grok:\nK1'));
+});
+
+runTest('multi-provider: supports duplicate provider agents via expectedAgentId', () => {
+  const header = 'HEADER';
+  const instruction = 'INSTRUCTION';
+  const rounds = 2;
+
+  const user = { role: 'user', content: 'U' };
+  const g1a = { role: 'chatgpt', agentId: 'agent_a', agentLabel: 'ChatGPT #1', content: 'G1A' };
+  const g1b = { role: 'chatgpt', agentId: 'agent_b', agentLabel: 'ChatGPT #2', content: 'G1B' };
+  const m1 = { role: 'gemini', agentId: 'agent_c', agentLabel: 'Gemini', content: 'M1' };
+
+  const chatgptAgentATurn2 = DebatePromptUtils.buildMultiProviderDebatePrompt({
+    header,
+    roundIndex: 2,
+    rounds,
+    expectedAgentId: 'agent_a',
+    expectedProvider: 'chatgpt',
+    messages: [user, g1a, g1b, m1],
+    roleLabelFn: roleLabel,
+    userMessageOverride: 'U',
+    instruction
+  });
+
+  assert.ok(!chatgptAgentATurn2.includes('User:\nU'));
+  assert.ok(!chatgptAgentATurn2.includes('ChatGPT #1:\nG1A'));
+  assert.ok(chatgptAgentATurn2.includes('ChatGPT #2:\nG1B'));
+  assert.ok(chatgptAgentATurn2.includes('Gemini:\nM1'));
 });
