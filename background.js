@@ -1583,28 +1583,15 @@ async function connectProvider(provider, options = {}) {
     const normalizedProvider = normalizeProvider(provider);
     const opened = await openProviderTab(normalizedProvider, options);
     if (!opened?.ok) return opened || { ok: false, error: 'Failed to open provider tab.' };
-    let defaultProfileId = null;
-    let reuseDefaultProfileId = null;
-    try {
-        const state = await loadTabProfiles();
-        defaultProfileId = typeof state?.defaults?.[normalizedProvider] === 'string' ? state.defaults[normalizedProvider] : null;
-        const defaultProfile = defaultProfileId ? findProfileById(state, defaultProfileId) : null;
-        reuseDefaultProfileId = defaultProfile && !defaultProfile.inUseBySessionId ? defaultProfileId : null;
-    } catch (error) {
-        defaultProfileId = null;
-        reuseDefaultProfileId = null;
-    }
     let claimed = await claimTabAsProfile({
         provider: normalizedProvider,
         tabId: opened.tabId,
-        profileId: reuseDefaultProfileId || undefined,
         setDefault: true
     });
     if (!claimed?.ok) {
         claimed = await claimTabAsProfile({
             provider: normalizedProvider,
             tabId: opened.tabId,
-            profileId: reuseDefaultProfileId || undefined,
             setDefault: true,
             skipHostCheck: true
         });
@@ -6816,9 +6803,17 @@ async function checkConnectionStatus({ profileIds = [] } = {}) {
     
     console.log('[MLC Background] Starting connection status check...');
     
+    let profilesState = null;
     try {
-        const profilesState = await loadTabProfiles();
-        for (const provider of providers) {
+        profilesState = await loadTabProfiles();
+    } catch (error) {
+        console.error('[MLC Background] Error loading tab profiles for connection check:', error);
+        console.log('[MLC Background] Final connection status:', status);
+        return { status, profileStatus };
+    }
+
+    for (const provider of providers) {
+        try {
             const defaultProfileId = profilesState.defaults?.[provider];
             const profile = defaultProfileId ? findProfileById(profilesState, defaultProfileId) : null;
 
@@ -6840,14 +6835,19 @@ async function checkConnectionStatus({ profileIds = [] } = {}) {
             const pingOk = await pingTab(tab.id, provider);
             status[provider] = pingOk;
             console.log(`[MLC Background] ${formatLLMLabel(provider)} tab responsive:`, pingOk ? tab.id : 'No');
+        } catch (error) {
+            console.warn(`[MLC Background] Error checking ${formatLLMLabel(provider)} connection:`, error?.message || error);
+            status[provider] = false;
         }
+    }
 
-        const requestedProfileIds = Array.isArray(profileIds)
-            ? profileIds.map((id) => String(id || '').trim()).filter(Boolean)
-            : [];
-        if (requestedProfileIds.length > 0) {
-            const unique = [...new Set(requestedProfileIds)];
-            await Promise.all(unique.map(async (profileId) => {
+    const requestedProfileIds = Array.isArray(profileIds)
+        ? profileIds.map((id) => String(id || '').trim()).filter(Boolean)
+        : [];
+    if (requestedProfileIds.length > 0) {
+        const unique = [...new Set(requestedProfileIds)];
+        await Promise.all(unique.map(async (profileId) => {
+            try {
                 const profile = findProfileById(profilesState, profileId);
                 if (!profile || !Number.isFinite(profile.tabId)) {
                     profileStatus[profileId] = false;
@@ -6864,10 +6864,10 @@ async function checkConnectionStatus({ profileIds = [] } = {}) {
                     return;
                 }
                 profileStatus[profileId] = await pingTab(profile.tabId, provider);
-            }));
-        }
-    } catch (error) {
-        console.error('[MLC Background] Error checking connection status:', error);
+            } catch (error) {
+                profileStatus[profileId] = false;
+            }
+        }));
     }
     
     console.log('[MLC Background] Final connection status:', status);

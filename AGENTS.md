@@ -19,13 +19,10 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 ### Main user flow (runs)
 
-1. User creates **Tab Profiles** for ChatGPT, Gemini, Claude, and Grok in the Provider Manager:
-   - Use the current tab, or open a new provider tab and claim it after manual model selection.
+1. User connects providers (creates default tabs) via **Connect** / **Connect all** in the Route Builder provider list.
 2. In the side panel composer, user selects a **Route** from the `To` pill:
-   - Add one or more **agents** (rows), choose a provider, and bind each agent to a **tab/profile** (Default or a specific profile).
-     - The Agent rows do **not** use a fragile dropdown: clicking the binding opens the Provider Manager in an **Assign** mode, and each row also has a **New tab** action to bind directly.
-   - Drag to reorder agents and choose mode (**Parallel** / **Debate**) when applicable.
-   - `New tab` on a provider row opens a fresh tab, claims it into a new Tab Profile, and assigns it to an agent (filling an unassigned agent first, otherwise adding a new agent).
+   - Add one or more **agents** from the **Providers** list (`Add agent` / `New tab`).
+   - The **Agents** list is order-only: drag to reorder and `×` to remove.
    - Set **Rounds** only for Debate.
 3. User writes a message and clicks **Send**.
 4. The extension runs a debate (when Route = Debate):
@@ -46,35 +43,14 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Direct sends (Single) can backfill missing transcript history (tracked per chat via per-provider delivery cursors).
   - Parallel runs currently send the raw user prompt to each agent (no prompt wrapper/history injection) for fair comparison.
 
-### Provider Manager (Tab Profiles) UX
+### Connections (Tab Profiles) UX
 
-- Profiles are the only way to run Debate/Parallel sessions. Each **agent** in a route must resolve to a valid profile/tab (duplicates require multiple profiles).
-- Profile list is grouped by provider with cards showing:
-  - User label (renameable)
-  - Status pill (OK / Offline / Wrong host / Unknown)
-  - Tab info (last known title or URL, tabId if known)
-  - Window id (when available)
-  - Optional model hint (best effort)
-  - Badges: Default, In use
-- Actions per profile card:
-  - Focus (brings the tab + window to front)
-  - Set default
-  - Rename (local label only, does not touch provider UI)
-  - Rebind to current tab (claims the active tab as this profile)
-  - Remove (unassigns and deletes the profile)
-- Global actions:
-  - "Use current ChatGPT tab" / "Use current Gemini tab" / "Use current Claude tab"
-  - "Open new ChatGPT tab" / "Open new Gemini tab" / "Open new Claude tab"
-
-### Open tab + claim wizard (best effort model selection)
-
-- "Open new ..." opens the provider homepage in a new tab.
-- A claim wizard appears in the side panel:
-  - Instructs the user to manually pick a model in the provider UI.
-  - Shows a best effort detected model label if available.
-  - "Claim this tab" assigns the opened tab to a new profile.
-  - Claiming does not depend on model detection.
-- Wizard is dismissed on claim or cancel; cancel does not close the tab.
+- Tabs are tracked as persistent **Tab Profiles** (one profile = one provider tab).
+- Each **agent** in a route must resolve to a valid profile/tab; duplicate same-provider agents require multiple profiles.
+- The Route Builder is the primary UI:
+  - **Agents** list is order-only (drag + remove).
+  - All connection/tab creation happens in the **Providers** section (`Connect`, `Connect all`, `Add agent`, `New tab`).
+- The Settings drawer shows per-provider connection status + basic actions (no per-profile CRUD UI currently).
 
 ### Quick connect (side panel)
 
@@ -82,9 +58,9 @@ This file is the durable memory for the repo. It is the canonical reference for 
 - Provider rows also expose **New tab**, which opens a fresh provider tab, claims it into a new Tab Profile, and assigns it to an agent (useful for multiple agents on the same provider).
 - These send `CONNECT_PROVIDER` to the background, which:
   - opens the provider homepage tab, then
-  - claims the tab into a Tab Profile and sets it as the default for that provider (rebinding the existing default profile when possible to avoid creating many stale/offline profiles).
-- If the existing default profile is **In use** (`inUseBySessionId` is set), Connect will **not** rebind it. It instead creates a **new default profile/tab** so the running session is not disrupted.
-- Quick connect only satisfies agents that use `Default` for that provider. Additional same-provider agents require creating/claiming additional profiles and assigning them to agents in the Route Builder.
+  - claims the tab into a new Tab Profile and sets it as the **default** for that provider (Connect always creates a new default connection).
+- **New tab** creates an additional profile and assigns it to the most-recent unassigned agent for that provider (or replaces a broken pinned agent); otherwise it adds a new pinned agent.
+- Quick connect satisfies agents that use `Default`. Additional same-provider agents require extra profiles created via **New tab**.
 - Connection “ready” is still determined by a successful `PING`/`PONG` to the content script (login/redirect pages may delay readiness). If a tab is open but the content script isn’t injected (common after extension reload), the background will attempt to inject `captureUtils.js` + `contentScript.js` and retry once.
 - Profile writes are serialized in the background to avoid lost-update races.
 
@@ -140,9 +116,9 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Model label updates are periodic and non-blocking; failures are ignored.
 
 - `sidepanel.html`, `sidepanel.js`, `styles.css`
-  - Chat‑like UI: Provider Manager (profiles), session settings, transcript, composer.
+  - Chat‑like UI: Route Builder (agents + providers), settings drawer, transcript, composer.
   - Renders responses as plain text by default; if `contentHtml` is present, renders a **sanitized allowlist** subset (no raw `innerHTML`).
-  - Implements claim wizard, profile selection gating, and paused-session actions.
+  - Implements route gating (unique tabs per agent), connection checks, and paused-session actions.
 
 - `popup.html`, `popup.js`
   - Present but **not used** by default.
@@ -232,7 +208,7 @@ Structure:
 
 - `profiles`: array of
   - `profileId` (string)
-  - `provider` (`chatgpt` | `gemini`)
+  - `provider` (`chatgpt` | `gemini` | `claude` | `grok`)
   - `tabId` (number | null)
   - `windowId` (number | null)
   - `label` (string)
@@ -241,7 +217,7 @@ Structure:
   - `modelHint` (string, best effort)
   - `lastKnownTitle`, `lastKnownUrl` (string)
   - `inUseBySessionId` (string | null)
-- `defaults`: `{ chatgpt: profileId|null, gemini: profileId|null }`
+- `defaults`: `{ chatgpt: profileId|null, gemini: profileId|null, claude: profileId|null, grok: profileId|null }`
 
 Migration:
 
@@ -274,7 +250,7 @@ Claiming / rebinding:
 - `CREATE_PROFILE_FROM_ACTIVE_TAB` claims the active tab in the current window.
   - If `profileId` is provided, it rebinds that profile.
   - If `profileId` is omitted, it creates a new profile (and sets default if none).
-- `CLAIM_TAB_AS_PROFILE` claims a specific tabId (used by the claim wizard).
+- `CLAIM_TAB_AS_PROFILE` claims a specific tabId (used by Route Builder **New tab** flows).
 - Both actions validate host before saving.
 - Default label on claim:
   - If tab title is known, label is `Provider - <title>` (trimmed).
@@ -282,14 +258,16 @@ Claiming / rebinding:
 - Model hint updates:
   - `PROVIDER_MODEL_INFO` updates `profile.modelHint` when the tabId matches a profile.
   - Hints are sanitized/capped (single-line, short label); suspiciously long values are ignored/cleared.
-  - Stored hint is displayed in profile cards and the claim wizard (best effort).
+  - Stored hint is displayed in provider connection status (best effort).
 
 Open provider tab:
 
 - `OPEN_PROVIDER_TAB` opens:
   - ChatGPT: `https://chatgpt.com/`
   - Gemini: `https://gemini.google.com/`
-- Response includes `tabId` and `windowId` for the claim wizard.
+  - Claude: `https://claude.ai/new`
+  - Grok: `https://grok.com/`
+- Response includes `tabId` and `windowId` for the UI to claim/focus the tab.
 
 Defaults:
 
@@ -584,17 +562,17 @@ This flow is separate from debate sessions but shares capture logic.
 
 ## 10) Adding a new provider (high‑level checklist)
 
-To add a third LLM provider safely:
+To add another provider safely:
 
 1. Update `manifest.json` host permissions and `content_scripts` matches.
 2. Add provider to profile host validation rules (`getExpectedHosts`, `isExpectedHost`).
-3. Extend `listLLMTabs`, `resolveTabForLLM`, and the Provider Manager/profile selection UI.
+3. Extend `listLLMTabs`, `resolveTabForLLM`, and the Route Builder + connection status UI.
 4. Extend `simpleInteraction` selectors and send button logic for the new provider.
 5. Implement capture logic:
    - Add `is<Provider>Generating` and `extract<Provider>ResponseText`.
    - Ensure capture baseline and stability logic works.
 6. Update prompt templates and `formatLLMLabel` if needed.
-7. Update UI to allow selecting the provider in settings and profile manager.
+7. Update UI to allow selecting/connecting the provider in the Route Builder and Settings.
 8. Add model hint detection (optional, best effort).
 9. Add new message types if necessary, but prefer extending existing ones.
 10. Test long‑running responses and hidden tabs.

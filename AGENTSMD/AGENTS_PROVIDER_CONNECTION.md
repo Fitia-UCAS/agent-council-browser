@@ -50,8 +50,11 @@ The service worker (`background.js`) handles `CONNECT_PROVIDER` by:
      - prefers `tab.url`
      - falls back to `tab.pendingUrl` (important right after `chrome.tabs.create`)
    - If strict host validation fails (redirects / URL not ready), it retries with `skipHostCheck: true` so the tab still gets bound and can later become `ok` once it finishes navigation.
-   - Connect prefers to **rebind the existing default profile** (when one exists) instead of creating a brand new profile each time, to avoid accumulating lots of stale “Offline” profiles.
-   - Safety rule: if the existing default profile is **In use** (`inUseBySessionId` is set), Connect will **not** rebind it (to avoid stealing a tab from the running session). Instead it creates a **new profile** and sets it as the new default.
+   - Connect always creates a **new default connection**:
+     - it opens a new tab,
+     - claims it into a new Tab Profile,
+     - and sets that profile as the provider default.
+   - This avoids stealing a tab from an active session and makes Connect a reliable “reset the connection” action.
 
 ### 3) Profiles are persisted + UI is notified
 
@@ -85,8 +88,13 @@ In the Route Builder, **New tab** is for creating *additional* profiles (e.g., m
 The side panel:
 
 1. sends `OPEN_PROVIDER_TAB` (open the provider URL),
-2. then `CLAIM_TAB_AS_PROFILE` with `setDefault: false` (claim into a new Tab Profile),
-3. then assigns that profile to an agent in the route (fills an unassigned agent first, otherwise adds a new agent).
+2. then `CLAIM_TAB_AS_PROFILE` (claim into a new Tab Profile):
+   - uses `setDefault: true` only when the provider has no default profile yet (so `Default` agents can run),
+   - otherwise uses `setDefault: false` (so extra connections don’t steal/replace the default tab).
+3. then assigns that profile to an agent in the route:
+   - fills the most-recent unassigned agent for that provider,
+   - otherwise replaces a broken pinned agent,
+   - otherwise adds a new pinned agent.
 
 Readiness is still determined by `PING`/`PONG` (same connection checks).
 

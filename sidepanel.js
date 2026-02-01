@@ -2077,15 +2077,19 @@ function getRouteConfigurationIssue(route) {
     for (const agent of requiredAgents) {
         const provider = normalizeProviderId(agent?.provider);
         if (!provider) return 'Choose a supported provider.';
+        const selection = normalizeProfileSelection(agent?.profileId);
         const resolvedProfileId = resolveAgentProfileId(agent);
-        if (!resolvedProfileId) return 'Assign a tab for each agent.';
-        if (seen.has(resolvedProfileId)) return 'Each agent must use a different tab.';
+        if (!resolvedProfileId) {
+            if (selection === 'default') return `Connect ${formatProviderLabel(provider)} to start.`;
+            return `Open a New tab for ${formatProviderLabel(provider)} to give each agent its own tab.`;
+        }
+        if (seen.has(resolvedProfileId)) return 'Each agent must use a different tab. Use New tab to create another connection.';
         const profile = getProfileById(resolvedProfileId);
-        if (!profile) return 'A selected connection no longer exists. Refresh providers.';
+        if (!profile) return 'A selected connection no longer exists. Open a New tab to replace it.';
         if (profile.provider !== provider) return 'A selected connection does not match the provider.';
-        if (profile.status === 'wrong_host') return 'A selected tab is on the wrong site. Rebind it to the correct provider.';
-        if (!Number.isFinite(profile.tabId) || profile.status === 'offline') return 'A selected tab is closed/unbound. Open a new tab and assign it.';
-        if (profile.inUseBySessionId) return 'A selected tab is already in use by another session.';
+        if (profile.status === 'wrong_host') return 'A selected tab is on the wrong site. Open a New tab to replace it.';
+        if (!Number.isFinite(profile.tabId) || profile.status === 'offline') return 'A selected tab is closed. Open a New tab to replace it.';
+        if (profile.inUseBySessionId) return 'A selected tab is already in use by another session. Open a New tab to create a separate connection.';
         seen.add(resolvedProfileId);
     }
     return '';
@@ -2615,30 +2619,56 @@ async function openNewTabAndBindAgent(provider) {
             throw new Error(opened?.error || 'Failed to open provider tab.');
         }
 
+        const hasDefault = Boolean(state.defaults?.[normalizedProvider]);
         const claimed = await sendMessageAsync({
             type: 'CLAIM_TAB_AS_PROFILE',
             provider: normalizedProvider,
             tabId: opened.tabId,
-            setDefault: false
+            setDefault: !hasDefault
         });
         if (!claimed || claimed.ok === false || !claimed.profile?.profileId) {
             throw new Error(claimed?.error || 'Failed to bind provider tab.');
         }
 
         upsertProfileInState(claimed.profile);
+        if (!hasDefault) {
+            state.defaults[normalizedProvider] = claimed.profile.profileId;
+        }
 
         const route = state.route || getDefaultRoute();
         const agents = [...getRouteAgents(route)];
-        let unassignedIndex = -1;
+        const hasDefaultAgent = agents.some((agent) => (
+            agent?.provider === normalizedProvider
+            && normalizeProfileSelection(agent?.profileId) === 'default'
+        ));
+        const reservedForDefault = !hasDefault && hasDefaultAgent;
+
+        if (reservedForDefault) {
+            requestProfiles();
+            scheduleRouteConnectionStatusCheck();
+            window.setTimeout(scheduleRouteConnectionStatusCheck, 2500);
+            window.setTimeout(scheduleRouteConnectionStatusCheck, 8000);
+            updateSendState();
+            return;
+        }
+        let targetIndex = -1;
         for (let i = agents.length - 1; i >= 0; i -= 1) {
             const agent = agents[i];
             if (agent?.provider !== normalizedProvider) continue;
-            if (normalizeProfileSelection(agent?.profileId)) continue;
-            unassignedIndex = i;
-            break;
+            const selection = normalizeProfileSelection(agent?.profileId);
+            if (!selection) {
+                targetIndex = i;
+                break;
+            }
+            if (selection === 'default') continue;
+            const profile = getProfileById(selection);
+            if (!profile || !isProfileRoutable(profile, normalizedProvider)) {
+                targetIndex = i;
+                break;
+            }
         }
-        if (unassignedIndex >= 0) {
-            agents[unassignedIndex] = { ...agents[unassignedIndex], profileId: claimed.profile.profileId };
+        if (targetIndex >= 0) {
+            agents[targetIndex] = { ...agents[targetIndex], profileId: claimed.profile.profileId };
         } else {
             agents.push({ id: generateRouteAgentId(), provider: normalizedProvider, profileId: claimed.profile.profileId });
         }
@@ -2784,7 +2814,6 @@ function renderProviderSettingsUi() {
 
     renderProfileLists();
     updateProviderUi();
-    updateAssignBannerUi();
 }
 
 function updateProviderUi() {

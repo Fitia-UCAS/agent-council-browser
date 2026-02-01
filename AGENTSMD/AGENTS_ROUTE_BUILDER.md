@@ -10,7 +10,7 @@ The goal is that future work (adding Claude/Grok/etc.) can extend routing withou
 
 The Route Builder is the control behind the composer’s **`To`** pill. It replaces the old “Send to / iterations” controls with a single, scalable model:
 
-- Users build a route of one or more **agents** (rows). An agent is a provider + a profile selection.
+- Users build a route of one or more **agents** (rows). An agent is a provider + a tab profile binding (`Default` or a pinned profile).
 - Multiple agents can use the **same provider** (e.g., multiple ChatGPT tabs debating), but each agent must resolve to a **different profile/tab**.
 - Users can reorder agents (drag handles).
 - Users choose a run mode (Parallel vs Debate) when applicable.
@@ -72,11 +72,8 @@ Route Builder sections (top → bottom):
 
 - Displays selected agents as draggable rows (drag handle).
 - Dragging rows reorders the `route.agents[]` array.
-- Each row shows the agent’s **tab binding** (Default or pinned profile) and a short status (Ready / Waiting / Offline / Wrong host / In use).
-- **New tab** on an agent row opens a provider tab and binds it to that agent:
-  - If the agent uses **Default**, it opens a new tab and sets it as the provider’s **new default** connection.
-  - Otherwise, it opens a new tab, creates a **new Tab Profile**, and pins the agent to it.
-- Clicking the binding opens the Settings drawer in an **Assign mode** so the user can assign an existing profile to that agent.
+- Agent rows are **order-only**: they show the provider label (with an index when duplicated, e.g. “ChatGPT 1”, “ChatGPT 2”), plus remove.
+- All connection/tab management happens in the **Providers** section below (Connect / New tab).
 - Clicking `×` removes that agent from the route.
 
 ### Mode
@@ -110,17 +107,20 @@ Each provider row shows:
 Provider row actions are **state-dependent**:
 
 - If the provider is **not ready**: show:
-  - **Connect**: opens a provider tab and binds it as the **default profile** (rebinding the existing default profile when possible).
-    - If the route does not yet include this provider, Connect also ensures there is at least one `Default` agent for it in the route.
-    - If the provider default is **In use**, Connect instead opens a **new default tab** so the active session is not disrupted.
+  - **Connect**: opens a provider tab and binds it as the **default profile** (always creates a new default connection; does not rebind an existing default tab).
   - **New tab**: opens a fresh provider tab, claims it into a **new Tab Profile**, and assigns it to an agent:
-    - fills the first unassigned (“Pick tab…”) agent for that provider if one exists, otherwise adds a new agent.
+    - if the provider has no default profile yet, the new profile also becomes the provider **default** (so `Default` agents can run).
+    - fills the most-recent unassigned agent for that provider if one exists,
+    - otherwise replaces a broken pinned agent,
+    - otherwise adds a new pinned agent.
     - does **not** require an extra Connect click afterwards.
 - If the provider is **ready**: show:
-  - **Add agent**: adds another agent row for that provider (profile selection is suggested if available).
+  - **Add agent**: adds another agent row for that provider.
+    - First agent uses `Default`.
+    - Additional same-provider agents are added as unassigned slots until a **New tab** is opened for them.
   - **Focus**: focuses the bound default profile tab.
   - **New tab**: opens a fresh provider tab, claims it into a **new Tab Profile**, and assigns it to an agent (same behavior as above).
-    - This does **not** rebind the default profile; use the Provider Manager to change defaults.
+    - This does not change the provider’s default profile (unless no default exists yet); it creates a new profile and assigns it to a route agent.
 
 Focus highlighting:
 
@@ -128,7 +128,7 @@ Focus highlighting:
 
 Footer:
 
-- **Manage providers** opens the Settings drawer (Tab Profiles manager).
+- **Settings** opens the Settings drawer.
 - **Done** closes the popover.
 
 ---
