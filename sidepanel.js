@@ -42,6 +42,7 @@ const state = {
     route: null,
     routeLoaded: false,
     lastFocusedProvider: null,
+    routeAssignTarget: null,
     manualUploadAckKey: null,
     attachments: [],
     attachmentsLoading: false,
@@ -194,6 +195,21 @@ function sanitizeRoute(input) {
             if (provider) agents.push({ id: generateRouteAgentId(), provider, profileId: 'default' });
         });
     }
+
+    // Back-compat: older routes used `profileId: null` while effectively meaning "Default".
+    // We only auto-upgrade to Default when there's a single agent for that provider, so
+    // multi-agent same-provider routes can still represent "unassigned" slots.
+    const agentCountsByProvider = {};
+    agents.forEach((agent) => {
+        if (!agent?.provider) return;
+        agentCountsByProvider[agent.provider] = (agentCountsByProvider[agent.provider] || 0) + 1;
+    });
+    agents.forEach((agent) => {
+        if (!agent?.provider) return;
+        if (normalizeProfileSelection(agent.profileId)) return;
+        if (agentCountsByProvider[agent.provider] !== 1) return;
+        agent.profileId = 'default';
+    });
 
     const requestedKind = String(route.kind || '').trim().toLowerCase();
     const roundsValue = route.rounds == null ? 3 : route.rounds;
@@ -379,9 +395,8 @@ function resolveAgentProfileId(agent) {
     const provider = normalizeProviderId(agent?.provider);
     if (!provider) return null;
     const selection = normalizeProfileSelection(agent?.profileId);
-    if (!selection || selection === 'default') {
-        return state.defaults?.[provider] || null;
-    }
+    if (!selection) return null;
+    if (selection === 'default') return state.defaults?.[provider] || null;
     return selection;
 }
 
@@ -404,7 +419,7 @@ function formatRouteAgentLabel(agent) {
 
     let suffix = '';
     if (!selection) {
-        suffix = 'Pick profile';
+        suffix = 'Assign tab';
     } else if (selection === 'default') {
         const profile = getDefaultProfile(provider);
         const raw = profile?.label ? stripProviderPrefix(profile.label, providerLabel) : '';
@@ -610,7 +625,15 @@ function updateRouteConnectAllUi() {
     if (!elements.routeConnectAll) return;
     const supported = getSupportedProviders();
     const anyConnecting = supported.some((provider) => Boolean(state.connecting?.[provider]));
-    const anyNeedsConnect = supported.some((provider) => !Boolean(state.connectionStatus?.[provider]));
+    const anyNeedsConnect = supported.some((provider) => {
+        const profile = getDefaultProfile(provider);
+        const ready = Boolean(state.connectionStatus?.[provider]);
+        if (!profile) return true;
+        if (profile.inUseBySessionId) return true;
+        if (!Number.isFinite(profile.tabId)) return true;
+        if (profile.status === 'offline' || profile.status === 'wrong_host') return true;
+        return !ready;
+    });
     if (anyConnecting) {
         elements.routeConnectAll.textContent = 'Connecting…';
         elements.routeConnectAll.disabled = true;
@@ -637,13 +660,6 @@ function renderRouteSelectedChips(route) {
         return;
     }
 
-    const usedResolvedProfiles = new Map();
-    agents.forEach((agent) => {
-        const resolved = resolveAgentProfileId(agent);
-        if (!resolved) return;
-        if (!usedResolvedProfiles.has(resolved)) usedResolvedProfiles.set(resolved, agent.id);
-    });
-
     agents.forEach((agent) => {
         const provider = normalizeProviderId(agent?.provider);
         if (!provider) return;
@@ -664,82 +680,6 @@ function renderRouteSelectedChips(route) {
         name.className = 'route-agent-name';
         name.textContent = formatProviderLabel(provider);
         row.appendChild(name);
-
-        const select = document.createElement('select');
-        select.className = 'route-agent-select';
-        select.dataset.action = 'set-route-agent-profile';
-        select.dataset.agentId = agent.id;
-        select.setAttribute('aria-label', `Profile for ${formatProviderLabel(provider)}`);
-
-        const selection = normalizeProfileSelection(agent.profileId);
-        const currentValue = selection || '';
-        const resolvedCurrent = resolveAgentProfileId(agent);
-        const currentProfile = resolvedCurrent ? getProfileById(resolvedCurrent) : null;
-
-        const placeholderOption = document.createElement('option');
-        placeholderOption.value = '';
-        placeholderOption.textContent = 'Pick profile…';
-        select.appendChild(placeholderOption);
-
-        const defaultProfileId = state.defaults?.[provider] || null;
-        const defaultProfile = defaultProfileId ? getProfileById(defaultProfileId) : null;
-        const defaultLabel = defaultProfile?.label
-            ? stripProviderPrefix(defaultProfile.label, formatProviderLabel(provider))
-            : '';
-        const defaultOption = document.createElement('option');
-        defaultOption.value = 'default';
-        const defaultStatusSuffix = defaultProfile?.status && defaultProfile.status !== 'ok'
-            ? ` • ${formatStatusLabel(defaultProfile.status)}`
-            : '';
-        defaultOption.textContent = defaultLabel ? `Default (${defaultLabel})${defaultStatusSuffix}` : `Default${defaultStatusSuffix}`;
-        if (!defaultProfileId) {
-            defaultOption.disabled = true;
-            defaultOption.textContent = 'Default (missing)';
-        } else {
-            const usedBy = usedResolvedProfiles.get(defaultProfileId);
-            if (usedBy && usedBy !== agent.id) defaultOption.disabled = true;
-        }
-        select.appendChild(defaultOption);
-
-        const profiles = getProfilesForProvider(provider);
-        const routableProfiles = profiles
-            .filter((profile) => isProfileRoutable(profile, provider))
-            .filter((profile) => profile.profileId !== defaultProfileId);
-        const extraProfiles = profiles.filter((profile) => profile && currentProfile && profile.profileId === currentProfile.profileId)
-            .filter((profile) => !routableProfiles.some((p) => p.profileId === profile.profileId));
-        const profilesToShow = [...routableProfiles, ...extraProfiles];
-        profilesToShow.forEach((profile) => {
-            const option = document.createElement('option');
-            option.value = profile.profileId;
-            const statusSuffix = profile.status && profile.status !== 'ok'
-                ? ` • ${formatStatusLabel(profile.status)}`
-                : (profile.inUseBySessionId ? ' • In use' : '');
-            const detail = formatProfileTabLabel(profile);
-            const baseLabel = profile.label || formatProviderLabel(provider);
-            option.textContent = detail ? `${baseLabel} • ${detail}${statusSuffix}` : `${baseLabel}${statusSuffix}`;
-
-            const usedBy = usedResolvedProfiles.get(profile.profileId);
-            if (usedBy && usedBy !== agent.id) option.disabled = true;
-            if (profile.inUseBySessionId) option.disabled = true;
-
-            select.appendChild(option);
-        });
-
-        const manageOption = document.createElement('option');
-        manageOption.value = '__manage_profiles__';
-        manageOption.textContent = 'Manage profiles…';
-        select.appendChild(manageOption);
-
-        select.value = currentValue;
-        if (!select.value && selection === 'default') select.value = 'default';
-
-        const resolvedSelected = selection === 'default' ? defaultProfileId : selection;
-        const usedBySelected = resolvedSelected ? usedResolvedProfiles.get(resolvedSelected) : null;
-        const isDuplicate = Boolean(resolvedSelected && usedBySelected && usedBySelected !== agent.id);
-        const isRoutable = resolvedCurrent ? isProfileRoutable(currentProfile, provider) : false;
-        row.classList.toggle('is-invalid', !resolvedCurrent || isDuplicate || (resolvedCurrent && !isRoutable));
-
-        row.appendChild(select);
 
         const remove = document.createElement('button');
         remove.type = 'button';
@@ -763,16 +703,18 @@ function renderRouteProviderList(route) {
     elements.routeProviderList.innerHTML = '';
     const supported = getSupportedProviders();
     const agentCounts = countRouteAgentsByProvider(route);
-    supported.forEach((provider) => {
-        const selectedCount = agentCounts[provider] || 0;
-        const ready = Boolean(state.connectionStatus?.[provider]);
-        const connecting = Boolean(state.connecting?.[provider]);
-        const profile = getDefaultProfile(provider);
-        const connected = Boolean(profile?.tabId && ready);
+	    supported.forEach((provider) => {
+	        const selectedCount = agentCounts[provider] || 0;
+	        const ready = Boolean(state.connectionStatus?.[provider]);
+	        const connecting = Boolean(state.connecting?.[provider]);
+	        const profile = getDefaultProfile(provider);
+            const busy = Boolean(profile?.inUseBySessionId);
+	        const connected = Boolean(profile?.tabId && ready && !busy);
         const modelHint = profile?.modelHint ? ` • ${profile.modelHint}` : '';
 
         let statusText = 'Not connected';
         if (connecting) statusText = 'Connecting…';
+        else if (busy) statusText = 'In use';
         else if (ready) statusText = 'Ready';
         else if (profile?.status === 'wrong_host') statusText = 'Wrong host';
         else if (profile?.status === 'unknown') statusText = 'Loading…';
@@ -797,6 +739,7 @@ function renderRouteProviderList(route) {
         dot.className = 'route-provider-dot';
         dot.classList.toggle('is-ready', ready);
         dot.classList.toggle('is-connecting', connecting);
+        dot.classList.toggle('is-busy', busy);
         name.appendChild(dot);
 
         const nameText = document.createElement('span');
@@ -810,23 +753,32 @@ function renderRouteProviderList(route) {
         status.textContent = `${statusText} • ${usingText}`;
         meta.appendChild(status);
 
-        const actions = document.createElement('div');
-        actions.className = 'route-provider-actions';
+	        const actions = document.createElement('div');
+	        actions.className = 'route-provider-actions';
 
-        if (!connected) {
-            const connect = document.createElement('button');
-            connect.type = 'button';
-            connect.className = 'ghost-button';
-            connect.dataset.action = 'connect-provider';
-            connect.dataset.provider = provider;
-            connect.textContent = connecting ? 'Connecting…' : 'Connect';
-            connect.disabled = connecting;
-            actions.appendChild(connect);
-        } else {
-            const addAgent = document.createElement('button');
-            addAgent.type = 'button';
-            addAgent.className = 'ghost-button';
-            addAgent.dataset.action = 'add-agent';
+	        if (!connected) {
+	            const connect = document.createElement('button');
+	            connect.type = 'button';
+	            connect.className = 'ghost-button';
+	            connect.dataset.action = 'connect-provider';
+	            connect.dataset.provider = provider;
+	            connect.textContent = connecting ? 'Connecting…' : (busy ? 'New default tab' : 'Connect');
+	            connect.disabled = connecting;
+	            actions.appendChild(connect);
+
+	            const newTab = document.createElement('button');
+	            newTab.type = 'button';
+	            newTab.className = 'ghost-button';
+	            newTab.dataset.provider = provider;
+	            newTab.dataset.action = 'new-tab';
+	            newTab.textContent = connecting ? 'Opening…' : 'New tab';
+	            newTab.disabled = connecting;
+	            actions.appendChild(newTab);
+	        } else {
+	            const addAgent = document.createElement('button');
+	            addAgent.type = 'button';
+	            addAgent.className = 'ghost-button';
+	            addAgent.dataset.action = 'add-agent';
             addAgent.dataset.provider = provider;
             addAgent.textContent = selectedCount > 0 ? `Add agent (${selectedCount})` : 'Add agent';
 
@@ -899,7 +851,7 @@ function handleRouteProviderListClick(event) {
     }
 
     const profile = getDefaultProfile(provider);
-    const connected = Boolean(profile?.tabId && Boolean(state.connectionStatus?.[provider]));
+    const connected = Boolean(profile?.tabId && Boolean(state.connectionStatus?.[provider]) && !profile.inUseBySessionId);
     if (!connected) {
         connectAndAdd();
         return;
@@ -910,37 +862,19 @@ function handleRouteProviderListClick(event) {
 function handleRouteSelectedClick(event) {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
-    const removeButton = target.closest('button[data-action="remove-route-agent"]');
-    if (!removeButton) return;
-    const agentId = removeButton.dataset.agentId;
+    const button = target.closest('button[data-action]');
+    if (!button) return;
+    const action = button.dataset.action;
+    const agentId = button.dataset.agentId;
     if (!agentId) return;
-    const route = state.route || getDefaultRoute();
-    const agents = getRouteAgents(route).filter((agent) => agent?.id !== agentId);
-    setRoute({ ...route, agents });
-}
 
-function handleRouteSelectedChange(event) {
-    const target = event.target;
-    if (!(target instanceof HTMLElement)) return;
-    if (target.tagName !== 'SELECT') return;
-    if (target.dataset.action !== 'set-route-agent-profile') return;
-    const agentId = target.dataset.agentId;
-    if (!agentId) return;
     const route = state.route || getDefaultRoute();
-    const agents = getRouteAgents(route);
-    const index = agents.findIndex((agent) => agent?.id === agentId);
-    if (index < 0) return;
-    const rawValue = String(target.value || '');
-    if (rawValue === '__manage_profiles__') {
-        const prior = normalizeProfileSelection(agents[index]?.profileId);
-        target.value = prior || (agents[index]?.profileId === 'default' ? 'default' : '');
-        openSettingsDrawer();
+
+    if (action === 'remove-route-agent') {
+        const agents = getRouteAgents(route).filter((agent) => agent?.id !== agentId);
+        setRoute({ ...route, agents });
         return;
     }
-    const selection = normalizeProfileSelection(rawValue);
-    const nextAgents = [...agents];
-    nextAgents[index] = { ...nextAgents[index], profileId: selection || null };
-    setRoute({ ...route, agents: nextAgents });
 }
 
 function handleRouteChipDragStart(event) {
@@ -1028,6 +962,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.attachmentList = document.getElementById('attachment-list');
 
     elements.connectionsList = document.getElementById('connections-list');
+    elements.advancedConnections = document.getElementById('advanced-connections');
+    elements.assignBanner = document.getElementById('assign-banner');
+    elements.assignBannerText = document.getElementById('assign-banner-text');
+    elements.assignUseDefault = document.getElementById('assign-use-default');
+    elements.assignCancel = document.getElementById('assign-cancel');
     elements.profileColumns = document.getElementById('profile-columns');
     elements.connectionLabelByProvider = {};
     elements.connectionFocusButtonByProvider = {};
@@ -1210,7 +1149,6 @@ function bindEvents() {
 
     if (elements.routeSelected) {
         elements.routeSelected.addEventListener('click', handleRouteSelectedClick);
-        elements.routeSelected.addEventListener('change', handleRouteSelectedChange);
         elements.routeSelected.addEventListener('dragstart', handleRouteChipDragStart);
         elements.routeSelected.addEventListener('dragover', handleRouteChipDragOver);
         elements.routeSelected.addEventListener('drop', handleRouteChipDrop);
@@ -1290,6 +1228,17 @@ function bindEvents() {
 
     if (elements.closeSettingsButton) {
         elements.closeSettingsButton.addEventListener('click', closeSettingsDrawer);
+    }
+
+    if (elements.assignCancel) {
+        elements.assignCancel.addEventListener('click', () => {
+            closeSettingsDrawer();
+            openRoutePopover();
+        });
+    }
+
+    if (elements.assignUseDefault) {
+        elements.assignUseDefault.addEventListener('click', assignDefaultToRouteTarget);
     }
 
     if (elements.emptyOpenRoute) {
@@ -2135,14 +2084,14 @@ function getRouteConfigurationIssue(route) {
         const provider = normalizeProviderId(agent?.provider);
         if (!provider) return 'Choose a supported provider.';
         const resolvedProfileId = resolveAgentProfileId(agent);
-        if (!resolvedProfileId) return 'Pick a profile for each agent.';
-        if (seen.has(resolvedProfileId)) return 'Each agent must use a different profile/tab.';
+        if (!resolvedProfileId) return 'Assign a tab for each agent.';
+        if (seen.has(resolvedProfileId)) return 'Each agent must use a different tab.';
         const profile = getProfileById(resolvedProfileId);
-        if (!profile) return 'A selected profile no longer exists. Refresh providers.';
-        if (profile.provider !== provider) return 'A selected profile does not match the provider.';
-        if (profile.status === 'wrong_host') return 'A selected profile is on the wrong site. Rebind it to the correct provider.';
-        if (!Number.isFinite(profile.tabId) || profile.status === 'offline') return 'A selected profile is offline/unbound. Open a provider tab and rebind that profile.';
-        if (profile.inUseBySessionId) return 'A selected profile is already in use by another session.';
+        if (!profile) return 'A selected connection no longer exists. Refresh providers.';
+        if (profile.provider !== provider) return 'A selected connection does not match the provider.';
+        if (profile.status === 'wrong_host') return 'A selected tab is on the wrong site. Rebind it to the correct provider.';
+        if (!Number.isFinite(profile.tabId) || profile.status === 'offline') return 'A selected tab is closed/unbound. Open a new tab and assign it.';
+        if (profile.inUseBySessionId) return 'A selected tab is already in use by another session.';
         seen.add(resolvedProfileId);
     }
     return '';
@@ -2593,6 +2542,7 @@ function openSettingsDrawer() {
     elements.settingsBackdrop.hidden = false;
     elements.settingsDrawer.classList.add('is-open');
     elements.settingsDrawer.setAttribute('aria-hidden', 'false');
+    updateAssignBannerUi();
 }
 
 function closeSettingsDrawer() {
@@ -2600,6 +2550,39 @@ function closeSettingsDrawer() {
     elements.settingsDrawer.classList.remove('is-open');
     elements.settingsDrawer.setAttribute('aria-hidden', 'true');
     elements.settingsBackdrop.hidden = true;
+    state.routeAssignTarget = null;
+    updateAssignBannerUi();
+}
+
+function updateAssignBannerUi() {
+    if (!elements.assignBanner || !elements.assignBannerText || !elements.assignCancel || !elements.assignUseDefault) return;
+    const target = state.routeAssignTarget;
+    const show = Boolean(target && target.agentId && target.provider);
+    elements.assignBanner.hidden = !show;
+    if (!show) return;
+
+    const route = state.route || getDefaultRoute();
+    const agent = getRouteAgents(route).find((item) => item?.id === target.agentId) || null;
+    const label = agent ? formatRouteAgentLabel(agent) : formatProviderLabel(target.provider);
+    elements.assignBannerText.textContent = `Assigning a connection to: ${label}`;
+
+    const hasDefault = Boolean(state.defaults?.[target.provider]);
+    elements.assignUseDefault.disabled = !hasDefault;
+}
+
+function assignDefaultToRouteTarget() {
+    const target = state.routeAssignTarget;
+    if (!target?.agentId || !target.provider) return;
+    if (!state.defaults?.[target.provider]) return;
+    const route = state.route || getDefaultRoute();
+    const agents = getRouteAgents(route);
+    const index = agents.findIndex((agent) => agent?.id === target.agentId);
+    if (index < 0) return;
+    const nextAgents = [...agents];
+    nextAgents[index] = { ...nextAgents[index], profileId: 'default' };
+    setRoute({ ...route, agents: nextAgents });
+    closeSettingsDrawer();
+    openRoutePopover();
 }
 
 function getDefaultProfile(provider) {
@@ -2706,6 +2689,86 @@ async function openNewTabAndBindAgent(provider) {
     }
 }
 
+async function openNewTabAndBindSpecificAgent(agentId) {
+    const id = String(agentId || '').trim();
+    if (!id) return;
+
+    const route = state.route || getDefaultRoute();
+    const agents = [...getRouteAgents(route)];
+    const index = agents.findIndex((agent) => agent?.id === id);
+    if (index < 0) return;
+
+    const provider = normalizeProviderId(agents[index]?.provider);
+    if (!provider) return;
+    const selection = normalizeProfileSelection(agents[index]?.profileId);
+    if (selection === 'default') {
+        connectProvider(provider);
+        return;
+    }
+    ensureProviderMaps();
+    if (state.connecting[provider]) return;
+
+    state.lastFocusedProvider = provider;
+    state.connecting[provider] = true;
+    updateProviderUi();
+
+    try {
+        const opened = await sendMessageAsync({ type: 'OPEN_PROVIDER_TAB', provider, focus: true });
+        if (!opened || opened.ok === false || !Number.isFinite(opened.tabId)) {
+            throw new Error(opened?.error || 'Failed to open provider tab.');
+        }
+
+        const claimed = await sendMessageAsync({
+            type: 'CLAIM_TAB_AS_PROFILE',
+            provider,
+            tabId: opened.tabId,
+            setDefault: false
+        });
+        if (!claimed || claimed.ok === false || !claimed.profile?.profileId) {
+            throw new Error(claimed?.error || 'Failed to bind provider tab.');
+        }
+
+        upsertProfileInState(claimed.profile);
+
+        const nextAgents = [...agents];
+        nextAgents[index] = { ...nextAgents[index], profileId: claimed.profile.profileId };
+        setRoute({ ...route, agents: nextAgents });
+
+        requestProfiles();
+        scheduleRouteConnectionStatusCheck();
+        window.setTimeout(scheduleRouteConnectionStatusCheck, 2500);
+        window.setTimeout(scheduleRouteConnectionStatusCheck, 8000);
+    } catch (error) {
+        handleActionResponse({ ok: false, error: error?.message || String(error) });
+    } finally {
+        state.connecting[provider] = false;
+        updateProviderUi();
+    }
+}
+
+function beginAssignProfileToAgent(agentId) {
+    const id = String(agentId || '').trim();
+    if (!id) return;
+    const route = state.route || getDefaultRoute();
+    const agent = getRouteAgents(route).find((item) => item?.id === id);
+    if (!agent) return;
+    const provider = normalizeProviderId(agent?.provider);
+    if (!provider) return;
+    state.routeAssignTarget = { agentId: id, provider };
+    state.lastFocusedProvider = provider;
+    closeRoutePopover();
+    openSettingsDrawer();
+    if (elements.advancedConnections) elements.advancedConnections.open = true;
+    renderProviderSettingsUi();
+    window.setTimeout(() => {
+        const list = elements.profileListByProvider?.[provider] || null;
+        const column = list?.closest('.profile-column') || null;
+        if (column && typeof column.scrollIntoView === 'function') {
+            column.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        }
+    }, 0);
+}
+
 function connectAllProviders() {
     const supported = getSupportedProviders();
     if (supported.length === 0) return;
@@ -2728,8 +2791,14 @@ function connectAllProviders() {
 
     supported.forEach((provider) => {
         const profile = getDefaultProfile(provider);
-        const connected = Boolean(profile?.tabId && Boolean(state.connectionStatus?.[provider]));
-        if (connected) return;
+        const ready = Boolean(state.connectionStatus?.[provider]);
+        const needsReconnect = !profile
+            || profile.inUseBySessionId
+            || profile.status === 'offline'
+            || profile.status === 'wrong_host'
+            || !Number.isFinite(profile.tabId)
+            || !ready;
+        if (!needsReconnect) return;
         connectProvider(provider);
     });
 }
@@ -2844,6 +2913,7 @@ function renderProviderSettingsUi() {
 
     renderProfileLists();
     updateProviderUi();
+    updateAssignBannerUi();
 }
 
 function updateProviderUi() {
@@ -2864,6 +2934,8 @@ function updateProviderUi() {
         let labelText = 'Not connected';
         if (connecting) {
             labelText = 'Connecting…';
+        } else if (profile?.inUseBySessionId) {
+            labelText = 'In use';
         } else if (ready) {
             labelText = `Connected${modelHint}`;
         } else if (profile?.status === 'wrong_host') {
@@ -2927,7 +2999,7 @@ function updateComposerHint() {
     } else if (!supportedRoute) {
         hint = 'This route is not supported yet.';
     } else if (!configuredRoute) {
-        hint = getRouteConfigurationIssue(route) || 'Pick profiles to start.';
+        hint = getRouteConfigurationIssue(route) || 'Fix the route to start.';
     } else if (!connected) {
         hint = `Connect ${requiredLabel} to start.`;
     } else if (historyBlocked) {
@@ -2957,7 +3029,7 @@ function updateComposerHint() {
         : (!supportedRoute
             ? 'Choose a supported route…'
             : (!configuredRoute
-                ? 'Pick profiles to start…'
+                ? 'Fix the route to start…'
                 : (!connected
                     ? `Connect ${requiredLabel} to start...`
                     : (historyBlocked ? 'Unlock history to continue...' : 'Send a message...'))));
@@ -3009,8 +3081,8 @@ function updateEmptyState() {
 
     if (!ready) {
         if (!isRouteConfigured(route)) {
-            if (titleEl) titleEl.textContent = 'Pick profiles';
-            if (subtitleEl) subtitleEl.textContent = getRouteConfigurationIssue(route) || 'Pick profiles to start.';
+            if (titleEl) titleEl.textContent = 'Fix route';
+            if (subtitleEl) subtitleEl.textContent = getRouteConfigurationIssue(route) || 'Fix the route to start.';
             if (actionsEl) actionsEl.hidden = false;
             return;
         }
@@ -3066,7 +3138,7 @@ async function startSession() {
     }
 
     if (!isRouteConfigured(route)) {
-        setSessionStatus(getRouteConfigurationIssue(route) || 'Pick profiles to start.');
+        setSessionStatus(getRouteConfigurationIssue(route) || 'Fix the route to start.');
         openRoutePopover();
         return;
     }
@@ -3470,6 +3542,20 @@ function buildProfileCard(profile) {
 
     const actions = document.createElement('div');
     actions.className = 'profile-actions-row';
+    const assignTarget = state.routeAssignTarget;
+    const isAssignMode = Boolean(assignTarget && assignTarget.provider === profile.provider && assignTarget.agentId);
+    if (isAssignMode) {
+        const route = state.route || getDefaultRoute();
+        const used = new Set();
+        getRouteAgents(route).forEach((agent) => {
+            if (!agent || agent.id === assignTarget.agentId) return;
+            const resolved = resolveAgentProfileId(agent);
+            if (resolved) used.add(resolved);
+        });
+        const usedByOtherAgent = used.has(profile.profileId);
+        const assignDisabled = usedByOtherAgent || !isProfileRoutable(profile, profile.provider);
+        actions.appendChild(buildActionButton('Assign', 'assign', assignDisabled));
+    }
     actions.appendChild(buildActionButton('Focus', 'focus', !profile.tabId));
     actions.appendChild(buildActionButton('Set default', 'default'));
     actions.appendChild(buildActionButton('Rename', 'rename'));
@@ -3522,6 +3608,20 @@ function handleProfileListClick(event) {
     if (!profile) return;
 
     switch (button.dataset.action) {
+        case 'assign': {
+            const target = state.routeAssignTarget;
+            if (!target?.agentId) return;
+            const route = state.route || getDefaultRoute();
+            const agents = getRouteAgents(route);
+            const index = agents.findIndex((agent) => agent?.id === target.agentId);
+            if (index < 0) return;
+            const nextAgents = [...agents];
+            nextAgents[index] = { ...nextAgents[index], profileId: profile.profileId };
+            setRoute({ ...route, agents: nextAgents });
+            closeSettingsDrawer();
+            openRoutePopover();
+            break;
+        }
         case 'focus':
             if (profile.tabId) {
                 sendMessage({ type: 'FOCUS_TAB', tabId: profile.tabId }, handleActionResponse);

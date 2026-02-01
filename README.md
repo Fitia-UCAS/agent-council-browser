@@ -2,18 +2,20 @@
 
 Chrome extension side panel that lets you route a prompt to multiple LLM web UIs (no APIs) so you can compare outputs or run a debate.
 
+Core idea: runs target **agents** (a provider + a specific browser tab profile), so you can run **multiple instances of the same provider** (e.g., 3 ChatGPT tabs debating each other).
+
 It supports:
 
-1. **Single**: send to ChatGPT, Gemini, Claude, or Grok.
-2. **Compare (Parallel)**: send the same prompt to multiple providers.
-3. **Debate**: multi-round ping-pong between two providers.
-4. **In-page forwarding**: optional ⇄ toggle buttons on ChatGPT/Gemini pages.
+1. **Single**: send to one agent (ChatGPT / Gemini / Claude / Grok).
+2. **Compare (Parallel)**: send the same prompt to 2+ agents.
+3. **Debate**: multi-round round-robin across 2+ agents.
+4. **In-page forwarding**: optional ⇄ toggle buttons on ChatGPT/Gemini pages (legacy flow).
 
 ## ✨ Features
 
 -   **Multi-LLM Support**: Interact with Gemini, ChatGPT, Claude, and Grok.
--   **Route Builder (“To”)**: Choose Single / Compare / Debate, reorder providers, and set debate rounds.
--   **Connect-on-demand**: The side panel only asks you to connect the providers required for your route (plus **Connect all**).
+-   **Route Builder (“To”)**: Choose Single / Compare / Debate, add/reorder agents, and set debate rounds.
+-   **Connect-on-demand**: Connect only what your route needs (plus **Connect all**). Use **New tab** to create additional same-provider agents.
 -   **Encrypted Chat History (Local-First)**: Chats and messages are stored in IndexedDB and encrypted with a user passphrase.
 -   **Thread List + Paging**: Open past chats and load older messages on demand (avoids huge payloads).
 -   **In-Page Forwarding**: Toggle buttons injected into ChatGPT and Gemini pages to send the current prompt to the other LLM.
@@ -53,15 +55,14 @@ It supports:
 
 ### Sending prompts from the side panel
 
-1. **Choose route**: click the `To` pill and pick:
-   - **Single** (ChatGPT, Gemini, Claude),
-   - **Compare** (Parallel),
-   - **Debate** (set rounds + swap order if needed).
-2. **Connect providers** when prompted:
-   - If a provider is not ready, click **Connect** (or **Connect all**).
-   - The extension opens the provider tab, binds it as the default profile, then marks it **Ready** once the content script responds.
-3. **Write your prompt** and click **Send** (or press Ctrl/Cmd+Enter).
-4. **Optional**: attach files via **Attach** (see Attachments notes below).
+1. **Choose route**: click the `To` pill and pick **Single**, **Compare** (Parallel), or **Debate** (set rounds as needed).
+2. **Add agents**: each row is a provider + a profile selection (Default or a specific tab profile).
+   - Want multiple ChatGPT/Gemini/Claude/Grok agents? Use **New tab** in the provider row to open a fresh tab, claim it as a new profile, and auto-assign it to an agent.
+3. **Connect** when prompted:
+   - If a provider/profile is not ready, click **Connect** (or **Connect all**).
+   - “Ready” means the provider tab responds to a `PING` from the content script (not just “a tab exists”).
+4. **Write your prompt** and click **Send** (or press Ctrl/Cmd+Enter).
+5. **Optional**: attach files via **Attach** (see Attachments notes below).
 
 ### In-page forwarding (optional)
 
@@ -83,7 +84,7 @@ It supports:
 - **Composer**:
   - prompt textarea,
   - attachments (optional),
-  - the `To` pill (Route Builder) to pick Single / Compare / Debate and connect providers.
+  - the `To` pill (Route Builder) to pick Single / Compare / Debate and connect the required agents/profiles.
 - **Provider status**: quick “Providers: X/Y ready” indicator, plus Settings.
 - **In-page toggle buttons** (optional):
   - Appear on `chatgpt.com` (as "⇄ Gemini") and `gemini.google.com` (as "⇄ ChatGPT").
@@ -103,7 +104,7 @@ This extension uses UI automation against provider web apps:
   - capture responses and report them back to the background.
 - Encrypted history is stored in IndexedDB (`mlc_history_v1`).
 
-Developer docs (canonical): `AGENTSMD/AGENTS.md`, `AGENTSMD/AGENTS_ROUTE_BUILDER.md`.
+Developer docs (canonical): `AGENTS.md` + `AGENTSMD/`.
 
 ## ⚠️ Important Notes
 

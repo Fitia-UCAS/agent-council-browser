@@ -1584,23 +1584,27 @@ async function connectProvider(provider, options = {}) {
     const opened = await openProviderTab(normalizedProvider, options);
     if (!opened?.ok) return opened || { ok: false, error: 'Failed to open provider tab.' };
     let defaultProfileId = null;
+    let reuseDefaultProfileId = null;
     try {
         const state = await loadTabProfiles();
         defaultProfileId = typeof state?.defaults?.[normalizedProvider] === 'string' ? state.defaults[normalizedProvider] : null;
+        const defaultProfile = defaultProfileId ? findProfileById(state, defaultProfileId) : null;
+        reuseDefaultProfileId = defaultProfile && !defaultProfile.inUseBySessionId ? defaultProfileId : null;
     } catch (error) {
         defaultProfileId = null;
+        reuseDefaultProfileId = null;
     }
     let claimed = await claimTabAsProfile({
         provider: normalizedProvider,
         tabId: opened.tabId,
-        profileId: defaultProfileId || undefined,
+        profileId: reuseDefaultProfileId || undefined,
         setDefault: true
     });
     if (!claimed?.ok) {
         claimed = await claimTabAsProfile({
             provider: normalizedProvider,
             tabId: opened.tabId,
-            profileId: defaultProfileId || undefined,
+            profileId: reuseDefaultProfileId || undefined,
             setDefault: true,
             skipHostCheck: true
         });

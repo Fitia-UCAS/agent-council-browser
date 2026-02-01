@@ -32,6 +32,8 @@ Attachments are gated by a provider capability flag:
 
 - Background service worker: `PROVIDER_CAPABILITIES` in `background.js`
   - ChatGPT: `attachments.mode = 'auto'`
+  - Claude: `attachments.mode = 'auto'`
+  - Grok: `attachments.mode = 'auto'` (best-effort; falls back to text-only on failure)
   - Gemini: `attachments.mode = 'manual'`
 
 ### Why Gemini is `manual`
@@ -80,6 +82,11 @@ Before starting a run, the side panel computes an “attachment plan”:
   - `autoProviders`: subset where `attachments.mode === 'auto'`
   - `manualProviders`: subset where `attachments.mode !== 'auto'`
 
+Note:
+
+- A route can include multiple **agents** on the same provider (e.g., multiple ChatGPT profiles).
+- The attachment plan is still computed per **provider** capability, but delivery is tracked per **agent** in the background (so each agent tab is prepared/sent at most once).
+
 Important behavior:
 
 - If **no** `autoProviders` exist, the UI does **not** include attachments in the message sent to the background.
@@ -121,11 +128,12 @@ Attachments are intentionally not persisted to `chrome.storage.local` (quota + p
 
 Background stores attachments in-memory for the active session only:
 
-- `activeSessionAttachments` in `background.js`:
+- `sessionAttachmentsById` in `background.js` (Map keyed by `sessionId`):
   - `sessionId`
   - `attachments[]` (sanitized)
-  - `sentTo: { [provider]: boolean }`
-  - `preparedTo: { [provider]: boolean }` (prefetch status; see below)
+  - `agentIds[]` (required agent ids for this session)
+  - `sentTo: { [agentId]: boolean }`
+  - `preparedTo: { [agentId]: boolean }` (prefetch status; see below)
 
 Sanitization:
 
@@ -142,7 +150,7 @@ Persistence note:
 
 ## 3) Delivery model (send-time + retry)
 
-Attachments are delivered **once per provider per session**.
+Attachments are delivered **once per agent per session**.
 
 This avoids:
 
@@ -150,26 +158,29 @@ This avoids:
 - repeated provider UI churn,
 - accidental duplicate file attachments.
 
-### 3.1 Core decision: should this provider receive attachments now?
+### 3.1 Core decision: should this agent receive attachments now?
 
-In `sendDebateTurn(session)`:
+In `sendDebateTurn(session)` / `sendParallelTurn(session)`:
 
 1. Check if the session has attachments:
    - `hasSessionAttachments(session.sessionId)`
-2. Read provider mode:
-   - `getProviderAttachmentMode(expectedLLM)`
+2. Determine the expected agent:
+   - `expectedAgentId` + its `provider`
+3. Read provider mode:
+   - `getProviderAttachmentMode(provider)`
 3. Compute:
    - If mode is not `auto`: send text-only (no attachments).
-   - If mode is `auto`: attempt to attach if not already prepared/sent.
+     - The background also marks this agent’s attachments as “sent” so we don’t keep retrying.
+   - If mode is `auto`: attempt to attach if `getPendingSessionAttachments(sessionId, expectedAgentId)` returns a payload.
 
 ### 3.2 “Sent” vs “Prepared”
 
-Two flags exist per provider:
+Two flags exist per agent:
 
-- `preparedTo[provider]`:
+- `preparedTo[agentId]`:
   - attachments were pre-attached to the provider UI (prefetch path)
   - does **not** mean the message was sent yet
-- `sentTo[provider]`:
+- `sentTo[agentId]`:
   - attachments are “accounted for” for that provider
   - meaning:
     - either we successfully sent the message after attaching, or
@@ -178,9 +189,9 @@ Two flags exist per provider:
 
 Important subtlety:
 
-- `getPendingSessionAttachments(sessionId, provider)` returns `null` if:
-  - `sentTo[provider] === true`, OR
-  - `preparedTo[provider] === true` (by default)
+- `getPendingSessionAttachments(sessionId, agentId)` returns `null` if:
+  - `sentTo[agentId] === true`, OR
+  - `preparedTo[agentId] === true` (by default)
 
 So when prefetch succeeded, later sends do not re-attach payloads (prevents duplicates).
 
@@ -208,18 +219,18 @@ To reduce “send too early” failures and improve UX, the background pre-attac
 
 After a prompt is successfully sent to a provider (or after a text-only retry), the background calls:
 
-- `prefetchSessionAttachments(session, excludeProvider)`
+- `prefetchSessionAttachments(session, excludeAgentId)`
 
-This tries to attach the same session attachments to other `auto` providers, while the current provider is generating.
+This tries to attach the same session attachments to other `auto` agents, while the current agent is generating.
 
 ### 4.2 What prefetch does
 
-For each other provider involved in the run:
+For each other agent involved in the run:
 
-- skip if provider mode is not `auto`
-- skip if `sentTo[provider]` is already true
-- skip if `preparedTo[provider]` is already true
-- resolve the provider’s tab (`resolveSessionTab(...)`)
+- skip if the agent’s provider mode is not `auto`
+- skip if `sentTo[agentId]` is already true
+- skip if `preparedTo[agentId]` is already true
+- resolve the agent’s tab (`resolveSessionTab(...)`)
 - inject an attachment-only interaction:
   - `injectAndPrepareAttachments(tabId, provider, attachments)`
   - which calls the injected function `simpleInteraction` with:
@@ -228,7 +239,7 @@ For each other provider involved in the run:
 
 On success:
 
-- mark `preparedTo[provider] = true`
+- mark `preparedTo[agentId] = true`
 
 On failure:
 

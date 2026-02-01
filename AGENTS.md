@@ -19,10 +19,11 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 ### Main user flow (runs)
 
-1. User creates **Tab Profiles** for ChatGPT, Gemini, and Claude in the Provider Manager:
+1. User creates **Tab Profiles** for ChatGPT, Gemini, Claude, and Grok in the Provider Manager:
    - Use the current tab, or open a new provider tab and claim it after manual model selection.
 2. In the side panel composer, user selects a **Route** from the `To` pill:
-   - Add one or more **agents** (rows), choose a provider, and bind each agent to a **profile** (Default or a specific profile).
+   - Add one or more **agents** (rows), choose a provider, and bind each agent to a **tab/profile** (Default or a specific profile).
+     - The Agent rows do **not** use a fragile dropdown: clicking the binding opens the Provider Manager in an **Assign** mode, and each row also has a **New tab** action to bind directly.
    - Drag to reorder agents and choose mode (**Parallel** / **Debate**) when applicable.
    - `New tab` on a provider row opens a fresh tab, claims it into a new Tab Profile, and assigns it to an agent (filling an unassigned agent first, otherwise adding a new agent).
    - Set **Rounds** only for Debate.
@@ -35,15 +36,15 @@ This file is the durable memory for the repo. It is the canonical reference for 
      - **3+ agents**: each new prompt includes **all missing answers since this agent last responded**, so every tab stays in sync.
 5. The side panel shows a **single linear transcript**:
    - user query
-   - provider[0] answer 1
-   - provider[1] answer 1
-   - provider[2] answer 1 (if enabled)
+   - agent[0] answer 1
+   - agent[1] answer 1
+   - agent[2] answer 1 (if enabled)
    - ...
 6. Sending again in the same chat is treated as a **continuation**:
    - Run settings are prefilled from the previous user message’s stored `meta`.
    - The first turns can wrap the new user message with a follow-up template to avoid “resetting” the context.
   - Direct sends (Single) can backfill missing transcript history (tracked per chat via per-provider delivery cursors).
-  - Parallel runs currently send the raw user prompt to each provider (no prompt wrapper/history injection) for fair comparison.
+  - Parallel runs currently send the raw user prompt to each agent (no prompt wrapper/history injection) for fair comparison.
 
 ### Provider Manager (Tab Profiles) UX
 
@@ -78,10 +79,12 @@ This file is the durable memory for the repo. It is the canonical reference for 
 ### Quick connect (side panel)
 
 - The Route builder shows a per‑provider **Connect** button when a required provider is not ready, plus a **Connect all** button.
+- Provider rows also expose **New tab**, which opens a fresh provider tab, claims it into a new Tab Profile, and assigns it to an agent (useful for multiple agents on the same provider).
 - These send `CONNECT_PROVIDER` to the background, which:
   - opens the provider homepage tab, then
   - claims the tab into a Tab Profile and sets it as the default for that provider (rebinding the existing default profile when possible to avoid creating many stale/offline profiles).
-- Quick connect only satisfies agents that use `Default` for that provider. Additional same-provider agents require creating/claiming additional profiles and selecting them in the Route Builder.
+- If the existing default profile is **In use** (`inUseBySessionId` is set), Connect will **not** rebind it. It instead creates a **new default profile/tab** so the running session is not disrupted.
+- Quick connect only satisfies agents that use `Default` for that provider. Additional same-provider agents require creating/claiming additional profiles and assigning them to agents in the Route Builder.
 - Connection “ready” is still determined by a successful `PING`/`PONG` to the content script (login/redirect pages may delay readiness). If a tab is open but the content script isn’t injected (common after extension reload), the background will attempt to inject `captureUtils.js` + `contentScript.js` and retry once.
 - Profile writes are serialized in the background to avoid lost-update races.
 
@@ -130,7 +133,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Loaded before `contentScript.js` via `manifest.json` content script ordering.
 
 - `contentScript.js`
-  - Runs in ChatGPT/Gemini pages.
+  - Runs in ChatGPT/Gemini/Claude/Grok pages.
   - Injects “⇄ OtherLLM” toggle button and forwarding listeners (legacy).
   - Captures LLM responses and posts them back to background.
   - Sends best‑effort model label updates for the active tab.
@@ -138,7 +141,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 - `sidepanel.html`, `sidepanel.js`, `styles.css`
   - Chat‑like UI: Provider Manager (profiles), session settings, transcript, composer.
-  - Renders responses as **plain text** (no `innerHTML`).
+  - Renders responses as plain text by default; if `contentHtml` is present, renders a **sanitized allowlist** subset (no raw `innerHTML`).
   - Implements claim wizard, profile selection gating, and paused-session actions.
 
 - `popup.html`, `popup.js`
@@ -450,7 +453,7 @@ The side panel’s primary run control is the **Route Builder** (`To` pill). See
 
 - `START_RUN` (primary):
   - `{ prompt, chatId, rounds, route, mode, target, firstLLM?, attachments? }`
-  - `route` shape (v2): `{ kind, rounds, agents: [{ id, provider, profileId }] }` (`profileId` can be `'default'` or an explicit profile id)
+  - `route` shape (v2): `{ kind, rounds, agents: [{ id, provider, profileId }] }` (`profileId` can be `'default'`, an explicit profile id, or `null` when unassigned; UI blocks runs until all required agents are assigned)
 - `START_DEBATE_SESSION` (legacy; still accepted by background):
   - `{ prompt, firstLLM, rounds, profileIds: { chatgpt, gemini } }` (tabIds still accepted for backward compat)
 - `STOP_SESSION`:

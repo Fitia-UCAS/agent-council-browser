@@ -51,7 +51,9 @@ Rules enforced by sanitization:
 
 Notes:
 
-- `profileId: null` is treated like `default` in the UI. Background resolves `default` to the provider’s default profile id at run start.
+- `profileId: 'default'` resolves to the provider’s current default profile id at run start.
+- `profileId: 'profile_...'` pins the agent to a specific Tab Profile.
+- `profileId: null` means **unassigned** (route is invalid until the user assigns a tab).
 - The UI highlights duplicate/invalid profile bindings; background enforces **unique resolved profile ids** per run (required to support same-provider agents).
 
 ---
@@ -70,8 +72,11 @@ Route Builder sections (top → bottom):
 
 - Displays selected agents as draggable rows (drag handle).
 - Dragging rows reorders the `route.agents[]` array.
-- Each row includes a **Profile** selector (Default + routable/online profiles for that provider).
-- Offline/wrong-host profiles are not listed in the selector to avoid clutter; use **Manage profiles…** (or the Provider Manager) to clean up/rebind.
+- Each row shows the agent’s **tab binding** (Default or pinned profile) and a short status (Ready / Waiting / Offline / Wrong host / In use).
+- **New tab** on an agent row opens a provider tab and binds it to that agent:
+  - If the agent uses **Default**, it opens a new tab and sets it as the provider’s **new default** connection.
+  - Otherwise, it opens a new tab, creates a **new Tab Profile**, and pins the agent to it.
+- Clicking the binding opens the Settings drawer in an **Assign mode** so the user can assign an existing profile to that agent.
 - Clicking `×` removes that agent from the route.
 
 ### Mode
@@ -91,7 +96,7 @@ At the top of this section:
 - **Connect all**: large, full-width button that connects any provider that is not ready.
   - Label/disabled state:
     - `Connecting…` when any provider is currently connecting.
-    - `All connected` when none need connection.
+    - `All connected` when none need connection **and** no default is blocked by another session.
     - `Connect all` otherwise.
 
 Each provider row shows:
@@ -99,16 +104,23 @@ Each provider row shows:
 - Provider name + a dot indicator (ready/connecting).
 - A status string (best effort), e.g.:
   - `Not connected`, `Connecting…`, `Ready`, `Wrong host`, `Loading…`, `Waiting…`
+  - `In use` when the default tab is locked by another session
   - plus a “Using/Last” profile label and optional model hint.
 
 Provider row actions are **state-dependent**:
 
-- If the provider is **not ready**: show only **Connect**.
-  - `Connect` opens a provider tab, claims it as the default profile, and ensures there is at least one `Default` agent for that provider in the route.
+- If the provider is **not ready**: show:
+  - **Connect**: opens a provider tab and binds it as the **default profile** (rebinding the existing default profile when possible).
+    - If the route does not yet include this provider, Connect also ensures there is at least one `Default` agent for it in the route.
+    - If the provider default is **In use**, Connect instead opens a **new default tab** so the active session is not disrupted.
+  - **New tab**: opens a fresh provider tab, claims it into a **new Tab Profile**, and assigns it to an agent:
+    - fills the first unassigned (“Pick tab…”) agent for that provider if one exists, otherwise adds a new agent.
+    - does **not** require an extra Connect click afterwards.
 - If the provider is **ready**: show:
-  - **Add agent** (adds another agent row for that provider; profile selection is suggested if available)
-  - **Focus** (focuses the bound default profile tab)
-  - **New tab** (opens a new provider tab and rebinds the default profile to it; focuses it)
+  - **Add agent**: adds another agent row for that provider (profile selection is suggested if available).
+  - **Focus**: focuses the bound default profile tab.
+  - **New tab**: opens a fresh provider tab, claims it into a **new Tab Profile**, and assigns it to an agent (same behavior as above).
+    - This does **not** rebind the default profile; use the Provider Manager to change defaults.
 
 Focus highlighting:
 
@@ -129,6 +141,8 @@ A provider is considered **ready** only when:
 
 - the default profile has a `tabId`, **and**
 - the content script responds to `PING` (background → tab → `PONG`)
+
+If the tab exists but the content script isn’t injected (common after extension reload), the background attempts to inject `captureUtils.js` + `contentScript.js` and retries the ping once.
 
 This is surfaced in UI as `state.connectionStatus[provider]` (from `CHECK_CONNECTION` / `CONNECTION_STATUS`).
 
@@ -157,7 +171,7 @@ When the user clicks **Send**, `sidepanel.js` validates:
 If required providers are not ready:
 
 - for agents using `Default`, the UI triggers connect for each required provider and stops (does not start the run yet).
-- for agents using explicit profiles, the UI blocks send with an actionable “fix route”/profile message (the extension cannot auto-create extra profiles).
+- for agents using explicit profiles, the UI blocks send with an actionable “fix route” message (the extension cannot auto-create extra profiles automatically).
 
 If ready:
 
