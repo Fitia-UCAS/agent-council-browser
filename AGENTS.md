@@ -509,7 +509,7 @@ TAB_PROFILES updates:
   - Focus tab (uses profile tabId)
   - Rebind to current tab (calls CREATE_PROFILE_FROM_ACTIVE_TAB with profileId)
   - Resume session (RESUME_SESSION)
-- Prompt templates can be edited in the side panel (3-field editor; optional advanced raw JSON) and saved to `mlc_debate_prompts_override_v1`.
+- Prompt templates can be edited in the side panel (3-field editor) and saved to `mlc_debate_prompts_override_v1`.
 - The composer prompt input has no extension-enforced character limit (provider UIs may still impose their own).
 
 ## 7) Tab selection logic
