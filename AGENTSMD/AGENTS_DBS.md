@@ -72,8 +72,8 @@ Fields:
 - `threadId`: foreign key-ish (string)
 - `sequence`: integer; monotonic ordering inside a thread
 - `createdAt`: timestamp (ms)
-- `role`: `user | assistant | system | chatgpt | gemini` (current app uses `chatgpt|gemini` for assistants)
-- `provider`: `chatgpt | gemini | null`
+- `role`: `user | assistant | system | chatgpt | gemini | claude | grok` (the app typically stores assistant messages as the provider id for clear labeling/styling)
+- `provider`: `chatgpt | gemini | claude | grok | null`
 - `payloadEnc`: encrypted `{ iv, data }` for the full message payload JSON
 
 Indexes:
@@ -108,7 +108,8 @@ We use this as a small “settings/meta table” inside the same DB:
 - Thread preview: `threads.lastPreviewEnc`
 - Message payload JSON: `messages.payloadEnc` contains:
   - `content` (plaintext string inside the encrypted JSON)
-  - optional `contentHtml`
+  - optional `contentHtml` (rendered via a sanitized allowlist in the UI; never injected raw)
+  - optional `agentId` / `agentLabel` (used to disambiguate multiple same-provider agents in a single run)
   - `sessionId`, `turnIndex`, `roundIndex`, etc.
 
 Nothing meaningful is stored as plaintext in the message rows besides metadata like `threadId`, `sequence`, and `role`.
@@ -225,4 +226,3 @@ To sanity-check encryption:
 - **Clicked “Enable encryption” twice**: second click returns “already configured”. Use **Unlock** instead.
 - **Wrong passphrase**: unlock fails with “Incorrect passphrase.” There is no recovery; use **Reset history** to wipe.
 - **Service worker restarted**: unlocked state should survive via `chrome.storage.session`, but if the session key was cleared, just unlock again.
-

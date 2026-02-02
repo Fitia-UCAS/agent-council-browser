@@ -5,9 +5,10 @@ This file is the durable memory for the repo. It is the canonical reference for 
 ## 1) What this extension does (current behavior)
 
 - Chrome extension that runs a **side panel chat UI** where each message is sent via a **Route**:
-  - **Single**: send to one provider (ChatGPT / Gemini / Claude).
-  - **Compare (Parallel)**: send the same prompt to 2+ providers (no debate scaffolding).
-  - **Debate**: multi‑round round‑robin between 2+ providers (often two).
+  - **Single**: send to one agent (provider + tab profile).
+  - **Compare (Parallel)**: send the same prompt to 2+ agents (no debate scaffolding).
+  - **Debate**: multi‑round round‑robin between 2+ agents (often two).
+  - Agents can be **multiple profiles of the same provider** (e.g., multiple ChatGPT tabs debating each other).
 - Side panel supports **attachments** (files/images) that are delivered via provider web UI automation (no official APIs).
   - ChatGPT: attachments are auto-uploaded when possible (best-effort pre-upload may start while another provider is answering).
   - Claude: attachments are auto-uploaded when possible (uploaded first, then the prompt is sent).
@@ -18,67 +19,49 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 ### Main user flow (runs)
 
-1. User creates **Tab Profiles** for ChatGPT, Gemini, and Claude in the Provider Manager:
-   - Use the current tab, or open a new provider tab and claim it after manual model selection.
+1. User connects providers (creates default tabs) via **Connect** / **Connect all** in the Route Builder provider list.
 2. In the side panel composer, user selects a **Route** from the `To` pill:
-   - Pick providers (chips), drag to reorder, and choose mode (**Parallel** / **Debate**) when applicable.
+   - Add one or more **agents** from the **Providers** list (`Add agent` / `New tab`).
+   - The **Agents** list is order-only: drag to reorder and `×` to remove.
    - Set **Rounds** only for Debate.
 3. User writes a message and clicks **Send**.
 4. The extension runs a debate (when Route = Debate):
-   - **Turn 1**: provider[0] gets full context + user query.
-   - **Turn 2**: provider[1] gets full context + user query + provider[0] answer.
-   - **Turns 3..N**: round‑robin across providers:
-     - **2 providers**: each new prompt includes only the other provider’s latest answer (the tab thread holds history).
-     - **3+ providers**: each new prompt includes **all missing answers since this provider last responded**, so every tab stays in sync.
+   - **Turn 1**: agent[0] gets full context + user query.
+   - **Turn 2**: agent[1] gets full context + user query + agent[0] answer.
+   - **Turns 3..N**: round‑robin across agents:
+     - **2 agents**: each new prompt includes only the other agent’s latest answer (the tab thread holds history).
+     - **3+ agents**: each new prompt includes **all missing answers since this agent last responded**, so every tab stays in sync.
 5. The side panel shows a **single linear transcript**:
    - user query
-   - provider[0] answer 1
-   - provider[1] answer 1
-   - provider[2] answer 1 (if enabled)
+   - agent[0] answer 1
+   - agent[1] answer 1
+   - agent[2] answer 1 (if enabled)
    - ...
 6. Sending again in the same chat is treated as a **continuation**:
    - Run settings are prefilled from the previous user message’s stored `meta`.
    - The first turns can wrap the new user message with a follow-up template to avoid “resetting” the context.
   - Direct sends (Single) can backfill missing transcript history (tracked per chat via per-provider delivery cursors).
-  - Parallel runs currently send the raw user prompt to each provider (no prompt wrapper/history injection) for fair comparison.
+  - Parallel runs currently send the raw user prompt to each agent (no prompt wrapper/history injection) for fair comparison.
 
-### Provider Manager (Tab Profiles) UX
+### Connections (Tab Profiles) UX
 
-- Profiles are the only way to run debate sessions. Each provider (ChatGPT, Gemini, Claude) needs a valid profile.
-- Profile list is grouped by provider with cards showing:
-  - User label (renameable)
-  - Status pill (OK / Offline / Wrong host / Unknown)
-  - Tab info (last known title or URL, tabId if known)
-  - Window id (when available)
-  - Optional model hint (best effort)
-  - Badges: Default, In use
-- Actions per profile card:
-  - Focus (brings the tab + window to front)
-  - Set default
-  - Rename (local label only, does not touch provider UI)
-  - Rebind to current tab (claims the active tab as this profile)
-  - Remove (unassigns and deletes the profile)
-- Global actions:
-  - "Use current ChatGPT tab" / "Use current Gemini tab" / "Use current Claude tab"
-  - "Open new ChatGPT tab" / "Open new Gemini tab" / "Open new Claude tab"
-
-### Open tab + claim wizard (best effort model selection)
-
-- "Open new ..." opens the provider homepage in a new tab.
-- A claim wizard appears in the side panel:
-  - Instructs the user to manually pick a model in the provider UI.
-  - Shows a best effort detected model label if available.
-  - "Claim this tab" assigns the opened tab to a new profile.
-  - Claiming does not depend on model detection.
-- Wizard is dismissed on claim or cancel; cancel does not close the tab.
+- Tabs are tracked as persistent **Tab Profiles** (one profile = one provider tab).
+- Each **agent** in a route must resolve to a valid profile/tab; duplicate same-provider agents require multiple profiles.
+- The Route Builder is the primary UI:
+  - **Agents** list is order-only (drag + remove).
+  - All connection/tab creation happens in the **Providers** section (`Connect`, `Connect all`, `Add agent`, `New tab`).
+- The Settings drawer shows per-provider connection status + basic actions (no per-profile CRUD UI currently).
 
 ### Quick connect (side panel)
 
 - The Route builder shows a per‑provider **Connect** button when a required provider is not ready, plus a **Connect all** button.
+- Provider rows also expose **New tab**, which opens a fresh provider tab, claims it into a new Tab Profile, and assigns it to an agent (useful for multiple agents on the same provider).
 - These send `CONNECT_PROVIDER` to the background, which:
   - opens the provider homepage tab, then
-  - immediately claims the tab into a Tab Profile and sets it as the default for that provider.
-- Connection “ready” is still determined by a successful `PING`/`PONG` to the content script (login/redirect pages may delay readiness).
+  - claims the tab into a new Tab Profile and sets it as the **default** for that provider (Connect always creates a new default connection).
+- **New tab** creates an additional profile and assigns it to the most-recent unassigned agent for that provider (or replaces a broken pinned agent); otherwise it adds a new pinned agent.
+- Quick connect satisfies agents that use `Default`. Additional same-provider agents require extra profiles created via **New tab**.
+- Connection “ready” is still determined by a successful `PING`/`PONG` to the content script (login/redirect pages may delay readiness). If a tab is open but the content script isn’t injected (common after extension reload), the background will attempt to inject `captureUtils.js` + `contentScript.js` and retry once.
 - Profile writes are serialized in the background to avoid lost-update races.
 
 ### Session gating and safety
@@ -86,13 +69,13 @@ This file is the durable memory for the repo. It is the canonical reference for 
 - Send is disabled until:
   - Prompt is non-empty
   - Route is valid/supported
-  - Required providers are connected (content script responds to `PING`)
+  - Required agents are connected (content script responds to `PING`, using per-profile checks when a route targets an explicit profile)
   - Rounds is valid (Debate only)
 - The background still validates profiles before every prompt injection.
 - If a profile goes offline or navigates away, the session pauses with a clear reason and fix actions.
 - Attachments:
   - Attachments are kept **in-memory only** for the active session (not persisted to `chrome.storage.local`).
-  - Attachments are delivered once per provider per session.
+  - Attachments are delivered once per agent per session.
   - If a provider cannot be auto-attached, the extension sends **text-only** to that provider.
   - If any required provider needs manual upload, a small modal appears; clicking **OK** only acknowledges the notice (it does not start the run). The user uploads manually, then clicks **Send** again.
 
@@ -126,16 +109,16 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Loaded before `contentScript.js` via `manifest.json` content script ordering.
 
 - `contentScript.js`
-  - Runs in ChatGPT/Gemini pages.
+  - Runs in ChatGPT/Gemini/Claude/Grok pages.
   - Injects “⇄ OtherLLM” toggle button and forwarding listeners (legacy).
   - Captures LLM responses and posts them back to background.
   - Sends best‑effort model label updates for the active tab.
   - Model label updates are periodic and non-blocking; failures are ignored.
 
 - `sidepanel.html`, `sidepanel.js`, `styles.css`
-  - Chat‑like UI: Provider Manager (profiles), session settings, transcript, composer.
-  - Renders responses as **plain text** (no `innerHTML`).
-  - Implements claim wizard, profile selection gating, and paused-session actions.
+  - Chat‑like UI: Route Builder (agents + providers), settings drawer, transcript, composer.
+  - Renders responses as plain text by default; if `contentHtml` is present, renders a **sanitized allowlist** subset (no raw `innerHTML`).
+  - Implements route gating (unique tabs per agent), connection checks, and paused-session actions.
 
 - `popup.html`, `popup.js`
   - Present but **not used** by default.
@@ -152,30 +135,33 @@ Structure (`activeDebateState`):
 - `isPaused` (bool)
 - `pausedReason` (string | null)
 - `pausedProvider` (`chatgpt` | `gemini` | null)
+- `pausedAgentId` (string | null)
+- `pausedProfileId` (string | null)
 - `pausedAt` (epoch ms)
 - `sessionId` (string, `session_<ts>_<rand>`)
 - `rounds` (int)
-- `totalTurns` (int = 2 * rounds)
+- `participants` (array of `{ agentId, provider, profileId, tabId, label }`)
+- `totalTurns` (int = `rounds * participants.length` for Debate)
 - `turnIndex` (int, starts at 1)
 - `firstLLM` / `secondLLM` (`chatgpt` or `gemini`)
 - `profileIds` (`{ chatgpt, gemini }`, profile IDs or null)
 - `tabIds` (`{ chatgpt, gemini }`)
 - `userQuery` (string)
-- `messages` (array of `{ role, content, timestamp, turnIndex, roundIndex }`)
-- `waitingFor` (current LLM expected to answer)
+- `messages` (array of `{ role, agentId?, agentLabel?, content, timestamp, turnIndex, roundIndex }`)
+- `waitingFor` (current agent expected to answer; `agentId` string for Debate, `agentId[]` for Parallel)
 - `lastPromptId` (string)
 - `lastPromptTimestamp` (epoch ms)
 
-### Turn logic
+### Turn logic (Debate)
 
-- `turnIndex` 1..(2*rounds)
-- `roundIndex = ceil(turnIndex / 2)`
-- `expectedLLM = turnIndex % 2 === 1 ? firstLLM : secondLLM`
+- `turnIndex` 1..(`rounds * participants.length`)
+- `roundIndex = ceil(turnIndex / participants.length)`
+- `expectedAgent = participants[(turnIndex - 1) % participants.length]`
 
 ### Pause + resume
 
 - Sessions pause if a profiled tab is offline, on the wrong host, or fails validation.
-- Background emits `UI_SESSION_PAUSED` with provider + reason; side panel shows fix actions.
+- Background emits `UI_SESSION_PAUSED` with provider + agentId/profileId + reason; side panel shows fix actions.
 - Resume uses `RESUME_SESSION` and retries the current turn after validation.
 - Pause does not advance turnIndex; the next injection is the same turn that failed.
 - Pause can be triggered by tab lifecycle events (close, navigate away) or by pre-turn validation failures.
@@ -187,15 +173,15 @@ Structure (`activeDebateState`):
 - Side panel calls `GET_ACTIVE_SESSION` on load to rebuild UI state.
 - If the stored session is paused, the UI renders paused controls instead of running state.
 
-### Session start resolution (profiles vs legacy tabIds)
+### Session start resolution (agents/profiles vs legacy tabIds)
 
-- The UI now sends `profileIds` in `START_DEBATE_SESSION`.
+- The UI sends `route.agents[]` in `START_RUN`:
+  - each agent picks a `provider` and a `profileId` (`default` or an explicit profile id).
 - Resolution order:
-  1. If `profileIds` are provided, resolve them (explicit selection or "default" mapping).
-  2. If no explicit profileIds but defaults exist for both providers, use defaults.
-  3. If explicit `tabIds` are provided (legacy), use them.
-  4. Otherwise fall back to legacy auto-selection only for non-session features.
-- A session will not start unless both providers resolve to valid profiles/tabs.
+  1. Resolve each agent to a profile (explicit profileId or provider default).
+  2. Validate each profile’s tab (tab exists + host matches; optional PING on start/resume).
+  3. Enforce **unique profileId across agents** (required to support multiple agents of the same provider safely).
+  4. If no route agents are provided (legacy), fall back to resolving one tab per provider (no duplicates).
 
 ### Pre-turn validation rules
 
@@ -222,7 +208,7 @@ Structure:
 
 - `profiles`: array of
   - `profileId` (string)
-  - `provider` (`chatgpt` | `gemini`)
+  - `provider` (`chatgpt` | `gemini` | `claude` | `grok`)
   - `tabId` (number | null)
   - `windowId` (number | null)
   - `label` (string)
@@ -231,7 +217,7 @@ Structure:
   - `modelHint` (string, best effort)
   - `lastKnownTitle`, `lastKnownUrl` (string)
   - `inUseBySessionId` (string | null)
-- `defaults`: `{ chatgpt: profileId|null, gemini: profileId|null }`
+- `defaults`: `{ chatgpt: profileId|null, gemini: profileId|null, claude: profileId|null, grok: profileId|null }`
 
 Migration:
 
@@ -264,7 +250,7 @@ Claiming / rebinding:
 - `CREATE_PROFILE_FROM_ACTIVE_TAB` claims the active tab in the current window.
   - If `profileId` is provided, it rebinds that profile.
   - If `profileId` is omitted, it creates a new profile (and sets default if none).
-- `CLAIM_TAB_AS_PROFILE` claims a specific tabId (used by the claim wizard).
+- `CLAIM_TAB_AS_PROFILE` claims a specific tabId (used by Route Builder **New tab** flows).
 - Both actions validate host before saving.
 - Default label on claim:
   - If tab title is known, label is `Provider - <title>` (trimmed).
@@ -272,14 +258,16 @@ Claiming / rebinding:
 - Model hint updates:
   - `PROVIDER_MODEL_INFO` updates `profile.modelHint` when the tabId matches a profile.
   - Hints are sanitized/capped (single-line, short label); suspiciously long values are ignored/cleared.
-  - Stored hint is displayed in profile cards and the claim wizard (best effort).
+  - Stored hint is displayed in provider connection status (best effort).
 
 Open provider tab:
 
 - `OPEN_PROVIDER_TAB` opens:
   - ChatGPT: `https://chatgpt.com/`
   - Gemini: `https://gemini.google.com/`
-- Response includes `tabId` and `windowId` for the claim wizard.
+  - Claude: `https://claude.ai/new`
+  - Grok: `https://grok.com/`
+- Response includes `tabId` and `windowId` for the UI to claim/focus the tab.
 
 Defaults:
 
@@ -293,24 +281,24 @@ Focus tab:
 
 Locks:
 
-- When a session starts, both profiles are locked (`inUseBySessionId`).
+- When a session starts, all participant profiles are locked (`inUseBySessionId`).
 - Locks are released when the session ends or is stopped.
 
 When a turn is sent:
 
-1. Background validates the expected provider tab (profile -> tabId, host check; optional ping).
+1. Background validates the expected agent tab (profile -> tabId, host check; optional ping).
 2. Background builds prompt via `buildDebatePrompt(...)`.
 3. Background sets `waitingFor`, `lastPromptId`, `lastPromptTimestamp` and persists state.
-4. UI receives `UI_SESSION_PROGRESS` for current round/provider.
+4. UI receives `UI_SESSION_PROGRESS` for current round/agent.
 5. `injectAndExecute` sends the prompt into the right tab using `simpleInteraction`.
 6. Background sends `MLC_PROMPT_SENT` to that tab’s content script.
 7. Content script captures response and sends `MLC_RESPONSE_CAPTURED`.
-8. Background validates response (session id, LLM, promptId/turnIndex), appends to state, and advances to next turn.
+8. Background validates response (session id, agentId, promptId/turnIndex), appends to state, and advances to next turn.
 
 Response validation rules:
 
 - If sessionId mismatches or session is inactive, response is ignored.
-- If `waitingFor` is set and response sourceLLM does not match, response is ignored.
+- If `waitingFor` is set and response `agentId` does not match, response is ignored.
 - If `promptId` or `turnIndex` do not match current turn, response is ignored.
 - Empty responses are ignored.
 
@@ -443,13 +431,14 @@ The side panel’s primary run control is the **Route Builder** (`To` pill). See
 
 - `START_RUN` (primary):
   - `{ prompt, chatId, rounds, route, mode, target, firstLLM?, attachments? }`
+  - `route` shape (v2): `{ kind, rounds, agents: [{ id, provider, profileId }] }` (`profileId` can be `'default'`, an explicit profile id, or `null` when unassigned; UI blocks runs until all required agents are assigned)
 - `START_DEBATE_SESSION` (legacy; still accepted by background):
   - `{ prompt, firstLLM, rounds, profileIds: { chatgpt, gemini } }` (tabIds still accepted for backward compat)
 - `STOP_SESSION`:
   - `{ sessionId }`
 - `RESUME_SESSION`
 - `CONNECT_PROVIDER` `{ provider }`
-- `CHECK_CONNECTION`
+- `CHECK_CONNECTION` `{ profileIds?: string[] }`
 - `GET_PROVIDER_CAPABILITIES`
 - `GET_TAB_PROFILES`
 - `CREATE_PROFILE_FROM_ACTIVE_TAB` `{ provider, label?, profileId? }`
@@ -480,11 +469,11 @@ Responses (for profile actions):
 
 ### Background -> side panel
 
-- `UI_SESSION_STARTED` `{ sessionId, rounds, firstLLM, tabIds, profileIds }`
-- `UI_MESSAGE_ADD` `{ role, content, timestamp, turnIndex, roundIndex }`
-- `UI_SESSION_PROGRESS` `{ sessionId, waitingFor, roundIndex, totalRounds }`
-  - `waitingFor` may be a string or an array (parallel mode).
-- `UI_SESSION_PAUSED` `{ sessionId, provider, reason }`
+- `UI_SESSION_STARTED` `{ sessionId, rounds, mode, tabIds, profileIds, participants? }`
+- `UI_MESSAGE_ADD` `{ role, agentId?, agentLabel?, content, timestamp, turnIndex, roundIndex }`
+- `UI_SESSION_PROGRESS` `{ sessionId, waitingFor, waitingForLabel?, waitingForAgentId?, waitingForAgentIds?, roundIndex, totalRounds }`
+  - `waitingFor` may be a string or an array (parallel mode); `waitingForLabel` disambiguates duplicates.
+- `UI_SESSION_PAUSED` `{ sessionId, provider, agentId?, profileId?, agentLabel?, reason }`
 - `UI_SESSION_RESUMED` `{ sessionId }`
 - `UI_SESSION_ENDED` `{ sessionId, reason }`
 - `UI_SESSION_ERROR` `{ error }`
@@ -493,7 +482,7 @@ Responses (for profile actions):
 - `PROVIDER_MODEL_INFO` `{ provider, tabId, modelLabel }`
 - `LLM_RESPONSE` `{ llm, content }` (non‑session replies)
 - `LLM_PROGRESS` / `LLM_ERROR`
-- `CONNECTION_STATUS` `{ status: { chatgpt, gemini } }`
+- `CONNECTION_STATUS` `{ status: { chatgpt, gemini, ... }, profileStatus?: { [profileId]: boolean } }`
   - Uses default profile tabId when available; otherwise falls back to legacy tab discovery.
 
 TAB_PROFILES updates:
@@ -504,7 +493,7 @@ TAB_PROFILES updates:
 ### Background <-> content scripts
 
 - `MLC_PROMPT_SENT`:
-  - `{ sessionId, promptId, llmType, turnIndex, timestamp }`
+  - `{ sessionId, promptId, llmType, agentId?, turnIndex, timestamp, promptPreview? }`
 - `MLC_RESPONSE_CAPTURED` (session)
 - `CHATGPT_RESPONSE_CAPTURED`, `GEMINI_RESPONSE_CAPTURED` (non‑session)
 - `FORWARD_PROMPT` (legacy in‑page forwarding)
@@ -513,8 +502,8 @@ TAB_PROFILES updates:
 
 ### Side panel behavior details
 
-- Routes are selected via the `To` pill (Route Builder) and persisted as `mlc_last_route_v1`.
-- Runs always use the **default profile** for each provider (set in the Provider Manager); there is no per-message profile dropdown.
+- Routes are selected via the `To` pill (Route Builder) and persisted as `mlc_last_route_v2` (migrated from `mlc_last_route_v1`).
+- Routes target **agents** (provider + profile selection). Each agent can use `Default` or a specific profile; duplicates require distinct profiles.
 - Send is disabled unless the route is valid/supported and the route’s required providers are ready (PING/PONG).
 - Paused sessions show a "Paused" state with actions:
   - Focus tab (uses profile tabId)
@@ -573,17 +562,17 @@ This flow is separate from debate sessions but shares capture logic.
 
 ## 10) Adding a new provider (high‑level checklist)
 
-To add a third LLM provider safely:
+To add another provider safely:
 
 1. Update `manifest.json` host permissions and `content_scripts` matches.
 2. Add provider to profile host validation rules (`getExpectedHosts`, `isExpectedHost`).
-3. Extend `listLLMTabs`, `resolveTabForLLM`, and the Provider Manager/profile selection UI.
+3. Extend `listLLMTabs`, `resolveTabForLLM`, and the Route Builder + connection status UI.
 4. Extend `simpleInteraction` selectors and send button logic for the new provider.
 5. Implement capture logic:
    - Add `is<Provider>Generating` and `extract<Provider>ResponseText`.
    - Ensure capture baseline and stability logic works.
 6. Update prompt templates and `formatLLMLabel` if needed.
-7. Update UI to allow selecting the provider in settings and profile manager.
+7. Update UI to allow selecting/connecting the provider in the Route Builder and Settings.
 8. Add model hint detection (optional, best effort).
 9. Add new message types if necessary, but prefer extending existing ones.
 10. Test long‑running responses and hidden tabs.

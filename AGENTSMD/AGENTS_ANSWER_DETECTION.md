@@ -1,6 +1,6 @@
 # Answer Detection + Rich Rendering (ChatGPT/Gemini/Claude/Grok)
 
-This repo already has a high-level architecture write-up in `AGENTSMD/AGENTS.md`.  
+This repo already has a high-level architecture write-up in `AGENTS.md`.  
 This document is the “deep memory” for **how we capture LLM answers** (text + rich formatting) and **how we render them safely** in the side panel transcript.
 
 The goal is that a future agent (or you) can integrate a new provider without re-reading the full codebase.
@@ -43,12 +43,14 @@ When a response is captured, the content script sends:
 
 - `content`: plain text
 - `contentHtml` (optional): HTML snippet representing the same answer
-- `promptId`, `sessionId`, `turnIndex`, `sourceLLM`, `timestamp`, `responseDelay`
+- `promptId`, `sessionId`, `agentId`, `turnIndex`, `sourceLLM`, `timestamp`, `responseDelay`
 
 ### Background session state
 Debate session messages (`activeDebateState.messages[]`) store:
 
 - `role` (`user`, `chatgpt`, `gemini`, `claude`, `grok`)
+- `agentId` (optional; used to disambiguate duplicate providers)
+- `agentLabel` (optional best-effort label for UI)
 - `content` (plain text)
 - `timestamp`, `turnIndex`, `roundIndex`
 - `contentHtml` (optional; capped; only if present)
@@ -56,7 +58,7 @@ Debate session messages (`activeDebateState.messages[]`) store:
 ### Background → side panel
 `UI_MESSAGE_ADD` includes `content` and optionally `contentHtml`.
 
-The side panel renders `contentHtml` if present, else falls back to `content`.
+The side panel renders `contentHtml` if present by sanitizing it to an allowlist subset (no raw `innerHTML`); otherwise it falls back to `content`.
 
 ---
 

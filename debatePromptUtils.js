@@ -16,6 +16,18 @@
     return -1;
   }
 
+  function findLastIndexByAgentId(messages, agentId) {
+    const key = typeof agentId === 'string' ? agentId.trim() : '';
+    if (!key) return -1;
+    if (!Array.isArray(messages) || messages.length === 0) return -1;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (!message || typeof message !== 'object') continue;
+      if (message.agentId === key || message.sourceAgentId === key) return i;
+    }
+    return -1;
+  }
+
   function formatTranscriptForPrompt(messages, { roleLabelFn, maxChars = 48000 } = {}) {
     if (!Array.isArray(messages) || messages.length === 0) return '';
     const blocks = [];
@@ -25,7 +37,7 @@
 
     for (const message of messages) {
       if (!message) continue;
-      const role = labelForRole(message.role);
+      const role = labelForRole(message.role, message);
       const content = String(message.content || '').trim();
       if (!content) continue;
       blocks.push(`${role}:\n${content}`);
@@ -43,6 +55,7 @@
     header,
     roundIndex,
     rounds,
+    expectedAgentId,
     expectedProvider,
     messages,
     roleLabelFn,
@@ -54,7 +67,9 @@
     const safeInstruction = String(instruction || '').trim();
     const safeMessages = Array.isArray(messages) ? messages : [];
 
-    const lastOwnIndex = findLastIndexByRole(safeMessages, expectedProvider);
+    const lastOwnIndexByAgent = expectedAgentId ? findLastIndexByAgentId(safeMessages, expectedAgentId) : -1;
+    const lastOwnIndexByProvider = expectedProvider ? findLastIndexByRole(safeMessages, expectedProvider) : -1;
+    const lastOwnIndex = lastOwnIndexByAgent >= 0 ? lastOwnIndexByAgent : lastOwnIndexByProvider;
     const rawDelta = safeMessages.slice(Math.max(0, lastOwnIndex + 1));
     const delta = rawDelta.map((message) => {
       if (!message) return null;
@@ -86,8 +101,8 @@
 
   return {
     findLastIndexByRole,
+    findLastIndexByAgentId,
     formatTranscriptForPrompt,
     buildMultiProviderDebatePrompt
   };
 });
-

@@ -1,19 +1,20 @@
 # AGENTS_PROVIDER_CONNECTION.md — Provider Connection Workflow
 
-This document explains how the extension “connects” to ChatGPT and Gemini tabs and what “connected” means in practice.
+This document explains how the extension “connects” to provider tabs (ChatGPT, Gemini, Claude, Grok) and what “connected” means in practice.
 
 ## Goals
 
-- Bind a **ChatGPT** tab and a **Gemini** tab to persistent **Tab Profiles**.
+- Bind provider tabs to persistent **Tab Profiles** (including multiple profiles per provider so the same provider can appear as multiple agents in a route).
 - Ensure the background worker can:
   - inject prompts into the right provider tab, and
   - receive captured responses from the provider page via content scripts.
 
 ## Key concepts
 
-- **Provider**: `chatgpt` or `gemini`.
+- **Provider**: `chatgpt` | `gemini` | `claude` | `grok`.
 - **Tab Profile**: A stored record pointing at a specific provider tab (`tabId`) with metadata and a `status`.
-- **Default profile**: Per-provider `profileId` stored in `defaults.chatgpt` and `defaults.gemini`.
+- **Default profile**: Per-provider `profileId` stored in `defaults[provider]`.
+- **Agent**: A route participant = `provider + profile selection` (Default or an explicit profile).
 - **Connected (UI)**: The provider tab is reachable and the content script responds to a `PING` (not just “tab exists”).
 - **History unlocked (UI)**: Running sessions and loading chat history also requires encrypted history to be unlocked (Settings → Security).
 
@@ -22,7 +23,7 @@ This document explains how the extension “connects” to ChatGPT and Gemini ta
 - Key: `mlc_tab_profiles_v1` in `chrome.storage.local`
 - Shape:
   - `profiles[]`: `{ profileId, provider, tabId, windowId, label, status, lastKnownUrl, modelHint, ... }`
-  - `defaults`: `{ chatgpt: profileId|null, gemini: profileId|null }`
+  - `defaults`: `{ chatgpt: profileId|null, gemini: profileId|null, claude: profileId|null, grok: profileId|null }`
 
 `status` is updated over time:
 
@@ -37,18 +38,23 @@ This document explains how the extension “connects” to ChatGPT and Gemini ta
 
 When the user clicks **Connect** for a provider (in the Route Builder or Settings), the side panel (`sidepanel.js`) sends:
 
-- `{ type: 'CONNECT_PROVIDER', provider: 'chatgpt' | 'gemini' }`
+- `{ type: 'CONNECT_PROVIDER', provider: 'chatgpt' | 'gemini' | 'claude' | 'grok' }`
 
 ### 2) Background opens the provider tab
 
 The service worker (`background.js`) handles `CONNECT_PROVIDER` by:
 
-1. `openProviderTab(provider)` → `chrome.tabs.create({ url: https://chatgpt.com/ | https://gemini.google.com/ })`
+1. `openProviderTab(provider)` → `chrome.tabs.create({ url: PROVIDER_METADATA[provider].openUrl })`
 2. `claimTabAsProfile({ provider, tabId, label, setDefault: true })`
    - Host validation uses `getTabUrlCandidate(tab)`:
      - prefers `tab.url`
      - falls back to `tab.pendingUrl` (important right after `chrome.tabs.create`)
    - If strict host validation fails (redirects / URL not ready), it retries with `skipHostCheck: true` so the tab still gets bound and can later become `ok` once it finishes navigation.
+   - Connect always creates a **new default connection**:
+     - it opens a new tab,
+     - claims it into a new Tab Profile,
+     - and sets that profile as the provider default.
+   - This avoids stealing a tab from an active session and makes Connect a reliable “reset the connection” action.
 
 ### 3) Profiles are persisted + UI is notified
 
@@ -58,7 +64,7 @@ The service worker (`background.js`) handles `CONNECT_PROVIDER` by:
 
 The side panel refreshes its connection UI based on the new profile/default state.
 
-### 4) “Connected” is verified by pinging the content script
+### 4) “Connected” is verified by pinging the content script (and auto-injecting if needed)
 
 Separately, the UI sends `{ type: 'CHECK_CONNECTION' }`.
 
@@ -67,15 +73,34 @@ The background checks the **default profile tabIds** and pings each tab:
 - `chrome.tabs.sendMessage(tabId, { type: 'PING' })`
 - The content script replies `{ type: 'PONG' }`
 
+If the ping fails because the content script is missing (common after extension reload), the background attempts to inject `captureUtils.js` + `contentScript.js` into the tab (when the URL is injectable) and retries once.
+
 The background returns:
 
-- `CONNECTION_STATUS`: `{ chatgpt: boolean, gemini: boolean }`
+- `CONNECTION_STATUS`: `{ status: { [provider]: boolean }, profileStatus?: { [profileId]: boolean } }`
 
 The side panel only shows **ready/connected** once the provider tab responds to `PING` (this ensures capture is possible).
 
+## The “New tab” flow (create an additional profile/agent)
+
+In the Route Builder, **New tab** is for creating *additional* profiles (e.g., multiple ChatGPT agents debating).
+
+The side panel:
+
+1. sends `OPEN_PROVIDER_TAB` (open the provider URL),
+2. then `CLAIM_TAB_AS_PROFILE` (claim into a new Tab Profile):
+   - uses `setDefault: true` only when the provider has no default profile yet (so `Default` agents can run),
+   - otherwise uses `setDefault: false` (so extra connections don’t steal/replace the default tab).
+3. then assigns that profile to an agent in the route:
+   - fills the most-recent unassigned agent for that provider,
+   - otherwise replaces a broken pinned agent,
+   - otherwise adds a new pinned agent.
+
+Readiness is still determined by `PING`/`PONG` (same connection checks).
+
 ## The “Connect all” flow (why it used to fail)
 
-**Connect all** triggers *two* `CONNECT_PROVIDER` requests back-to-back (ChatGPT + Gemini).
+**Connect all** triggers `CONNECT_PROVIDER` for each supported provider that is not ready, **or** whose default profile is blocked (In use / Wrong host / Offline).
 
 ### Previous bug (lost update)
 
@@ -100,7 +125,7 @@ This guarantees connect-all cannot clobber the other provider’s profile/defaul
 The ping-based connection check requires the content script to be injected into the provider tab.
 
 - Content scripts are only injected for hosts in `manifest.json` → `content_scripts.matches`.
-- If the provider opens on a login/redirect host where the content script is *not* injected, `PING` will fail and the UI will stay “Not connected” until the tab finishes login and navigates to a matched host.
+- If the provider opens on a login/redirect host where the content script is *not* injectable, `PING` will fail and the UI will stay “Not connected” until the tab finishes login and navigates to a matched host.
 
 ## Troubleshooting checklist
 

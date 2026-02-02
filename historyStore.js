@@ -488,6 +488,8 @@
         const payload = {
             content: String(message?.content || ''),
             contentHtml: typeof message?.contentHtml === 'string' ? message.contentHtml : undefined,
+            agentId: typeof message?.agentId === 'string' ? message.agentId : undefined,
+            agentLabel: typeof message?.agentLabel === 'string' ? message.agentLabel : undefined,
             sessionId: message?.sessionId || undefined,
             turnIndex: Number.isFinite(message?.turnIndex) ? message.turnIndex : undefined,
             roundIndex: Number.isFinite(message?.roundIndex) ? message.roundIndex : undefined,

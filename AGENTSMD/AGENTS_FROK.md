@@ -29,7 +29,7 @@ Grok is integrated as a first‑class provider (`grok`) alongside `chatgpt`, `ge
 - Grok works in:
   - **Single** routes,
   - **Compare / Parallel** (concurrent) runs,
-  - **Debate** (round-robin across 2+ providers).
+  - **Debate** (round-robin across 2+ agents).
 
 ### Key design choices
 
@@ -288,10 +288,10 @@ This keeps the run reliable even when providers drift.
 
 ### 6.3 Prefetch behavior (performance)
 
-During a session, attachments are managed in-memory (`activeSessionAttachments`):
+During a session, attachments are managed in-memory (`sessionAttachmentsById`):
 
-- attachments are delivered at most once per provider per session,
-- background can “prefetch” attachments into other providers while one provider is generating:
+- attachments are delivered at most once per agent per session,
+- background can “prefetch” attachments into other agents while one agent is generating:
   - uses `injectAndPrepareAttachments(..., mode: 'prepare_attachments')`.
 
 This reduces “send too early while upload is still processing” failures.
@@ -415,4 +415,3 @@ If adding another provider, Grok’s integration shows the minimal set:
 - DOM automation is inherently brittle; Grok UI changes can break selectors.
 - Attachment automation may fail depending on Grok’s implementation and browser security constraints.
 - We do not attempt to bypass trusted-event gating; if Grok requires user gestures, manual upload is the correct fallback.
-

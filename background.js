@@ -371,6 +371,8 @@ const defaultDebateState = {
 	isPaused: false,
 	pausedReason: null,
 	pausedProvider: null,
+    pausedAgentId: null,
+    pausedProfileId: null,
 	pausedAt: 0,
 	autoResume: null,
 	mode: 'debate',
@@ -382,6 +384,9 @@ const defaultDebateState = {
     turnIndex: 1,
     firstLLM: 'chatgpt',
     secondLLM: 'gemini',
+    participants: [],
+    agentProfileIds: {},
+    agentTabIds: {},
     profileIds: { chatgpt: null, gemini: null },
     tabIds: { chatgpt: null, gemini: null },
     userQuery: '',
@@ -411,9 +416,14 @@ function normalizeSessionState(session) {
     const normalized = { ...defaultDebateState, ...session, sessionId };
     normalized.isActive = Boolean(normalized.isActive);
     normalized.isPaused = Boolean(normalized.isPaused);
+    normalized.pausedAgentId = typeof normalized.pausedAgentId === 'string' ? normalized.pausedAgentId : null;
+    normalized.pausedProfileId = typeof normalized.pausedProfileId === 'string' ? normalized.pausedProfileId : null;
     normalized.messages = Array.isArray(normalized.messages) ? normalized.messages : [];
     normalized.profileIds = normalized.profileIds && typeof normalized.profileIds === 'object' ? normalized.profileIds : {};
     normalized.tabIds = normalized.tabIds && typeof normalized.tabIds === 'object' ? normalized.tabIds : {};
+    normalized.participants = Array.isArray(normalized.participants) ? normalized.participants : [];
+    normalized.agentProfileIds = normalized.agentProfileIds && typeof normalized.agentProfileIds === 'object' ? normalized.agentProfileIds : {};
+    normalized.agentTabIds = normalized.agentTabIds && typeof normalized.agentTabIds === 'object' ? normalized.agentTabIds : {};
     if (!['debate', 'single', 'direct', 'parallel'].includes(normalized.mode)) {
         normalized.mode = 'debate';
     }
@@ -437,6 +447,59 @@ function normalizeSessionState(session) {
     }
     if (!Object.prototype.hasOwnProperty.call(normalized.tabIds, 'gemini')) {
         normalized.tabIds.gemini = null;
+    }
+
+    // Backward compatibility: derive participants if missing.
+    if (!Array.isArray(normalized.participants) || normalized.participants.length === 0) {
+        const routeAgents = Array.isArray(normalized.route?.agents) ? normalized.route.agents : null;
+        if (routeAgents && routeAgents.length > 0) {
+            normalized.participants = routeAgents.map((agent, idx) => {
+                const provider = normalizeProviderKey(agent?.provider || '');
+                if (!provider || !isSupportedProviderKey(provider)) return null;
+                const agentId = typeof agent?.id === 'string' && agent.id.trim()
+                    ? agent.id.trim()
+                    : `agent_${provider}_${idx + 1}`;
+                const rawProfileSelection = typeof agent?.profileId === 'string' ? agent.profileId.trim() : '';
+                const profileId = normalized.agentProfileIds?.[agentId]
+                    || (rawProfileSelection && rawProfileSelection !== 'default' ? rawProfileSelection : (normalized.profileIds?.[provider] || null));
+                const tabId = Number.isFinite(normalized.agentTabIds?.[agentId])
+                    ? normalized.agentTabIds[agentId]
+                    : (Number.isFinite(agent?.tabId)
+                        ? agent.tabId
+                        : (normalized.tabIds?.[provider] || null));
+                const label = typeof agent?.label === 'string' ? agent.label : '';
+                return { agentId, provider, profileId, tabId, label };
+            }).filter(Boolean);
+        } else {
+            const providers = Array.isArray(normalized.route?.providers) && normalized.route.providers.length > 0
+                ? normalized.route.providers.map(normalizeProviderKey).filter((p) => p && isSupportedProviderKey(p))
+                : listSessionProviders(normalized);
+            normalized.participants = providers.map((provider, idx) => ({
+                agentId: provider,
+                provider,
+                profileId: normalized.profileIds?.[provider] || null,
+                tabId: normalized.tabIds?.[provider] || null,
+                label: formatLLMLabel(provider)
+            })).filter(Boolean);
+        }
+    }
+
+    // Ensure agent maps contain entries for participants.
+    if (Array.isArray(normalized.participants)) {
+        normalized.participants = normalized.participants.map((participant, idx) => {
+            if (!participant || typeof participant !== 'object') return null;
+            const provider = normalizeProviderKey(participant.provider);
+            if (!provider || !isSupportedProviderKey(provider)) return null;
+            const agentId = typeof participant.agentId === 'string' && participant.agentId.trim()
+                ? participant.agentId.trim()
+                : `agent_${provider}_${idx + 1}`;
+            const profileId = typeof participant.profileId === 'string' ? participant.profileId : null;
+            const tabId = Number.isFinite(participant.tabId) ? participant.tabId : null;
+            const label = typeof participant.label === 'string' ? participant.label : '';
+            normalized.agentProfileIds[agentId] = normalized.agentProfileIds[agentId] || profileId;
+            if (tabId) normalized.agentTabIds[agentId] = normalized.agentTabIds[agentId] || tabId;
+            return { agentId, provider, profileId, tabId, label };
+        }).filter(Boolean);
     }
     return normalized;
 }
@@ -563,7 +626,7 @@ const AUTO_FOCUS_SETTINGS = {
 const AUTO_FOCUS_DEFAULT_STATE = {
     sessionId: null,
     mode: null,
-    providers: [],
+    agentIds: [],
     tabIds: {},
     currentIndex: 0,
     timerId: null,
@@ -692,17 +755,33 @@ function normalizeIncomingAttachments(input) {
     return output;
 }
 
-function setActiveSessionAttachments(sessionId, attachments, providers = null) {
+function initStringFlagMap(keys, initialValue) {
+    const map = {};
+    if (!Array.isArray(keys)) return map;
+    for (const raw of keys) {
+        const key = typeof raw === 'string' ? raw.trim() : '';
+        if (!key || Object.prototype.hasOwnProperty.call(map, key)) continue;
+        map[key] = Boolean(initialValue);
+    }
+    return map;
+}
+
+function setActiveSessionAttachments(sessionId, attachments, agents = null) {
     const sanitized = normalizeIncomingAttachments(attachments);
     if (!sessionId || sanitized.length === 0) {
         sessionAttachmentsById.delete(sessionId);
         return;
     }
+
+    const agentIds = Array.isArray(agents)
+        ? agents.map((agent) => (typeof agent === 'string' ? agent : agent?.agentId)).filter(Boolean)
+        : [];
     sessionAttachmentsById.set(sessionId, {
         sessionId,
         attachments: sanitized,
-        sentTo: initProviderFlagMap(providers, false),
-        preparedTo: initProviderFlagMap(providers, false)
+        agentIds,
+        sentTo: initStringFlagMap(agentIds, false),
+        preparedTo: initStringFlagMap(agentIds, false)
     });
 }
 
@@ -711,51 +790,53 @@ function hasSessionAttachments(sessionId) {
     return Boolean(record && Array.isArray(record.attachments) && record.attachments.length > 0);
 }
 
-function getPendingSessionAttachments(sessionId, provider, { includePrepared = false } = {}) {
+function getPendingSessionAttachments(sessionId, agentId, { includePrepared = false } = {}) {
     const record = sessionAttachmentsById.get(sessionId);
     if (!record) return null;
-    const normalizedProvider = normalizeProviderKey(provider);
-    if (!normalizedProvider) return null;
-    if (record.sentTo?.[normalizedProvider]) return null;
-    if (!includePrepared && record.preparedTo?.[normalizedProvider]) return null;
+    const key = typeof agentId === 'string' ? agentId.trim() : '';
+    if (!key) return null;
+    if (record.sentTo?.[key]) return null;
+    if (!includePrepared && record.preparedTo?.[key]) return null;
     return record.attachments || null;
 }
 
-function markSessionAttachmentsPrepared(session, provider) {
+function markSessionAttachmentsPrepared(session, agentId) {
     if (!session?.sessionId) return;
     const record = sessionAttachmentsById.get(session.sessionId);
     if (!record) return;
-    const normalizedProvider = normalizeProviderKey(provider);
-    if (!normalizedProvider) return;
+    const key = typeof agentId === 'string' ? agentId.trim() : '';
+    if (!key) return;
     if (!record.preparedTo || typeof record.preparedTo !== 'object') {
         record.preparedTo = {};
     }
-    record.preparedTo[normalizedProvider] = true;
+    record.preparedTo[key] = true;
     if (!record.sentTo || typeof record.sentTo !== 'object') {
         record.sentTo = {};
     }
-    if (typeof record.sentTo[normalizedProvider] !== 'boolean') {
-        record.sentTo[normalizedProvider] = false;
+    if (typeof record.sentTo[key] !== 'boolean') {
+        record.sentTo[key] = false;
     }
 }
 
-function markSessionAttachmentsSent(session, provider) {
+function markSessionAttachmentsSent(session, agentId) {
     if (!session?.sessionId) return;
     const record = sessionAttachmentsById.get(session.sessionId);
     if (!record) return;
-    const normalizedProvider = normalizeProviderKey(provider);
-    if (!normalizedProvider) return;
+    const key = typeof agentId === 'string' ? agentId.trim() : '';
+    if (!key) return;
     if (!record.sentTo || typeof record.sentTo !== 'object') {
         record.sentTo = {};
     }
-    record.sentTo[normalizedProvider] = true;
+    record.sentTo[key] = true;
     if (!record.preparedTo || typeof record.preparedTo !== 'object') {
         record.preparedTo = {};
     }
-    record.preparedTo[normalizedProvider] = true;
+    record.preparedTo[key] = true;
 
-    const requiredProviders = getSessionProviders(session, normalizedProvider);
-    const allSent = requiredProviders.every((p) => record.sentTo?.[p]);
+    const requiredAgentIds = Array.isArray(record.agentIds) && record.agentIds.length > 0
+        ? record.agentIds
+        : Object.keys(record.sentTo || {});
+    const allSent = requiredAgentIds.length > 0 && requiredAgentIds.every((id) => record.sentTo?.[id]);
     if (allSent) {
         sessionAttachmentsById.delete(session.sessionId);
     }
@@ -1037,16 +1118,111 @@ async function notifyTabProfiles(stateOverride = null) {
     });
 }
 
-async function pingTab(tabId, provider) {
-    if (!tabId) return false;
+const CONTENT_SCRIPT_FILES = ['captureUtils.js', 'contentScript.js'];
+const contentScriptInjectionPromises = new Map();
+
+function isMissingContentScriptError(error) {
+    const message = String(error?.message || '');
+    if (!message) return false;
+    if (message.includes('Receiving end does not exist')) return true;
+    if (message.includes('Could not establish connection')) return true;
+    if (message.includes('message port closed')) return true;
+    return false;
+}
+
+function isContentScriptInjectableUrl(provider, url) {
+    if (!url) return false;
     try {
+        const parsed = new URL(url);
+        if (parsed.protocol !== 'https:') return false;
+        const hostname = parsed.hostname;
+        const normalized = normalizeProviderKey(provider);
+        if (!normalized) return false;
+        if (normalized === 'chatgpt') return hostname === 'chatgpt.com' || hostname === 'chat.openai.com';
+        if (normalized === 'gemini') return hostname === 'gemini.google.com';
+        if (normalized === 'claude') return hostname === 'claude.ai';
+        if (normalized === 'grok') return hostname === 'grok.com' || hostname.endsWith('.grok.com');
+        return false;
+    } catch (error) {
+        return false;
+    }
+}
+
+async function injectProviderContentScripts(tabId, provider) {
+    if (!Number.isFinite(tabId)) return false;
+    const normalizedProvider = normalizeProviderKey(provider);
+    if (!normalizedProvider) return false;
+
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        const urlCandidate = getTabUrlCandidate(tab);
+        if (!isContentScriptInjectableUrl(normalizedProvider, urlCandidate)) {
+            return false;
+        }
+
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            files: CONTENT_SCRIPT_FILES
+        });
+
+        // Give the content script a moment to register its message listeners.
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        return true;
+    } catch (error) {
+        console.warn(`[MLC Background] Failed to inject content scripts for ${normalizedProvider} tab ${tabId}:`, error?.message || error);
+        return false;
+    }
+}
+
+async function ensureProviderContentScripts(tabId, provider) {
+    if (!Number.isFinite(tabId)) return false;
+    if (contentScriptInjectionPromises.has(tabId)) {
+        try {
+            return await contentScriptInjectionPromises.get(tabId);
+        } catch (error) {
+            return false;
+        }
+    }
+
+    const promise = (async () => {
+        try {
+            return await injectProviderContentScripts(tabId, provider);
+        } finally {
+            contentScriptInjectionPromises.delete(tabId);
+        }
+    })();
+    contentScriptInjectionPromises.set(tabId, promise);
+    return promise;
+}
+
+async function pingTab(tabId, provider) {
+    if (!Number.isFinite(tabId)) return false;
+    const normalizedProvider = normalizeProviderKey(provider) || provider;
+    const timeoutMs = 1800;
+
+    const attemptPing = async () => {
         const response = await Promise.race([
             chrome.tabs.sendMessage(tabId, { type: 'PING' }),
-            new Promise((resolve) => setTimeout(() => resolve(null), 1500))
+            new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs))
         ]);
-        return Boolean(response && response.type === 'PONG');
+        return Boolean(response && (response.type === 'PONG' || response.status === 'ready'));
+    };
+
+    try {
+        return await attemptPing();
     } catch (error) {
-        console.warn(`[MLC Background] ${provider} tab ping failed:`, error.message);
+        if (isMissingContentScriptError(error)) {
+            const injected = await ensureProviderContentScripts(tabId, normalizedProvider);
+            if (injected) {
+                try {
+                    return await attemptPing();
+                } catch (retryError) {
+                    console.warn(`[MLC Background] ${normalizedProvider} tab ping still failing after inject:`, retryError?.message || retryError);
+                    return false;
+                }
+            }
+        }
+        console.warn(`[MLC Background] ${normalizedProvider} tab ping failed:`, error?.message || error);
         return false;
     }
 }
@@ -1224,7 +1400,9 @@ async function deleteTabProfile(profileId) {
         }
         await saveTabProfiles(state);
         if (profile.inUseBySessionId) {
-            await pauseDebateSession(profile.inUseBySessionId, `Profile "${profile.label}" was removed.`, profile.provider);
+            await pauseDebateSession(profile.inUseBySessionId, `Profile "${profile.label}" was removed.`, profile.provider, {
+                profileId: profile.profileId
+            });
         }
         await notifyTabProfiles(state);
         return { ok: true };
@@ -1340,7 +1518,7 @@ async function startParallelAutoFocus(session, providers, resolvedTabs) {
     }
     autoFocusState.sessionId = session.sessionId;
     autoFocusState.mode = 'parallel';
-    autoFocusState.providers = providers.map(normalizeProviderKey).filter(Boolean);
+    autoFocusState.agentIds = providers.map((id) => String(id || '').trim()).filter(Boolean);
     autoFocusState.tabIds = { ...(resolvedTabs || {}) };
     autoFocusState.currentIndex = 0;
     if (autoFocusState.timerId) {
@@ -1364,18 +1542,20 @@ async function runParallelAutoFocusCycle() {
     }
 
     const waiting = Array.isArray(session.waitingFor)
-        ? session.waitingFor.map(normalizeProviderKey).filter(Boolean)
+        ? session.waitingFor.map((id) => String(id || '').trim()).filter(Boolean)
         : [];
     if (waiting.length === 0) {
         await stopAutoFocus('complete');
         return;
     }
 
-    autoFocusState.providers = waiting;
+    autoFocusState.agentIds = waiting;
     const index = autoFocusState.currentIndex % waiting.length;
-    const provider = waiting[index];
+    const agentId = waiting[index];
     autoFocusState.currentIndex = (index + 1) % waiting.length;
-    const tabId = autoFocusState.tabIds?.[provider] || session.tabIds?.[provider];
+    const tabId = autoFocusState.tabIds?.[agentId]
+        || session.agentTabIds?.[agentId]
+        || session.tabIds?.[agentId];
     if (Number.isFinite(tabId)) {
         await focusTab(tabId);
     }
@@ -1403,18 +1583,15 @@ async function connectProvider(provider, options = {}) {
     const normalizedProvider = normalizeProvider(provider);
     const opened = await openProviderTab(normalizedProvider, options);
     if (!opened?.ok) return opened || { ok: false, error: 'Failed to open provider tab.' };
-    const label = formatLLMLabel(normalizedProvider);
     let claimed = await claimTabAsProfile({
         provider: normalizedProvider,
         tabId: opened.tabId,
-        label,
         setDefault: true
     });
     if (!claimed?.ok) {
         claimed = await claimTabAsProfile({
             provider: normalizedProvider,
             tabId: opened.tabId,
-            label,
             setDefault: true,
             skipHostCheck: true
         });
@@ -1427,8 +1604,34 @@ async function syncSessionProfileBinding(profile) {
     if (!profile?.inUseBySessionId) return;
     const session = await getSessionById(profile.inUseBySessionId);
     if (!session) return;
-    if (session.profileIds?.[profile.provider] === profile.profileId) {
-        session.tabIds[profile.provider] = profile.tabId || null;
+    const tabId = Number.isFinite(profile.tabId) ? profile.tabId : null;
+    const provider = normalizeProviderKey(profile.provider);
+    let changed = false;
+
+    if (provider && session.profileIds?.[provider] === profile.profileId) {
+        session.tabIds[provider] = tabId;
+        changed = true;
+    }
+
+    if (Array.isArray(session.participants)) {
+        session.participants = session.participants.map((participant) => {
+            if (!participant || participant.profileId !== profile.profileId) return participant;
+            changed = true;
+            return { ...participant, tabId };
+        });
+    }
+
+    if (session.agentTabIds && typeof session.agentTabIds === 'object') {
+        const participants = Array.isArray(session.participants) ? session.participants : [];
+        participants.forEach((participant) => {
+            if (participant?.profileId !== profile.profileId) return;
+            if (!participant.agentId) return;
+            session.agentTabIds[participant.agentId] = tabId;
+            changed = true;
+        });
+    }
+
+    if (changed) {
         await saveSession(session);
     }
 }
@@ -1489,9 +1692,12 @@ async function lockProfilesForSession(sessionId, profileIds) {
     return withTabProfilesLock(async () => {
         const state = await loadTabProfiles();
         let changed = false;
-        for (const [provider, profileId] of Object.entries(profileIds || {})) {
-            const normalizedProvider = normalizeProvider(provider);
-            if (!profileId || !normalizedProvider) continue;
+        const list = Array.isArray(profileIds)
+            ? profileIds
+            : Object.values(profileIds || {});
+        const unique = [...new Set(list.map((id) => (typeof id === 'string' ? id : '')).filter(Boolean))];
+        for (const profileId of unique) {
+            if (!profileId) continue;
             const profile = findProfileById(state, profileId);
             if (!profile) continue;
             if (profile.inUseBySessionId !== sessionId) {
@@ -1658,18 +1864,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             enqueueDebateResponse(message, 'multi-agent response');
             sendResponse({ status: 'multi_agent_response_received', type: message.type });
             break;
-        case 'CHECK_CONNECTION':
-            checkConnectionStatus().then(status => {
+        case 'CHECK_CONNECTION': {
+            const profileIds = Array.isArray(message.profileIds)
+                ? message.profileIds.map((id) => String(id || '').trim()).filter(Boolean)
+                : [];
+            checkConnectionStatus({ profileIds }).then((result) => {
                 sendMessageToPopup({
                     type: 'CONNECTION_STATUS',
-                    status: status
+                    status: result.status,
+                    profileStatus: result.profileStatus
                 });
                 sendResponse({
                     type: 'CONNECTION_STATUS',
-                    status: status
+                    status: result.status,
+                    profileStatus: result.profileStatus
                 });
             });
             return true; // Keep message channel open for async response
+        }
         case 'LIST_LLM_TABS':
             handleListLLMTabs().catch(error => {
                 console.error('[MLC Debate] Error listing tabs:', error);
@@ -1947,27 +2159,54 @@ function sanitizeSessionPromptOverrides(input) {
 function sanitizeUiRoute(input) {
     if (!input || typeof input !== 'object') return null;
     const kind = typeof input.kind === 'string' ? input.kind.toLowerCase() : '';
-    const rawProviders = Array.isArray(input.providers) ? input.providers : [];
-    const providers = [];
-    for (const item of rawProviders) {
-        const normalized = normalizeProviderKey(item);
-        if (!normalized || !isSupportedProviderKey(normalized)) continue;
-        if (!providers.includes(normalized)) providers.push(normalized);
-    }
-    if (providers.length === 0) return null;
     const rounds = Math.min(12, Math.max(1, parseInt(input.rounds, 10) || 1));
 
+    const agents = [];
+    const rawAgents = Array.isArray(input.agents) ? input.agents : null;
+
+    const generateRouteAgentId = () => `agent_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const normalizeProfileSelection = (value) => {
+        if (value === null || value === undefined) return null;
+        const text = String(value).trim();
+        if (!text) return null;
+        return text;
+    };
+
+    if (rawAgents) {
+        for (const item of rawAgents) {
+            if (!item || typeof item !== 'object') continue;
+            const provider = normalizeProviderKey(item.provider || item.llm);
+            if (!provider || !isSupportedProviderKey(provider)) continue;
+            const id = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : generateRouteAgentId();
+            const profileId = normalizeProfileSelection(item.profileId ?? item.profile ?? item.profile_id);
+            agents.push({ id, provider, profileId });
+        }
+    } else {
+        const rawProviders = Array.isArray(input.providers) ? input.providers : [];
+        rawProviders.forEach((item, index) => {
+            const provider = normalizeProviderKey(item);
+            if (!provider || !isSupportedProviderKey(provider)) return;
+            agents.push({
+                id: `agent_${provider}_${index}_${Math.random().toString(36).slice(2)}`,
+                provider,
+                profileId: 'default'
+            });
+        });
+    }
+
+    if (agents.length === 0) return null;
+
     if (kind === 'debate') {
-        if (providers.length < 2) return null;
-        return { kind: 'debate', providers, rounds };
+        if (agents.length < 2) return null;
+        return { kind: 'debate', agents, providers: agents.map((agent) => agent.provider), rounds };
     }
 
     if (kind === 'parallel') {
-        if (providers.length < 2) return null;
-        return { kind: 'parallel', providers, rounds: 1 };
+        if (agents.length < 2) return null;
+        return { kind: 'parallel', agents, providers: agents.map((agent) => agent.provider), rounds: 1 };
     }
 
-    return { kind: 'single', providers: [providers[0]], rounds: 1 };
+    return { kind: 'single', agents: [agents[0]], providers: [agents[0].provider], rounds: 1 };
 }
 
 function buildRouteFromRun(mode, { firstLLM, secondLLM, directTarget, rounds }) {
@@ -2075,18 +2314,52 @@ async function handleStartDebateSession(message) {
         }
 
         const profilesState = await loadTabProfiles();
-        const requiredProviders = Array.isArray(route?.providers) && route.providers.length > 0
-            ? route.providers
-            : (secondLLM ? ['chatgpt', 'gemini'] : [firstLLM]);
-        const hasDefaultProfiles = requiredProviders.every((provider) => Boolean(profilesState.defaults?.[provider]));
-        const hasExplicitTabIds = requiredProviders.some((provider) => Number.isFinite(requestedTabs[provider]));
-        const hasRequestedProfiles = Boolean(requestedProfiles && requiredProviders.some((provider) => requestedProfiles?.[provider]));
-        const useProfiles = Boolean(hasRequestedProfiles || (!hasExplicitTabIds && hasDefaultProfiles));
+        const routeAgents = Array.isArray(route?.agents) && route.agents.length > 0 ? route.agents : [];
+        const requiredProviders = routeAgents.length > 0
+            ? routeAgents.map((agent) => normalizeProviderKey(agent?.provider)).filter(Boolean)
+            : (Array.isArray(route?.providers) && route.providers.length > 0
+                ? route.providers
+                : (secondLLM ? ['chatgpt', 'gemini'] : [firstLLM]));
+
+        const participants = [];
+        const agentProfileIds = {};
+        const agentTabIds = {};
+        const usedProfileIds = new Set();
+
+        const providerCounts = {};
+        routeAgents.forEach((agent) => {
+            const provider = normalizeProviderKey(agent?.provider);
+            if (!provider) return;
+            providerCounts[provider] = (providerCounts[provider] || 0) + 1;
+        });
+        const hasDuplicateProviders = Object.values(providerCounts).some((count) => count > 1);
+        const hasExplicitProfileSelection = routeAgents.some((agent) => {
+            const selection = typeof agent?.profileId === 'string' ? agent.profileId.trim() : '';
+            return Boolean(selection && selection !== 'default');
+        });
+
+        const uniqueProviders = [...new Set(requiredProviders.map(normalizeProviderKey).filter(Boolean))];
+        const hasDefaultProfiles = uniqueProviders.length > 0 && uniqueProviders.every((provider) => Boolean(profilesState.defaults?.[provider]));
+        const hasExplicitTabIds = uniqueProviders.some((provider) => Number.isFinite(requestedTabs[provider]));
+        const hasRequestedProfiles = Boolean(requestedProfiles && uniqueProviders.some((provider) => requestedProfiles?.[provider]));
+        const useProfiles = Boolean(hasDuplicateProviders || hasExplicitProfileSelection || hasRequestedProfiles || (!hasExplicitTabIds && hasDefaultProfiles));
 
         if (useProfiles) {
-            for (const provider of requiredProviders) {
-                profileIds[provider] = resolveProfileSelection(provider, requestedProfiles?.[provider], profilesState.defaults);
-                if (!profileIds[provider]) {
+            // Resolve + validate each agent via Tab Profiles (required for duplicate-provider routes).
+            if (routeAgents.length === 0) {
+                sendMessageToPopup({
+                    type: 'UI_SESSION_ERROR',
+                    chatId: chatId || requestedChatId || null,
+                    error: 'Route agents are missing.'
+                });
+                return;
+            }
+            for (const agent of routeAgents) {
+                const provider = normalizeProviderKey(agent?.provider);
+                if (!provider) continue;
+                const selection = agent?.profileId || requestedProfiles?.[provider] || 'default';
+                const resolvedProfileId = resolveProfileSelection(provider, selection, profilesState.defaults);
+                if (!resolvedProfileId) {
                     sendMessageToPopup({
                         type: 'UI_SESSION_ERROR',
                         chatId: chatId || requestedChatId || null,
@@ -2094,7 +2367,16 @@ async function handleStartDebateSession(message) {
                     });
                     return;
                 }
-                const validation = await validateProfileForSession(provider, profileIds[provider], { requirePing: true });
+                if (usedProfileIds.has(resolvedProfileId)) {
+                    sendMessageToPopup({
+                        type: 'UI_SESSION_ERROR',
+                        chatId: chatId || requestedChatId || null,
+                        error: `Each agent must use a different ${formatLLMLabel(provider)} profile/tab.`
+                    });
+                    return;
+                }
+
+                const validation = await validateProfileForSession(provider, resolvedProfileId, { requirePing: true });
                 if (!validation.ok) {
                     sendMessageToPopup({ type: 'UI_SESSION_ERROR', chatId: chatId || requestedChatId || null, error: validation.error });
                     return;
@@ -2106,14 +2388,32 @@ async function handleStartDebateSession(message) {
                         sendMessageToPopup({
                             type: 'UI_SESSION_ERROR',
                             chatId: chatId || requestedChatId || null,
-                            error: `${formatLLMLabel(provider)} profile is already in use by another session.`
+                            error: `${validation.profile.label} is already in use by another session.`
                         });
                         return;
                     }
                 }
-                tabIds[provider] = validation.profile.tabId;
+
+                const agentId = typeof agent?.id === 'string' && agent.id.trim()
+                    ? agent.id.trim()
+                    : `agent_${provider}_${participants.length + 1}`;
+                participants.push({
+                    agentId,
+                    provider,
+                    profileId: resolvedProfileId,
+                    tabId: validation.profile.tabId,
+                    label: validation.profile.label || formatLLMLabel(provider)
+                });
+                agentProfileIds[agentId] = resolvedProfileId;
+                agentTabIds[agentId] = validation.profile.tabId;
+                usedProfileIds.add(resolvedProfileId);
+
+                // Back-compat maps (provider -> first resolved profile/tab).
+                if (profileIds[provider] == null) profileIds[provider] = resolvedProfileId;
+                if (tabIds[provider] == null) tabIds[provider] = validation.profile.tabId;
             }
         } else {
+            // Legacy fallback: resolve one tab per provider (no duplicates).
             if (mode === 'single') {
                 if (firstLLM === 'chatgpt' && Number.isFinite(requestedTabs.chatgpt)) {
                     await setPreferredTabs({ chatgptTabId: requestedTabs.chatgpt });
@@ -2128,7 +2428,7 @@ async function handleStartDebateSession(message) {
             }
 
             const preferred = await getPreferredTabs();
-            for (const provider of requiredProviders) {
+            for (const provider of uniqueProviders) {
                 const resolved = await resolveTabForLLM(provider, requestedTabs[provider], preferred[provider]);
                 if (!resolved) {
                     sendMessageToPopup({
@@ -2147,6 +2447,15 @@ async function handleStartDebateSession(message) {
                     return;
                 }
                 tabIds[provider] = resolved.id;
+                const agentId = provider;
+                participants.push({
+                    agentId,
+                    provider,
+                    profileId: null,
+                    tabId: resolved.id,
+                    label: formatLLMLabel(provider)
+                });
+                agentTabIds[agentId] = resolved.id;
             }
         }
 
@@ -2161,6 +2470,9 @@ async function handleStartDebateSession(message) {
         if (route) {
             runConfig = { ...runConfig, route };
         }
+        const participantCount = participants.length > 0
+            ? participants.length
+            : (Array.isArray(route?.providers) && route.providers.length > 0 ? route.providers.length : (secondLLM ? 2 : 1));
         const totalTurns = mode === 'parallel'
             ? 1
             : (mode === 'direct'
@@ -2168,9 +2480,7 @@ async function handleStartDebateSession(message) {
                 : (mode === 'single'
                     ? rounds
                     : (mode === 'debate'
-                        ? rounds * (Array.isArray(route?.providers) && route.providers.length >= 2
-                            ? route.providers.length
-                            : (secondLLM ? 2 : 1))
+                        ? rounds * (participantCount || 2)
                         : rounds * 2)));
         const sessionId = generateSessionId();
         const session = {
@@ -2185,6 +2495,9 @@ async function handleStartDebateSession(message) {
             turnIndex: 1,
             firstLLM: firstLLM,
             secondLLM: secondLLM,
+            participants,
+            agentProfileIds,
+            agentTabIds,
             profileIds: profileIds,
             tabIds,
             userQuery: prompt,
@@ -2195,7 +2508,7 @@ async function handleStartDebateSession(message) {
             startedAt: now
         };
 
-        setActiveSessionAttachments(sessionId, message.attachments, requiredProviders);
+        setActiveSessionAttachments(sessionId, message.attachments, participants);
         const attachmentsRecord = sessionAttachmentsById.get(sessionId);
         const attachmentsMeta = attachmentsRecord
             ? attachmentsRecord.attachments.map(({ name, type, size }) => ({ name, type, size }))
@@ -2212,7 +2525,8 @@ async function handleStartDebateSession(message) {
             firstLLM: firstLLM,
             target: mode === 'direct' ? directTarget : undefined,
             tabIds: session.tabIds,
-            profileIds: session.profileIds
+            profileIds: session.profileIds,
+            participants: Array.isArray(session.participants) ? session.participants : undefined
         });
 
         sendMessageToPopup({
@@ -2241,7 +2555,10 @@ async function handleStartDebateSession(message) {
             }
         }
 
-        await lockProfilesForSession(session.sessionId, session.profileIds);
+        await lockProfilesForSession(
+            session.sessionId,
+            Array.isArray(session.participants) ? session.participants.map((p) => p.profileId).filter(Boolean) : session.profileIds
+        );
         if (session.mode === 'parallel') {
             await sendParallelTurn(session);
         } else {
@@ -2286,13 +2603,68 @@ function getRoundIndex(turnIndex, session = null) {
         return Math.max(1, turnIndex);
     }
     if (session?.mode === 'debate') {
-        const debateProviders = Array.isArray(session?.route?.providers)
-            ? session.route.providers.map(normalizeProviderKey).filter((p) => p && isSupportedProviderKey(p))
-            : [];
-        const divisor = debateProviders.length >= 2 ? debateProviders.length : 2;
+        const participants = getSessionParticipants(session);
+        const divisor = participants.length >= 2 ? participants.length : 2;
         return Math.ceil(turnIndex / divisor);
     }
     return Math.ceil(turnIndex / 2);
+}
+
+function getSessionParticipants(session) {
+    if (Array.isArray(session?.participants) && session.participants.length > 0) {
+        return session.participants;
+    }
+    const routeAgents = Array.isArray(session?.route?.agents) ? session.route.agents : null;
+    if (routeAgents && routeAgents.length > 0) {
+        return routeAgents.map((agent, idx) => {
+            const provider = normalizeProviderKey(agent?.provider);
+            if (!provider || !isSupportedProviderKey(provider)) return null;
+            const agentId = typeof agent?.id === 'string' && agent.id.trim()
+                ? agent.id.trim()
+                : `agent_${provider}_${idx + 1}`;
+            const profileId = typeof session?.agentProfileIds?.[agentId] === 'string'
+                ? session.agentProfileIds[agentId]
+                : (session?.profileIds?.[provider] || null);
+            const tabId = Number.isFinite(session?.agentTabIds?.[agentId])
+                ? session.agentTabIds[agentId]
+                : (session?.tabIds?.[provider] || null);
+            const label = typeof agent?.label === 'string' ? agent.label : (formatLLMLabel(provider));
+            return { agentId, provider, profileId, tabId, label };
+        }).filter(Boolean);
+    }
+    const providers = Array.isArray(session?.route?.providers) && session.route.providers.length > 0
+        ? session.route.providers.map(normalizeProviderKey).filter((p) => p && isSupportedProviderKey(p))
+        : listSessionProviders(session);
+    return providers.map((provider) => ({
+        agentId: provider,
+        provider,
+        profileId: session?.profileIds?.[provider] || null,
+        tabId: session?.tabIds?.[provider] || null,
+        label: formatLLMLabel(provider)
+    })).filter(Boolean);
+}
+
+function getTurnParticipant(session, turnIndex) {
+    const participants = getSessionParticipants(session);
+    if (participants.length === 0) return null;
+
+    if (session?.mode === 'parallel') {
+        return participants[0] || null;
+    }
+    if (session?.mode === 'direct') {
+        if (participants.length >= 2) {
+            return turnIndex === 1 ? participants[0] : participants[1];
+        }
+        return participants[0] || null;
+    }
+    if (session?.mode === 'single') {
+        return participants[0] || null;
+    }
+    if (session?.mode === 'debate') {
+        const idx = Math.max(0, (turnIndex - 1) % participants.length);
+        return participants[idx] || null;
+    }
+    return participants[0] || null;
 }
 
 function getTurnLLM(session, turnIndex) {
@@ -2307,13 +2679,8 @@ function getTurnLLM(session, turnIndex) {
         return session.firstLLM || 'chatgpt';
     }
     if (session?.mode === 'debate') {
-        const debateProviders = Array.isArray(session?.route?.providers)
-            ? session.route.providers.map(normalizeProviderKey).filter((p) => p && isSupportedProviderKey(p))
-            : [];
-        if (debateProviders.length >= 2) {
-            const idx = Math.max(0, (turnIndex - 1) % debateProviders.length);
-            return debateProviders[idx];
-        }
+        const participant = getTurnParticipant(session, turnIndex);
+        if (participant?.provider) return participant.provider;
     }
     return turnIndex % 2 === 1 ? session.firstLLM : session.secondLLM;
 }
@@ -2691,9 +3058,55 @@ function getLastResponse(session, llmType) {
     return '';
 }
 
-function describeMessageRoleForContext(role) {
+function getLastResponseByAgent(session, agentId, fallbackProvider = null) {
+    const key = typeof agentId === 'string' ? agentId.trim() : '';
+    if (!key) return '';
+    const messages = Array.isArray(session?.messages) ? session.messages : [];
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const msg = messages[i];
+        if (!msg || msg.role === 'user') continue;
+        if (msg.agentId === key || msg.sourceAgentId === key) {
+            return msg.content || '';
+        }
+    }
+    const fallbackKey = normalizeProviderKey(fallbackProvider);
+    if (fallbackKey && isSupportedProviderKey(fallbackKey)) {
+        return getLastResponse(session, fallbackKey) || '';
+    }
+    return '';
+}
+
+function formatParticipantLabelForPrompt(participants, participant) {
+    if (!participant) return '';
+    const provider = normalizeProviderKey(participant.provider);
+    const providerLabel = formatLLMLabel(provider);
+    if (!provider || !isSupportedProviderKey(provider)) return providerLabel;
+
+    const matchCount = Array.isArray(participants)
+        ? participants.filter((p) => normalizeProviderKey(p?.provider) === provider).length
+        : 0;
+    if (matchCount <= 1) return providerLabel;
+
+    const rawLabel = typeof participant.label === 'string' ? participant.label.trim() : '';
+    if (rawLabel && rawLabel !== providerLabel) {
+        return rawLabel.length > 44 ? `${rawLabel.slice(0, 41)}...` : rawLabel;
+    }
+
+    let ordinal = 0;
+    for (const p of participants || []) {
+        if (!p) continue;
+        if (normalizeProviderKey(p.provider) !== provider) continue;
+        ordinal += 1;
+        if (p.agentId && participant.agentId && p.agentId === participant.agentId) break;
+    }
+    return `${providerLabel} #${Math.max(1, ordinal)}`;
+}
+
+function describeMessageRoleForContext(role, message = null) {
     if (!role) return 'Assistant';
     if (role === 'user') return 'User';
+    const agentLabel = typeof message?.agentLabel === 'string' ? message.agentLabel.trim() : '';
+    if (agentLabel) return agentLabel;
     if (isSupportedProviderKey(role)) return formatLLMLabel(role);
     return String(role);
 }
@@ -2704,7 +3117,7 @@ function buildConversationContext(messages, { maxChars = 4000, maxMessages = 10 
     const blocks = [];
     for (const message of recent) {
         if (!message) continue;
-        const role = describeMessageRoleForContext(message.role);
+        const role = describeMessageRoleForContext(message.role, message);
         const content = String(message.content || '').trim();
         if (!content) continue;
         blocks.push(`${role}:\n${content}`);
@@ -2722,7 +3135,7 @@ function formatTranscriptForPrompt(messages, { maxChars = 48000 } = {}) {
     const blocks = [];
     for (const message of messages) {
         if (!message) continue;
-        const role = describeMessageRoleForContext(message.role);
+        const role = describeMessageRoleForContext(message.role, message);
         const content = String(message.content || '').trim();
         if (!content) continue;
         blocks.push(`${role}:\n${content}`);
@@ -2936,24 +3349,58 @@ async function buildDebatePrompt(session, turnIndex) {
         : null;
     const templates = overrides ? { ...baseTemplates, ...overrides } : baseTemplates;
 
-    const debateProviders = Array.isArray(session?.route?.providers)
-        ? session.route.providers.map(normalizeProviderKey).filter((p) => p && isSupportedProviderKey(p))
-        : listSessionProviders(session);
-    const providerCount = debateProviders.length >= 2 ? debateProviders.length : 2;
+    const participants = getSessionParticipants(session);
+    const participantCount = participants.length >= 2 ? participants.length : 2;
 
     const roundIndex = getRoundIndex(turnIndex, session);
-    const expectedLLM = getTurnLLM(session, turnIndex);
-    const expectedLabel = formatLLMLabel(expectedLLM);
-    const prevIdx = turnIndex > 1 ? (turnIndex - 2) % providerCount : 0;
-    const previousLLM = debateProviders[prevIdx] || session.secondLLM || session.firstLLM;
-    const otherLLM = providerCount > 2 ? previousLLM : (expectedLLM === session.firstLLM ? session.secondLLM : session.firstLLM);
-    const otherLabel = formatLLMLabel(otherLLM);
-    const safeOtherResponse = getLastResponse(session, otherLLM) || '[No prior response captured yet]';
-    const safeFirstResponse = getLastResponse(session, session.firstLLM) || '[No prior response captured yet]';
+    const expectedParticipant = getTurnParticipant(session, turnIndex);
+    const expectedProvider = normalizeProviderKey(expectedParticipant?.provider || getTurnLLM(session, turnIndex));
+    const expectedAgentId = typeof expectedParticipant?.agentId === 'string' && expectedParticipant.agentId.trim()
+        ? expectedParticipant.agentId.trim()
+        : null;
+    const expectedLabel = expectedParticipant
+        ? formatParticipantLabelForPrompt(participants, expectedParticipant)
+        : formatLLMLabel(expectedProvider);
 
-    const totalTurns = Number.isFinite(session.totalTurns) ? session.totalTurns : session.rounds * providerCount;
-    const firstLabel = formatLLMLabel(session.firstLLM);
-    const secondLabel = formatLLMLabel(session.secondLLM);
+    const firstParticipant = participants[0] || null;
+    const secondParticipant = participants[1] || null;
+    const firstLabel = firstParticipant
+        ? formatParticipantLabelForPrompt(participants, firstParticipant)
+        : formatLLMLabel(session.firstLLM);
+    const secondLabel = secondParticipant
+        ? formatParticipantLabelForPrompt(participants, secondParticipant)
+        : formatLLMLabel(session.secondLLM);
+
+    const expectedIndex = expectedParticipant
+        ? participants.findIndex((p) => p?.agentId && expectedParticipant.agentId && p.agentId === expectedParticipant.agentId)
+        : -1;
+    const otherParticipant = (() => {
+        if (!expectedParticipant || participants.length < 2) return null;
+        if (participantCount > 2) {
+            if (turnIndex <= 1) return null;
+            const prevIdx = (turnIndex - 2 + participantCount) % participantCount;
+            return participants[prevIdx] || null;
+        }
+        if (expectedIndex === 0) return participants[1] || null;
+        if (expectedIndex === 1) return participants[0] || null;
+        return participants[0] || null;
+    })();
+    const otherProvider = normalizeProviderKey(otherParticipant?.provider || '');
+    const otherAgentId = typeof otherParticipant?.agentId === 'string' && otherParticipant.agentId.trim()
+        ? otherParticipant.agentId.trim()
+        : null;
+    const otherLabel = otherParticipant
+        ? formatParticipantLabelForPrompt(participants, otherParticipant)
+        : (otherProvider ? formatLLMLabel(otherProvider) : '');
+
+    const safeOtherResponse = otherAgentId
+        ? (getLastResponseByAgent(session, otherAgentId, otherProvider) || '[No prior response captured yet]')
+        : '[No prior response captured yet]';
+    const safeFirstResponse = firstParticipant?.agentId
+        ? (getLastResponseByAgent(session, firstParticipant.agentId, normalizeProviderKey(firstParticipant.provider)) || '[No prior response captured yet]')
+        : (getLastResponse(session, session.firstLLM) || '[No prior response captured yet]');
+
+    const totalTurns = Number.isFinite(session.totalTurns) ? session.totalTurns : session.rounds * participantCount;
     const baseVariables = {
         rounds: session.rounds,
         iterations: session.rounds,
@@ -2963,9 +3410,13 @@ async function buildDebatePrompt(session, turnIndex) {
         turn: turnIndex,
         turn_index: turnIndex,
         total_turns: totalTurns,
+        expected_provider: expectedProvider,
         expected_llm: expectedLabel,
         llm: expectedLabel,
+        expected_agent_id: expectedAgentId,
+        other_provider: otherProvider || undefined,
         other_llm: otherLabel,
+        other_agent_id: otherAgentId,
         first_llm: firstLabel,
         fisrt_llm: firstLabel,
         second_llm: secondLabel,
@@ -3003,7 +3454,7 @@ async function buildDebatePrompt(session, turnIndex) {
         final_message: renderedFinal
     };
 
-    if (providerCount > 2) {
+    if (participantCount > 2) {
         const isFinalTurn = turnIndex === totalTurns;
         const instruction = turnIndex === 1
             ? renderedInitialInstruction
@@ -3015,8 +3466,8 @@ async function buildDebatePrompt(session, turnIndex) {
                 header,
                 roundIndex,
                 rounds: session.rounds,
-                expectedProvider: expectedLLM,
-                expectedLabel,
+                expectedAgentId,
+                expectedProvider,
                 messages: Array.isArray(session?.messages) ? session.messages : [],
                 roleLabelFn: describeMessageRoleForContext,
                 userMessageOverride: userMsg,
@@ -3025,11 +3476,15 @@ async function buildDebatePrompt(session, turnIndex) {
             }).trim();
         }
 
-        // Fallback (should not normally run): include all transcript messages since this provider last responded.
+        // Fallback (should not normally run): include all transcript messages since this agent last responded.
         const messages = Array.isArray(session?.messages) ? session.messages : [];
         let lastOwnIndex = -1;
         for (let i = messages.length - 1; i >= 0; i -= 1) {
-            if (messages[i]?.role === expectedLLM) {
+            if (expectedAgentId && (messages[i]?.agentId === expectedAgentId || messages[i]?.sourceAgentId === expectedAgentId)) {
+                lastOwnIndex = i;
+                break;
+            }
+            if (!expectedAgentId && messages[i]?.role === expectedProvider) {
                 lastOwnIndex = i;
                 break;
             }
@@ -3062,7 +3517,10 @@ async function buildDebatePrompt(session, turnIndex) {
         return renderPromptTemplate(templates.turn2, variables).trim();
     }
 
-    if (expectedLLM === session.firstLLM) {
+    const isFirstParticipant = expectedParticipant && firstParticipant?.agentId && expectedParticipant.agentId
+        ? expectedParticipant.agentId === firstParticipant.agentId
+        : expectedProvider === session.firstLLM;
+    if (isFirstParticipant) {
         return renderPromptTemplate(templates.turn3plus_first, variables).trim();
     }
 
@@ -3215,26 +3673,67 @@ async function validateTabForProvider(tabId, provider) {
     }
 }
 
-async function resolveSessionTab(session, provider, { requirePing = false } = {}) {
-    if (session.profileIds?.[provider]) {
-        const validation = await validateProfileForSession(provider, session.profileIds[provider], { requirePing });
+async function resolveSessionTab(session, target, { requirePing = false } = {}) {
+    const participants = getSessionParticipants(session);
+    const participant = target && typeof target === 'object'
+        ? target
+        : participants.find((p) => p?.agentId === target) || null;
+
+    const provider = participant?.provider
+        ? normalizeProviderKey(participant.provider)
+        : normalizeProviderKey(target);
+    if (!provider || !isSupportedProviderKey(provider)) {
+        return { ok: false, error: 'Unknown provider for session.' };
+    }
+
+    const agentId = participant?.agentId
+        ? String(participant.agentId)
+        : (typeof target === 'string' ? target : provider);
+
+    const profileId = participant?.profileId === 'default'
+        ? (session.profileIds?.[provider] || null)
+        : (participant?.profileId || session.profileIds?.[provider] || null);
+
+    if (profileId) {
+        const validation = await validateProfileForSession(provider, profileId, { requirePing });
         if (!validation.ok) {
             return { ok: false, error: validation.error };
         }
         if (validation.profile?.inUseBySessionId && validation.profile.inUseBySessionId !== session.sessionId) {
             return { ok: false, error: `${validation.profile.label} is already in use by another session.` };
         }
+
+        if (participant && Array.isArray(session.participants)) {
+            session.participants = session.participants.map((p) => (p?.agentId === agentId ? { ...p, tabId: validation.profile.tabId, profileId, provider } : p));
+        }
+        if (session.agentTabIds && typeof session.agentTabIds === 'object') {
+            session.agentTabIds[agentId] = validation.profile.tabId;
+        }
+        if (session.agentProfileIds && typeof session.agentProfileIds === 'object') {
+            session.agentProfileIds[agentId] = profileId;
+        }
         session.tabIds[provider] = validation.profile.tabId;
+        session.profileIds[provider] = profileId;
         await saveSession(session);
-        return { ok: true, tabId: validation.profile.tabId };
+        return { ok: true, tabId: validation.profile.tabId, participant: participant || null, provider, agentId };
     }
 
-    const fallbackValidation = await validateTabForProvider(session.tabIds?.[provider], provider);
+    const fallbackTabId = participant?.tabId || session.tabIds?.[provider];
+    const fallbackValidation = await validateTabForProvider(fallbackTabId, provider);
     if (fallbackValidation.ok) {
         const inUse = await isTabInUse(fallbackValidation.tabId, { excludeSessionId: session.sessionId });
         if (inUse) {
             return { ok: false, error: `${formatLLMLabel(provider)} tab is already in use by another session.` };
         }
+        if (participant && Array.isArray(session.participants)) {
+            session.participants = session.participants.map((p) => (p?.agentId === agentId ? { ...p, tabId: fallbackValidation.tabId, provider } : p));
+        }
+        if (session.agentTabIds && typeof session.agentTabIds === 'object') {
+            session.agentTabIds[agentId] = fallbackValidation.tabId;
+        }
+        session.tabIds[provider] = fallbackValidation.tabId;
+        await saveSession(session);
+        return { ok: true, tabId: fallbackValidation.tabId, participant: participant || null, provider, agentId };
     }
     return fallbackValidation;
 }
@@ -3245,12 +3744,20 @@ async function isTabInUse(tabId, { excludeSessionId } = {}) {
     for (const session of sessionsById.values()) {
         if (!session || (!session.isActive && !session.isPaused)) continue;
         if (excludeSessionId && session.sessionId === excludeSessionId) continue;
+        const seenTabIds = new Set();
         const tabIds = session.tabIds && typeof session.tabIds === 'object' ? session.tabIds : {};
-        for (const id of Object.values(tabIds)) {
-            if (Number.isFinite(id) && id === tabId) {
-                return true;
-            }
-        }
+        Object.values(tabIds).forEach((id) => {
+            if (Number.isFinite(id)) seenTabIds.add(id);
+        });
+        const agentTabIds = session.agentTabIds && typeof session.agentTabIds === 'object' ? session.agentTabIds : {};
+        Object.values(agentTabIds).forEach((id) => {
+            if (Number.isFinite(id)) seenTabIds.add(id);
+        });
+        const participants = Array.isArray(session.participants) ? session.participants : [];
+        participants.forEach((p) => {
+            if (Number.isFinite(p?.tabId)) seenTabIds.add(p.tabId);
+        });
+        if (seenTabIds.has(tabId)) return true;
     }
     return false;
 }
@@ -3261,14 +3768,38 @@ async function pauseDebateSession(sessionId, reason, provider, options = {}) {
     session.isPaused = true;
     session.pausedReason = reason || 'Session paused.';
     session.pausedProvider = provider || null;
+    session.pausedAgentId = typeof options?.agentId === 'string' ? options.agentId : null;
+    session.pausedProfileId = typeof options?.profileId === 'string' ? options.profileId : null;
+    if (!session.pausedProfileId && session.pausedAgentId) {
+        const fromAgentMap = session.agentProfileIds?.[session.pausedAgentId];
+        if (typeof fromAgentMap === 'string') session.pausedProfileId = fromAgentMap;
+        if (!session.pausedProfileId && Array.isArray(session.participants)) {
+            const match = session.participants.find((p) => p?.agentId === session.pausedAgentId);
+            if (match?.profileId) session.pausedProfileId = match.profileId;
+        }
+    }
+    if (!session.pausedProfileId && session.pausedProvider && session.profileIds?.[session.pausedProvider]) {
+        session.pausedProfileId = session.profileIds[session.pausedProvider];
+    }
+    if (!session.pausedAgentId && session.pausedProfileId && Array.isArray(session.participants)) {
+        const match = session.participants.find((p) => p?.profileId === session.pausedProfileId);
+        if (match?.agentId) session.pausedAgentId = match.agentId;
+    }
     session.pausedAt = Date.now();
     session.autoResume = options && typeof options === 'object' ? (options.autoResume || null) : null;
     await saveSession(session);
+    const participants = getSessionParticipants(session);
+    const pausedParticipant = session.pausedAgentId
+        ? participants.find((p) => p?.agentId === session.pausedAgentId) || null
+        : null;
     sendMessageToPopup({
         type: 'UI_SESSION_PAUSED',
         chatId: session.chatId || null,
         sessionId: session.sessionId,
         provider: provider || null,
+        agentId: session.pausedAgentId,
+        profileId: session.pausedProfileId,
+        agentLabel: pausedParticipant ? formatParticipantLabelForPrompt(participants, pausedParticipant) : null,
         reason: session.pausedReason
     });
     if (autoFocusState.sessionId === session.sessionId) {
@@ -3285,19 +3816,25 @@ async function resumeDebateSession(sessionId, chatId = null) {
     }
 
     if (session.mode === 'parallel') {
-        const providers = Array.isArray(session.waitingFor) && session.waitingFor.length > 0
-            ? session.waitingFor.map(normalizeProviderKey).filter(Boolean)
-            : getParallelProviders(session);
-        for (const provider of providers) {
-            const validation = await resolveSessionTab(session, provider, { requirePing: true });
+        const participants = getSessionParticipants(session);
+        const allAgentIds = participants.map((p) => p.agentId).filter(Boolean);
+        const agentIds = Array.isArray(session.waitingFor) && session.waitingFor.length > 0
+            ? session.waitingFor.map((id) => String(id || '').trim()).filter(Boolean)
+            : allAgentIds;
+        for (const agentId of agentIds) {
+            const participant = participants.find((p) => p?.agentId === agentId) || null;
+            const provider = normalizeProviderKey(participant?.provider);
+            const validation = await resolveSessionTab(session, participant || agentId, { requirePing: true });
             if (!validation.ok) {
-                await pauseDebateSession(session.sessionId, validation.error, provider);
+                await pauseDebateSession(session.sessionId, validation.error, provider, { agentId, profileId: participant?.profileId || null });
                 return { ok: false, error: validation.error };
             }
         }
         session.isPaused = false;
         session.pausedReason = null;
         session.pausedProvider = null;
+        session.pausedAgentId = null;
+        session.pausedProfileId = null;
         session.pausedAt = 0;
         session.autoResume = null;
         await saveSession(session);
@@ -3306,19 +3843,29 @@ async function resumeDebateSession(sessionId, chatId = null) {
             chatId: session.chatId || null,
             sessionId: session.sessionId
         });
-        await sendParallelTurn(session, { providers });
+        await sendParallelTurn(session, { providers: agentIds });
         return { ok: true };
     }
 
-    const expectedLLM = getTurnLLM(session, session.turnIndex);
-    const validation = await resolveSessionTab(session, expectedLLM, { requirePing: true });
+    const expectedParticipant = getTurnParticipant(session, session.turnIndex);
+    if (!expectedParticipant) {
+        await pauseDebateSession(session.sessionId, 'No agent available for this turn.', null);
+        return { ok: false, error: 'No agent available for this turn.' };
+    }
+    const expectedProvider = normalizeProviderKey(expectedParticipant.provider);
+    const validation = await resolveSessionTab(session, expectedParticipant, { requirePing: true });
     if (!validation.ok) {
-        await pauseDebateSession(session.sessionId, validation.error, expectedLLM);
+        await pauseDebateSession(session.sessionId, validation.error, expectedProvider, {
+            agentId: expectedParticipant.agentId,
+            profileId: expectedParticipant.profileId || null
+        });
         return { ok: false, error: validation.error };
     }
     session.isPaused = false;
     session.pausedReason = null;
     session.pausedProvider = null;
+    session.pausedAgentId = null;
+    session.pausedProfileId = null;
     session.pausedAt = 0;
     session.autoResume = null;
     await saveSession(session);
@@ -3361,7 +3908,9 @@ async function updateProfilesForTab(tab) {
             await notifyTabProfiles(state);
             for (const profile of affected) {
                 if (profile.inUseBySessionId && profile.status !== 'ok') {
-                    await pauseDebateSession(profile.inUseBySessionId, `Profile "${profile.label}" is ${profile.status}.`, profile.provider);
+                    await pauseDebateSession(profile.inUseBySessionId, `Profile "${profile.label}" is ${profile.status}.`, profile.provider, {
+                        profileId: profile.profileId
+                    });
                 }
             }
         }
@@ -3391,7 +3940,9 @@ async function handleTabRemoved(tabId) {
             await notifyTabProfiles(state);
             for (const profile of affected) {
                 if (profile.inUseBySessionId) {
-                    await pauseDebateSession(profile.inUseBySessionId, `Profile "${profile.label}" went offline.`, profile.provider);
+                    await pauseDebateSession(profile.inUseBySessionId, `Profile "${profile.label}" went offline.`, profile.provider, {
+                        profileId: profile.profileId
+                    });
                 }
             }
         }
@@ -3459,7 +4010,7 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
     });
 });
 
-async function prefetchSessionAttachments(session, excludeProvider) {
+async function prefetchSessionAttachments(session, excludeAgentId) {
     try {
         const sessionId = session?.sessionId;
         if (!sessionId) return;
@@ -3470,16 +4021,20 @@ async function prefetchSessionAttachments(session, excludeProvider) {
         const attachments = record.attachments;
         if (!Array.isArray(attachments) || attachments.length === 0) return;
 
-        const excludeKey = normalizeProviderKey(excludeProvider);
-        const providers = getSessionProviders(session).filter((provider) => provider && provider !== excludeKey);
+        const excludeKey = typeof excludeAgentId === 'string' ? excludeAgentId.trim() : '';
+        const participants = getSessionParticipants(session);
 
-        for (const provider of providers) {
+        for (const participant of participants) {
             if (!hasSessionAttachments(sessionId)) return;
+            if (!participant?.agentId) continue;
+            if (excludeKey && participant.agentId === excludeKey) continue;
+            const provider = normalizeProviderKey(participant.provider);
+            if (!provider || !isSupportedProviderKey(provider)) continue;
             if (getProviderAttachmentMode(provider) !== 'auto') continue;
-            if (record.sentTo?.[provider]) continue;
-            if (record.preparedTo?.[provider]) continue;
+            if (record.sentTo?.[participant.agentId]) continue;
+            if (record.preparedTo?.[participant.agentId]) continue;
 
-            const resolution = await resolveSessionTab(session, provider);
+            const resolution = await resolveSessionTab(session, participant);
             if (!resolution.ok) {
                 console.warn(`[MLC Attachments] Prefetch skipped for ${provider}: ${resolution.error || 'Tab validation failed.'}`);
                 continue;
@@ -3487,7 +4042,7 @@ async function prefetchSessionAttachments(session, excludeProvider) {
 
             try {
                 await injectAndPrepareAttachments(resolution.tabId, provider, attachments);
-                markSessionAttachmentsPrepared(session, provider);
+                markSessionAttachmentsPrepared(session, participant.agentId);
             } catch (error) {
                 console.warn(`[MLC Attachments] Prefetch failed for ${provider}:`, error?.message || error);
             }
@@ -3510,8 +4065,8 @@ function getParallelProviders(session) {
     return providers;
 }
 
-function buildParallelPromptId(sessionId, provider) {
-    return `${sessionId}:parallel:${normalizeProviderKey(provider)}`;
+function buildParallelPromptId(sessionId, agentId) {
+    return `${sessionId}:parallel:${String(agentId || '').trim()}`;
 }
 
 function formatProvidersForUi(providers) {
@@ -3524,29 +4079,39 @@ async function sendParallelTurn(session, { providers: providersOverride } = {}) 
     const sessionId = session.sessionId;
     if (!sessionId) return;
 
-    const allProviders = getParallelProviders(session);
-    const waitingProviders = Array.isArray(session.waitingFor) ? session.waitingFor.map(normalizeProviderKey).filter(Boolean) : [];
-    const base = Array.isArray(providersOverride) ? providersOverride : (waitingProviders.length > 0 ? waitingProviders : allProviders);
-    const providers = base.map(normalizeProviderKey).filter((provider) => provider && allProviders.includes(provider));
-    if (providers.length === 0) return;
+    const participants = getSessionParticipants(session);
+    const allAgentIds = participants.map((p) => p.agentId).filter(Boolean);
+    const waitingAgentIds = Array.isArray(session.waitingFor)
+        ? session.waitingFor.map((id) => String(id || '').trim()).filter(Boolean)
+        : [];
+    const base = Array.isArray(providersOverride)
+        ? providersOverride.map((id) => String(id || '').trim()).filter(Boolean)
+        : (waitingAgentIds.length > 0 ? waitingAgentIds : allAgentIds);
+    const agentIds = base.filter((id) => allAgentIds.includes(id));
+    if (agentIds.length === 0) return;
 
     const resolvedTabs = {};
-    for (const provider of providers) {
-        const resolution = await resolveSessionTab(session, provider);
+    for (const agentId of agentIds) {
+        const participant = participants.find((p) => p?.agentId === agentId) || null;
+        const provider = normalizeProviderKey(participant?.provider);
+        const resolution = await resolveSessionTab(session, participant || agentId);
         if (!resolution.ok) {
-            await pauseDebateSession(session.sessionId, resolution.error || 'Tab validation failed.', provider);
+            await pauseDebateSession(session.sessionId, resolution.error || 'Tab validation failed.', provider || null, {
+                agentId,
+                profileId: participant?.profileId || null
+            });
             return;
         }
-        resolvedTabs[provider] = resolution.tabId;
+        resolvedTabs[agentId] = resolution.tabId;
     }
 
     const promptText = await buildSessionPrompt(session, 1);
     const promptIds = {};
-    providers.forEach((provider) => {
-        promptIds[provider] = buildParallelPromptId(sessionId, provider);
+    agentIds.forEach((agentId) => {
+        promptIds[agentId] = buildParallelPromptId(sessionId, agentId);
     });
 
-    const nextWaiting = waitingProviders.length > 0 ? waitingProviders : allProviders;
+    const nextWaiting = waitingAgentIds.length > 0 ? waitingAgentIds : allAgentIds;
     session.waitingFor = nextWaiting;
     session.parallelPromptIds = { ...(session.parallelPromptIds || {}), ...promptIds };
     session.lastPromptTimestamp = Date.now();
@@ -3556,37 +4121,44 @@ async function sendParallelTurn(session, { providers: providersOverride } = {}) 
         type: 'UI_SESSION_PROGRESS',
         chatId: session.chatId || null,
         sessionId,
-        waitingFor: nextWaiting,
-        waitingForLabel: formatProvidersForUi(nextWaiting),
+        waitingFor: participants.map((p) => p.provider),
+        waitingForAgentIds: nextWaiting,
+        waitingForLabel: nextWaiting.map((agentId) => {
+            const p = participants.find((item) => item?.agentId === agentId);
+            return p ? formatParticipantLabelForPrompt(participants, p) : formatLLMLabel(p?.provider);
+        }).filter(Boolean).join(' + '),
         roundIndex: 1,
         totalRounds: 1
     });
 
-    await startParallelAutoFocus(session, providers, resolvedTabs);
+    await startParallelAutoFocus(session, agentIds, resolvedTabs);
 
     const sessionHasAttachments = hasSessionAttachments(sessionId);
 
-    const results = await Promise.allSettled(providers.map(async (provider) => {
-        const tabId = resolvedTabs[provider];
-        const promptId = promptIds[provider];
+    const results = await Promise.allSettled(agentIds.map(async (agentId) => {
+        const participant = participants.find((p) => p?.agentId === agentId) || null;
+        const provider = normalizeProviderKey(participant?.provider);
+        const tabId = resolvedTabs[agentId];
+        const promptId = promptIds[agentId];
 
         const attachmentMode = sessionHasAttachments ? getProviderAttachmentMode(provider) : 'auto';
         const shouldSkipAttachments = sessionHasAttachments && attachmentMode !== 'auto';
         const attachmentsToSend = shouldSkipAttachments || !sessionHasAttachments
             ? null
-            : getPendingSessionAttachments(sessionId, provider);
+            : getPendingSessionAttachments(sessionId, agentId);
 
         try {
             await injectAndExecute(tabId, provider, promptText, {
                 sessionId,
                 promptId,
                 turnIndex: 1,
+                agentId,
                 attachments: attachmentsToSend || undefined
             });
             if (sessionHasAttachments) {
-                markSessionAttachmentsSent(session, provider);
+                markSessionAttachmentsSent(session, agentId);
             }
-            return { ok: true, provider };
+            return { ok: true, provider, agentId };
         } catch (error) {
             const code = error?.code;
             const isAttachmentFailure = code === 'ATTACHMENTS_FAILED'
@@ -3595,19 +4167,20 @@ async function sendParallelTurn(session, { providers: providersOverride } = {}) 
                 try {
                     notifyAttachmentFallback(session, provider);
                     if (sessionHasAttachments) {
-                        markSessionAttachmentsSent(session, provider);
+                        markSessionAttachmentsSent(session, agentId);
                     }
                     await injectAndExecute(tabId, provider, promptText, {
                         sessionId,
                         promptId,
-                        turnIndex: 1
+                        turnIndex: 1,
+                        agentId
                     });
-                    return { ok: true, provider, retriedWithoutAttachments: true };
+                    return { ok: true, provider, agentId, retriedWithoutAttachments: true };
                 } catch (retryError) {
-                    throw { provider, error: retryError };
+                    throw { provider, agentId, error: retryError };
                 }
             }
-            throw { provider, error };
+            throw { provider, agentId, error };
         }
     }));
 
@@ -3616,6 +4189,10 @@ async function sendParallelTurn(session, { providers: providersOverride } = {}) 
         const failure = firstFailure.reason;
         const provider = normalizeProviderKey(failure?.provider);
         const error = failure?.error || failure;
+        const agentId = typeof failure?.agentId === 'string' && failure.agentId.trim()
+            ? failure.agentId.trim()
+            : null;
+        const participant = agentId ? participants.find((p) => p?.agentId === agentId) || null : null;
         const autoResume = provider === 'claude' && error?.code === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED'
             ? { trigger: 'chrome_focus', provider: 'claude', createdAt: Date.now() }
             : null;
@@ -3623,7 +4200,9 @@ async function sendParallelTurn(session, { providers: providersOverride } = {}) 
             session.sessionId,
             error?.message || 'Failed to send prompt.',
             provider || null,
-            autoResume ? { autoResume } : undefined
+            autoResume
+                ? { autoResume, agentId: agentId || undefined, profileId: participant?.profileId || null }
+                : { agentId: agentId || undefined, profileId: participant?.profileId || null }
         );
     }
 }
@@ -3631,17 +4210,28 @@ async function sendParallelTurn(session, { providers: providersOverride } = {}) 
 async function sendDebateTurn(session) {
     if (session.isPaused) return;
     const turnIndex = session.turnIndex;
-    const expectedLLM = getTurnLLM(session, turnIndex);
-    const resolution = await resolveSessionTab(session, expectedLLM);
+    const expectedParticipant = getTurnParticipant(session, turnIndex);
+    if (!expectedParticipant) {
+        await pauseDebateSession(session.sessionId, 'No agent available for this turn.', null);
+        return;
+    }
+    const expectedProvider = normalizeProviderKey(expectedParticipant.provider);
+    const expectedAgentId = expectedParticipant.agentId;
+    const resolution = await resolveSessionTab(session, expectedParticipant);
     if (!resolution.ok) {
-        await pauseDebateSession(session.sessionId, resolution.error || 'Tab validation failed.', expectedLLM);
+        await pauseDebateSession(
+            session.sessionId,
+            resolution.error || 'Tab validation failed.',
+            expectedProvider,
+            { agentId: expectedAgentId, profileId: expectedParticipant.profileId || null }
+        );
         return;
     }
 
     const promptText = await buildSessionPrompt(session, turnIndex);
     const promptId = `${session.sessionId}:turn:${turnIndex}`;
 
-    session.waitingFor = expectedLLM;
+    session.waitingFor = expectedAgentId;
     session.lastPromptId = promptId;
     session.lastPromptTimestamp = Date.now();
 
@@ -3651,30 +4241,34 @@ async function sendDebateTurn(session) {
         type: 'UI_SESSION_PROGRESS',
         chatId: session.chatId || null,
         sessionId: session.sessionId,
-        waitingFor: expectedLLM,
+        waitingFor: expectedProvider,
+        waitingForAgentId: expectedAgentId,
+        waitingForLabel: formatParticipantLabelForPrompt(getSessionParticipants(session), expectedParticipant)
+            || formatLLMLabel(expectedProvider),
         roundIndex: getRoundIndex(turnIndex, session),
         totalRounds: session.rounds
     });
 
-    await ensureDebateAutoFocus(session, expectedLLM, resolution.tabId);
+    await ensureDebateAutoFocus(session, expectedProvider, resolution.tabId);
 
     const sessionHasAttachments = hasSessionAttachments(session.sessionId);
-    const attachmentMode = sessionHasAttachments ? getProviderAttachmentMode(expectedLLM) : 'auto';
+    const attachmentMode = sessionHasAttachments ? getProviderAttachmentMode(expectedProvider) : 'auto';
     const shouldSkipAttachments = sessionHasAttachments && attachmentMode !== 'auto';
     const attachmentsToSend = shouldSkipAttachments || !sessionHasAttachments
         ? null
-        : getPendingSessionAttachments(session.sessionId, expectedLLM);
+        : getPendingSessionAttachments(session.sessionId, expectedAgentId);
 
     try {
-        await injectAndExecute(resolution.tabId, expectedLLM, promptText, {
+        await injectAndExecute(resolution.tabId, expectedProvider, promptText, {
             sessionId: session.sessionId,
             promptId: promptId,
             turnIndex: turnIndex,
+            agentId: expectedAgentId,
             attachments: attachmentsToSend || undefined
         });
         if (sessionHasAttachments) {
-            markSessionAttachmentsSent(session, expectedLLM);
-            await prefetchSessionAttachments(session, expectedLLM);
+            markSessionAttachmentsSent(session, expectedAgentId);
+            await prefetchSessionAttachments(session, expectedAgentId);
         }
 
         if (session.mode === 'direct' && session.chatId && Number.isFinite(session.userMessageSequence)) {
@@ -3683,9 +4277,9 @@ async function sendDebateTurn(session) {
                 await bumpProviderDeliveredUpTo(
                     store,
                     session.chatId,
-                    expectedLLM,
+                    expectedProvider,
                     session.userMessageSequence,
-                    getProviderContextKey(session, expectedLLM)
+                    getProviderContextKey(session, expectedProvider)
                 );
             } catch (error) {
                 // ignore delivery tracking failures
@@ -3697,40 +4291,45 @@ async function sendDebateTurn(session) {
         if (attachmentsToSend && attachmentsToSend.length > 0 && isAttachmentFailure) {
             // Attach failed (DOM drift / provider change). Retry immediately without attachments so the run continues.
             try {
-                notifyAttachmentFallback(session, expectedLLM);
-                markSessionAttachmentsSent(session, expectedLLM);
-                await injectAndExecute(resolution.tabId, expectedLLM, promptText, {
+                notifyAttachmentFallback(session, expectedProvider);
+                markSessionAttachmentsSent(session, expectedAgentId);
+                await injectAndExecute(resolution.tabId, expectedProvider, promptText, {
                     sessionId: session.sessionId,
                     promptId: promptId,
-                    turnIndex: turnIndex
+                    turnIndex: turnIndex,
+                    agentId: expectedAgentId
                 });
                 if (sessionHasAttachments) {
-                    await prefetchSessionAttachments(session, expectedLLM);
+                    await prefetchSessionAttachments(session, expectedAgentId);
                 }
                 return;
             } catch (retryError) {
                 const rootError = retryError || error;
-                const autoResume = expectedLLM === 'claude' && rootError?.code === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED'
+                const autoResume = expectedProvider === 'claude' && rootError?.code === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED'
                     ? { trigger: 'chrome_focus', provider: 'claude', createdAt: Date.now() }
                     : null;
                 await pauseDebateSession(
                     session.sessionId,
                     retryError?.message || error?.message || 'Failed to send prompt.',
-                    expectedLLM,
-                    autoResume ? { autoResume } : undefined
+                    expectedProvider,
+                    autoResume
+                        ? { autoResume, agentId: expectedAgentId, profileId: expectedParticipant.profileId || null }
+                        : { agentId: expectedAgentId, profileId: expectedParticipant.profileId || null }
                 );
                 return;
             }
         }
 
-        const autoResume = expectedLLM === 'claude' && error?.code === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED'
+        const autoResume = expectedProvider === 'claude' && error?.code === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED'
             ? { trigger: 'chrome_focus', provider: 'claude', createdAt: Date.now() }
             : null;
         await pauseDebateSession(
             session.sessionId,
             error?.message || 'Failed to send prompt.',
-            expectedLLM,
-            autoResume ? { autoResume } : undefined
+            expectedProvider,
+            autoResume
+                ? { autoResume, agentId: expectedAgentId, profileId: expectedParticipant.profileId || null }
+                : { agentId: expectedAgentId, profileId: expectedParticipant.profileId || null }
         );
     }
 }
@@ -3739,25 +4338,34 @@ async function handleParallelResponse(session, message) {
     const sessionId = session?.sessionId;
     if (!sessionId) return;
 
-    const provider = normalizeProviderKey(message.sourceLLM || message.provider || '');
-    if (!isSupportedProviderKey(provider)) return;
+    const agentId = typeof message.agentId === 'string' && message.agentId.trim()
+        ? message.agentId.trim()
+        : (typeof message.sourceAgentId === 'string' && message.sourceAgentId.trim()
+            ? message.sourceAgentId.trim()
+            : '');
+    if (!agentId) return;
 
     const waitingFor = Array.isArray(session.waitingFor)
-        ? session.waitingFor.map(normalizeProviderKey).filter(Boolean)
+        ? session.waitingFor.map((id) => String(id || '').trim()).filter(Boolean)
         : [];
-    if (!waitingFor.includes(provider)) {
+    if (!waitingFor.includes(agentId)) {
         return;
     }
 
-    const expectedPromptId = session.parallelPromptIds?.[provider] || buildParallelPromptId(sessionId, provider);
+    const expectedPromptId = session.parallelPromptIds?.[agentId] || buildParallelPromptId(sessionId, agentId);
     if (expectedPromptId && message.promptId && expectedPromptId !== message.promptId) {
         console.log('[MLC Parallel] Ignoring response with mismatched promptId.', {
             expectedPromptId,
             messagePromptId: message.promptId,
-            provider
+            agentId
         });
         return;
     }
+
+    const participants = getSessionParticipants(session);
+    const participant = participants.find((p) => p?.agentId === agentId) || null;
+    const provider = normalizeProviderKey(participant?.provider || message.sourceLLM || message.provider || '');
+    if (!provider || !isSupportedProviderKey(provider)) return;
 
     const content = (message.content || '').trim();
     if (!content) return;
@@ -3771,6 +4379,8 @@ async function handleParallelResponse(session, message) {
     const timestamp = Date.now();
     const entry = {
         role: provider,
+        agentId,
+        agentLabel: participant ? formatParticipantLabelForPrompt(participants, participant) : undefined,
         content,
         timestamp,
         roundIndex: 1
@@ -3778,7 +4388,7 @@ async function handleParallelResponse(session, message) {
     if (contentHtml) entry.contentHtml = contentHtml;
     session.messages.push(entry);
 
-    session.waitingFor = waitingFor.filter((item) => item !== provider);
+    session.waitingFor = waitingFor.filter((item) => item !== agentId);
 
     await saveSession(session);
 
@@ -3787,6 +4397,8 @@ async function handleParallelResponse(session, message) {
         chatId: session.chatId || null,
         sessionId: sessionId,
         role: provider,
+        agentId,
+        agentLabel: participant ? formatParticipantLabelForPrompt(participants, participant) : undefined,
         content: content,
         contentHtml: contentHtml || undefined,
         timestamp: timestamp,
@@ -3796,6 +4408,8 @@ async function handleParallelResponse(session, message) {
     if (session.chatId) {
         await appendChatMessage(session.chatId, {
             role: provider,
+            agentId,
+            agentLabel: participant ? formatParticipantLabelForPrompt(participants, participant) : undefined,
             content,
             contentHtml: contentHtml || undefined,
             timestamp,
@@ -3813,8 +4427,14 @@ async function handleParallelResponse(session, message) {
         type: 'UI_SESSION_PROGRESS',
         chatId: session.chatId || null,
         sessionId,
-        waitingFor: session.waitingFor,
-        waitingForLabel: formatProvidersForUi(session.waitingFor)
+        waitingFor: participants.map((p) => p.provider),
+        waitingForAgentIds: session.waitingFor,
+        waitingForLabel: Array.isArray(session.waitingFor)
+            ? session.waitingFor.map((remainingId) => {
+                const p = participants.find((item) => item?.agentId === remainingId);
+                return p ? formatParticipantLabelForPrompt(participants, p) : formatLLMLabel(p?.provider);
+            }).filter(Boolean).join(' + ')
+            : ''
     });
 }
 
@@ -3837,9 +4457,18 @@ async function handleDebateResponse(message) {
         return;
     }
 
-    const expectedLLM = session.waitingFor;
-    if (message.sourceLLM && expectedLLM && message.sourceLLM !== expectedLLM) {
-        console.log('[MLC Debate] Ignoring response from unexpected LLM:', message.sourceLLM);
+    const expectedAgentId = typeof session.waitingFor === 'string' ? session.waitingFor : null;
+    const messageAgentId = typeof message.agentId === 'string' && message.agentId.trim()
+        ? message.agentId.trim()
+        : (typeof message.sourceAgentId === 'string' && message.sourceAgentId.trim()
+            ? message.sourceAgentId.trim()
+            : null);
+    if (expectedAgentId && !messageAgentId) {
+        console.log('[MLC Debate] Ignoring response without agentId for an agent-based session.');
+        return;
+    }
+    if (expectedAgentId && messageAgentId && messageAgentId !== expectedAgentId) {
+        console.log('[MLC Debate] Ignoring response from unexpected agent:', messageAgentId);
         return;
     }
 
@@ -3873,8 +4502,16 @@ async function handleDebateResponse(message) {
     const roundIndex = getRoundIndex(turnIndex, session);
     const timestamp = Date.now();
 
+    const participants = getSessionParticipants(session);
+    const expectedParticipant = expectedAgentId
+        ? participants.find((p) => p?.agentId === expectedAgentId) || null
+        : getTurnParticipant(session, turnIndex);
+    const expectedProvider = normalizeProviderKey(expectedParticipant?.provider || message.sourceLLM || '');
+
     const entry = {
-        role: expectedLLM || message.sourceLLM || 'assistant',
+        role: expectedProvider || message.sourceLLM || 'assistant',
+        agentId: expectedAgentId || messageAgentId || undefined,
+        agentLabel: expectedParticipant ? formatParticipantLabelForPrompt(participants, expectedParticipant) : undefined,
         content: content,
         timestamp: timestamp,
         turnIndex: turnIndex,
@@ -3893,7 +4530,9 @@ async function handleDebateResponse(message) {
         type: 'UI_MESSAGE_ADD',
         chatId: session.chatId || null,
         sessionId: session.sessionId,
-        role: expectedLLM || message.sourceLLM,
+        role: expectedProvider || message.sourceLLM,
+        agentId: expectedAgentId || messageAgentId || undefined,
+        agentLabel: expectedParticipant ? formatParticipantLabelForPrompt(participants, expectedParticipant) : undefined,
         content: content,
         contentHtml: contentHtml || undefined,
         timestamp: timestamp,
@@ -3903,7 +4542,9 @@ async function handleDebateResponse(message) {
 
     if (session.chatId) {
         const persisted = await appendChatMessage(session.chatId, {
-            role: expectedLLM || message.sourceLLM,
+            role: expectedProvider || message.sourceLLM,
+            agentId: expectedAgentId || messageAgentId || undefined,
+            agentLabel: expectedParticipant ? formatParticipantLabelForPrompt(participants, expectedParticipant) : undefined,
             content,
             contentHtml: contentHtml || undefined,
             timestamp,
@@ -3912,7 +4553,7 @@ async function handleDebateResponse(message) {
             sessionId: session.sessionId
         });
         if (persisted?.ok && Number.isFinite(persisted?.message?.sequence)) {
-            const provider = expectedLLM || message.sourceLLM;
+            const provider = expectedProvider || message.sourceLLM;
             if (isSupportedProviderKey(provider)) {
                 try {
                     const store = await requireHistoryUnlocked();
@@ -5214,8 +5855,8 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                 if (attachments.length > 0) {
                     console.log(`[MLC Background] Preparing ${attachments.length} attachment(s) for Claude before sending...`);
                     await injectAndPrepareAttachments(tabId, llmType, attachments);
-                    if (context.sessionId) {
-                        markSessionAttachmentsPrepared({ sessionId: context.sessionId }, llmType);
+                    if (context.sessionId && context.agentId) {
+                        markSessionAttachmentsPrepared({ sessionId: context.sessionId }, context.agentId);
                     }
                 }
 
@@ -5228,15 +5869,16 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                     const preview = typeof prompt === 'string' ? prompt.trim().slice(0, 800) : '';
                     const ack = result?.meta?.ack || null;
                     try {
-                        const payload = {
-                            type: 'MLC_PROMPT_SENT',
-                            sessionId: context.sessionId || null,
-                            promptId: promptId,
-                            llmType: llmType,
-                            turnIndex: context.turnIndex || null,
-                            timestamp: Date.now(),
-                            promptPreview: preview
-                        };
+	                        const payload = {
+	                            type: 'MLC_PROMPT_SENT',
+	                            sessionId: context.sessionId || null,
+	                            promptId: promptId,
+	                            agentId: context.agentId || null,
+	                            llmType: llmType,
+	                            turnIndex: context.turnIndex || null,
+	                            timestamp: Date.now(),
+	                            promptPreview: preview
+	                        };
                         // Claude often navigates `/new` -> `/chat/...` on send; retry until the content script is ready.
                         if (ack === 'navigation') {
                             await new Promise((resolve) => setTimeout(resolve, 600));
@@ -5313,15 +5955,16 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                 const promptId = context.promptId || generatePromptId();
                 try {
                     const preview = typeof prompt === 'string' ? prompt.trim().slice(0, 800) : '';
-                    chrome.tabs.sendMessage(tabId, {
-                        type: 'MLC_PROMPT_SENT',
-                        sessionId: context.sessionId || null,
-                        promptId: promptId,
-                        llmType: llmType,
-                        turnIndex: context.turnIndex || null,
-                        timestamp: Date.now(),
-                        promptPreview: preview
-                    });
+	                    chrome.tabs.sendMessage(tabId, {
+	                        type: 'MLC_PROMPT_SENT',
+	                        sessionId: context.sessionId || null,
+	                        promptId: promptId,
+	                        agentId: context.agentId || null,
+	                        llmType: llmType,
+	                        turnIndex: context.turnIndex || null,
+	                        timestamp: Date.now(),
+	                        promptPreview: preview
+	                    });
                 } catch (error) {
                     console.warn('[MLC Background] Failed to notify content script about prompt:', error);
                 }
@@ -6145,13 +6788,14 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
 // ... (rest of background.js like checkConnectionStatus) ...
 
 
-async function checkConnectionStatus() {
+async function checkConnectionStatus({ profileIds = [] } = {}) {
     const status = {};
+    const profileStatus = {};
     const providers = getSupportedProviderKeys();
     if (providers.length === 0) {
         status.chatgpt = false;
         status.gemini = false;
-        return status;
+        return { status, profileStatus };
     }
     providers.forEach((provider) => {
         status[provider] = false;
@@ -6159,9 +6803,17 @@ async function checkConnectionStatus() {
     
     console.log('[MLC Background] Starting connection status check...');
     
+    let profilesState = null;
     try {
-        const profilesState = await loadTabProfiles();
-        for (const provider of providers) {
+        profilesState = await loadTabProfiles();
+    } catch (error) {
+        console.error('[MLC Background] Error loading tab profiles for connection check:', error);
+        console.log('[MLC Background] Final connection status:', status);
+        return { status, profileStatus };
+    }
+
+    for (const provider of providers) {
+        try {
             const defaultProfileId = profilesState.defaults?.[provider];
             const profile = defaultProfileId ? findProfileById(profilesState, defaultProfileId) : null;
 
@@ -6180,22 +6832,44 @@ async function checkConnectionStatus() {
                 continue;
             }
 
-            try {
-                console.log(`[MLC Background] Pinging ${formatLLMLabel(provider)} content script...`);
-                const response = await chrome.tabs.sendMessage(tab.id, { type: 'PING' });
-                console.log(`[MLC Background] ${formatLLMLabel(provider)} ping response:`, response);
-                status[provider] = true;
-                console.log(`[MLC Background] ${formatLLMLabel(provider)} tab responsive:`, tab.id);
-            } catch (error) {
-                console.log(`[MLC Background] ${formatLLMLabel(provider)} tab found but content script not responsive:`, error.message);
-                status[provider] = false;
-            }
+            const pingOk = await pingTab(tab.id, provider);
+            status[provider] = pingOk;
+            console.log(`[MLC Background] ${formatLLMLabel(provider)} tab responsive:`, pingOk ? tab.id : 'No');
+        } catch (error) {
+            console.warn(`[MLC Background] Error checking ${formatLLMLabel(provider)} connection:`, error?.message || error);
+            status[provider] = false;
         }
+    }
 
-    } catch (error) {
-        console.error('[MLC Background] Error checking connection status:', error);
+    const requestedProfileIds = Array.isArray(profileIds)
+        ? profileIds.map((id) => String(id || '').trim()).filter(Boolean)
+        : [];
+    if (requestedProfileIds.length > 0) {
+        const unique = [...new Set(requestedProfileIds)];
+        await Promise.all(unique.map(async (profileId) => {
+            try {
+                const profile = findProfileById(profilesState, profileId);
+                if (!profile || !Number.isFinite(profile.tabId)) {
+                    profileStatus[profileId] = false;
+                    return;
+                }
+                const provider = normalizeProviderKey(profile.provider);
+                if (!provider || !isSupportedProviderKey(provider)) {
+                    profileStatus[profileId] = false;
+                    return;
+                }
+                const validation = await validateTabForProvider(profile.tabId, provider);
+                if (!validation.ok) {
+                    profileStatus[profileId] = false;
+                    return;
+                }
+                profileStatus[profileId] = await pingTab(profile.tabId, provider);
+            } catch (error) {
+                profileStatus[profileId] = false;
+            }
+        }));
     }
     
     console.log('[MLC Background] Final connection status:', status);
-    return status;
+    return { status, profileStatus };
 }

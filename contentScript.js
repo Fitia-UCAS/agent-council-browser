@@ -28,17 +28,18 @@
 	        console.log('[MLC Capture Debug]', ...args);
 	    }
 
-	    const captureState = {
-	        active: false,
-	        promptId: null,
-            promptPreview: '',
-	        sessionId: null,
-	        turnIndex: null,
-	        startedAt: 0,
-	        lastText: '',
-	        baselineText: '',
-	        baselineAssistantCount: null,
-	        hasNewText: false,
+		    const captureState = {
+		        active: false,
+		        promptId: null,
+	            promptPreview: '',
+		        sessionId: null,
+		        turnIndex: null,
+		        agentId: null,
+		        startedAt: 0,
+		        lastText: '',
+		        baselineText: '',
+		        baselineAssistantCount: null,
+		        hasNewText: false,
             sawGenerating: false,
 	        lastTextChangeAt: 0,
 	        lastEmitAt: 0,
@@ -363,18 +364,19 @@
         }
     }, 2500); // Slightly increased delay
 
-	    function armCapture(message) {
-	        if (!message || !message.promptId) return;
-	        captureState.active = true;
-	        captureState.promptId = message.promptId;
-            captureState.promptPreview = typeof message.promptPreview === 'string' ? message.promptPreview : '';
-	        captureState.sessionId = message.sessionId || null;
-	        captureState.turnIndex = message.turnIndex || null;
-	        captureState.startedAt = message.timestamp || Date.now();
-	        captureState.lastText = '';
-	        captureState.baselineAssistantCount = null;
-	        const baselineExtraction = extractLatestResponse({ withMeta: true });
-	        captureState.baselineText = baselineExtraction.text || '';
+		    function armCapture(message) {
+		        if (!message || !message.promptId) return;
+		        captureState.active = true;
+		        captureState.promptId = message.promptId;
+	            captureState.promptPreview = typeof message.promptPreview === 'string' ? message.promptPreview : '';
+		        captureState.sessionId = message.sessionId || null;
+		        captureState.turnIndex = message.turnIndex || null;
+		        captureState.agentId = typeof message.agentId === 'string' && message.agentId.trim() ? message.agentId.trim() : null;
+		        captureState.startedAt = message.timestamp || Date.now();
+		        captureState.lastText = '';
+		        captureState.baselineAssistantCount = null;
+		        const baselineExtraction = extractLatestResponse({ withMeta: true });
+		        captureState.baselineText = baselineExtraction.text || '';
 	        if (isChatGPT) {
 	            const baselineIndex = Number.isFinite(baselineExtraction.meta?.bestAssistantIndex)
 	                ? baselineExtraction.meta.bestAssistantIndex
@@ -1850,16 +1852,17 @@
             ? (extraction.html || extraction.contentHtml || '')
             : '';
 
-        const responsePayload = {
-            content: text,
-            contentHtml,
-            promptId: captureState.promptId,
-            sessionId: captureState.sessionId,
-            sourceLLM: currentLLM,
-            turnIndex: captureState.turnIndex,
-            timestamp: Date.now(),
-            responseDelay: captureState.startedAt ? (Date.now() - captureState.startedAt) : null
-        };
+	        const responsePayload = {
+	            content: text,
+	            contentHtml,
+	            promptId: captureState.promptId,
+	            sessionId: captureState.sessionId,
+	            agentId: captureState.agentId,
+	            sourceLLM: currentLLM,
+	            turnIndex: captureState.turnIndex,
+	            timestamp: Date.now(),
+	            responseDelay: captureState.startedAt ? (Date.now() - captureState.startedAt) : null
+	        };
 
         const messageType = captureState.sessionId
             ? 'MLC_RESPONSE_CAPTURED'

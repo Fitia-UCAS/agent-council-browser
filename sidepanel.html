@@ -42,7 +42,7 @@
                     <div class="empty-title">New chat</div>
                     <div class="empty-subtitle">Choose where to send your message. We’ll connect only when needed.</div>
                     <div class="empty-actions">
-                        <button class="primary-button" id="empty-open-route" type="button">Choose providers</button>
+                        <button class="primary-button" id="empty-open-route" type="button">Choose agents</button>
                     </div>
                 </div>
             </main>
@@ -65,7 +65,7 @@
 
                         <div class="composer-toolbar-spacer"></div>
                         <button class="composer-route-button route-pill" id="route-button" type="button" aria-haspopup="dialog" aria-expanded="false">
-                            <span class="route-pill-text" id="route-pill-text">Select providers…</span>
+                            <span class="route-pill-text" id="route-pill-text">Select agents…</span>
                             <span class="material-symbols-rounded">expand_more</span>
                         </button>
                         <button class="primary-button" id="send-button" type="button" disabled>Send</button>
@@ -93,9 +93,9 @@
                             </div>
 
                             <div class="route-section">
-                                <div class="route-section-title">Selected</div>
+                                <div class="route-section-title">Agents</div>
                                 <div class="route-selected" id="route-selected"></div>
-                                <div class="route-help" id="route-selected-help">Click providers below or drag to reorder.</div>
+                                <div class="route-help" id="route-selected-help">Add agents below and drag to reorder. For duplicate providers, use New tab to create extra connections.</div>
                             </div>
 
                             <div class="route-section" id="route-mode-section" hidden>
@@ -120,7 +120,7 @@
                             </div>
 
                             <div class="route-footer">
-                                <button class="ghost-button" id="route-manage-providers" type="button">Manage providers</button>
+                                <button class="ghost-button" id="route-manage-providers" type="button">Settings</button>
                         <button class="primary-button" id="route-done" type="button">Done</button>
                             </div>
                         </div>
@@ -161,15 +161,6 @@
                 <div class="settings-actions">
                     <button class="ghost-button" id="refresh-profiles" type="button">Refresh connections</button>
                 </div>
-                <details class="drawer-details" id="advanced-connections">
-                    <summary class="drawer-details-summary">
-                        <span>Advanced</span>
-                        <span class="material-symbols-rounded">expand_more</span>
-                    </summary>
-                    <div class="drawer-details-body">
-                        <div class="profile-columns" id="profile-columns"></div>
-                    </div>
-                </details>
             </section>
 
             <section class="drawer-section">

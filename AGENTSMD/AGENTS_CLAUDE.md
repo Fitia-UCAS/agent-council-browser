@@ -16,7 +16,7 @@ The goal is that a future maintainer can re‑derive the reasoning quickly when 
 
 ## 0) Executive summary (what we ship now)
 
-Claude is integrated as a first‑class provider (`claude`) alongside `chatgpt` and `gemini`.
+Claude is integrated as a first‑class provider (`claude`) alongside `chatgpt`, `gemini`, and `grok`.
 
 ### What works reliably
 
@@ -25,8 +25,8 @@ Claude is integrated as a first‑class provider (`claude`) alongside `chatgpt` 
 - **Claude attachments** can be **auto‑uploaded**:
   - attachments are prepared in the Claude page (DOM automation),
   - then the prompt is sent (CDP automation).
-- **Parallel** works for any provider set.
-- **Debate** supports **2+ providers** (including Claude).
+- **Parallel** works for any agent set.
+- **Debate** supports **2+ agents** (including multiple agents of the same provider).
 
 ### Why CDP is necessary
 
@@ -279,7 +279,7 @@ File: `sidepanel.js`
 
 File: `background.js`
 
-- attachments are stored in-memory per session (`activeSessionAttachments`)
+- attachments are stored in-memory per session (`sessionAttachmentsById`)
 - optional prefetch occurs for `auto` providers
 
 ### 5.3 Claude-specific send ordering (important)
@@ -298,17 +298,17 @@ This is required because:
 
 ## 6) Debate / parallel UX changes related to Claude
 
-Claude is treated as another provider in route selection:
+Claude is treated as another **agent provider** in route selection:
 
-- `single`: any 1 provider
-- `parallel`: 2+ providers (e.g., ChatGPT + Gemini + Claude)
-- `debate`: 2+ providers, round-robin turns across the ordered provider list
+- `single`: any 1 agent
+- `parallel`: 2+ agents (e.g., ChatGPT A + ChatGPT B + Claude)
+- `debate`: 2+ agents, round-robin turns across the ordered agent list
 
 Debate scheduling:
 
-- turn provider = `providers[(turnIndex - 1) % providers.length]`
-- round index = `ceil(turnIndex / providers.length)`
-- total turns = `rounds * providers.length`
+- expected agent = `participants[(turnIndex - 1) % participants.length]`
+- round index = `ceil(turnIndex / participants.length)`
+- total turns = `rounds * participants.length`
 
 This removed the earlier limitation where adding a third provider forced “parallel only”.
 
