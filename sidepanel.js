@@ -624,15 +624,19 @@ function updateRouteConnectAllUi() {
     if (!elements.routeConnectAll) return;
     const supported = getSupportedProviders();
     const anyConnecting = supported.some((provider) => Boolean(state.connecting?.[provider]));
-    const anyNeedsConnect = supported.some((provider) => {
-        const profile = getDefaultProfile(provider);
-        const ready = Boolean(state.connectionStatus?.[provider]);
-        if (!profile) return true;
-        if (profile.inUseBySessionId) return true;
-        if (!Number.isFinite(profile.tabId)) return true;
-        if (profile.status === 'offline' || profile.status === 'wrong_host') return true;
-        return !ready;
-    });
+    const route = getRoute();
+    const routeConfigured = isRouteValid(route) && isRouteSupported(route) && isRouteConfigured(route);
+    const anyNeedsConnect = routeConfigured
+        ? !isRouteConnected(route)
+        : supported.some((provider) => {
+            const profile = getDefaultProfile(provider);
+            const ready = Boolean(state.connectionStatus?.[provider]);
+            if (!profile) return true;
+            if (profile.inUseBySessionId) return true;
+            if (!Number.isFinite(profile.tabId)) return true;
+            if (profile.status === 'offline' || profile.status === 'wrong_host') return true;
+            return !ready;
+        });
     if (anyConnecting) {
         elements.routeConnectAll.textContent = 'Connecting…';
         elements.routeConnectAll.disabled = true;
@@ -643,7 +647,7 @@ function updateRouteConnectAllUi() {
         elements.routeConnectAll.disabled = true;
         return;
     }
-    elements.routeConnectAll.textContent = 'Connect all';
+    elements.routeConnectAll.textContent = routeConfigured ? 'Fix connections' : 'Connect all';
     elements.routeConnectAll.disabled = false;
 }
 
@@ -998,8 +1002,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.promptInitial = document.getElementById('prompt-initial');
     elements.promptIntermediary = document.getElementById('prompt-intermediary');
     elements.promptFinal = document.getElementById('prompt-final');
-    elements.promptJsonEditor = document.getElementById('prompt-json-editor');
-    elements.promptJsonSaveButton = document.getElementById('prompt-json-save');
     elements.promptLoadButton = document.getElementById('prompt-load');
     elements.promptSaveButton = document.getElementById('prompt-save');
     elements.promptResetButton = document.getElementById('prompt-reset');
@@ -1272,10 +1274,6 @@ function bindEvents() {
 
     if (elements.promptResetButton) {
         elements.promptResetButton.addEventListener('click', resetPromptTemplates);
-    }
-
-    if (elements.promptJsonSaveButton) {
-        elements.promptJsonSaveButton.addEventListener('click', savePromptTemplatesJson);
     }
 
     if (elements.historyConfigureButton) {
@@ -1697,7 +1695,7 @@ function getIntermediaryPlaceholderWarning(config) {
         .filter(([, value]) => typeof value !== 'string' || !value.includes('{intermediary_message}'))
         .map(([key]) => key);
     if (missing.length === 0) return null;
-    return `Note: your templates (${missing.join(', ')}) do not include {intermediary_message}; the intermediary/final fields may have no effect unless you reset to defaults or edit JSON.`;
+    return `Note: your templates (${missing.join(', ')}) do not include {intermediary_message}; the intermediary/final fields may have no effect unless you reset to defaults.`;
 }
 
 function loadPromptTemplates() {
@@ -1717,10 +1715,6 @@ function loadPromptTemplates() {
         if (elements.promptInitial) elements.promptInitial.value = debate.header || '';
         if (elements.promptIntermediary) elements.promptIntermediary.value = debate.intermediary_message || '';
         if (elements.promptFinal) elements.promptFinal.value = debate.final_message || '';
-
-        if (elements.promptJsonEditor) {
-            elements.promptJsonEditor.value = JSON.stringify(state.promptConfig, null, 2);
-        }
 
         const sourceLabel = response.source === 'override'
             ? 'Editing custom prompts.'
@@ -1760,39 +1754,6 @@ function savePromptTemplates() {
         if (elements.promptInitial) elements.promptInitial.value = debate.header || '';
         if (elements.promptIntermediary) elements.promptIntermediary.value = debate.intermediary_message || '';
         if (elements.promptFinal) elements.promptFinal.value = debate.final_message || '';
-        if (elements.promptJsonEditor) elements.promptJsonEditor.value = JSON.stringify(state.promptConfig, null, 2);
-
-        const warning = getIntermediaryPlaceholderWarning(state.promptConfig);
-        setPromptStatus(warning ? `Saved custom prompts.\n${warning}` : 'Saved custom prompts.');
-    });
-}
-
-function savePromptTemplatesJson() {
-    if (!elements.promptJsonEditor) return;
-    let parsed;
-    try {
-        parsed = JSON.parse(elements.promptJsonEditor.value);
-    } catch (error) {
-        setPromptStatus(`Invalid JSON: ${error.message}`, true);
-        return;
-    }
-
-    sendMessage({ type: 'SET_DEBATE_PROMPTS', config: parsed }, (response) => {
-        if (!response || response.ok === false) {
-            setPromptStatus(`Error: ${response?.error || 'Failed to save prompts.'}`, true);
-            return;
-        }
-        state.promptConfig = response.config || parsed;
-        state.promptConfigSource = response.source || 'override';
-
-        const debate = state.promptConfig?.debate && typeof state.promptConfig.debate === 'object'
-            ? state.promptConfig.debate
-            : {};
-
-        if (elements.promptInitial) elements.promptInitial.value = debate.header || '';
-        if (elements.promptIntermediary) elements.promptIntermediary.value = debate.intermediary_message || '';
-        if (elements.promptFinal) elements.promptFinal.value = debate.final_message || '';
-        elements.promptJsonEditor.value = JSON.stringify(state.promptConfig, null, 2);
 
         const warning = getIntermediaryPlaceholderWarning(state.promptConfig);
         setPromptStatus(warning ? `Saved custom prompts.\n${warning}` : 'Saved custom prompts.');
@@ -2052,6 +2013,13 @@ function isProfileConnected(provider, profileId) {
     return Boolean(state.profileConnectionStatus?.[profileId]);
 }
 
+function getKnownProfileConnection(profileId) {
+    const map = state.profileConnectionStatus;
+    if (!map || typeof map !== 'object') return null;
+    if (!Object.prototype.hasOwnProperty.call(map, profileId)) return null;
+    return Boolean(map[profileId]);
+}
+
 function isRouteConfigured(route) {
     if (!isRouteValid(route)) return false;
     const requiredAgents = getRouteRequiredAgents(route);
@@ -2132,6 +2100,30 @@ function isRouteConnected(route) {
         if (!resolvedProfileId) return false;
         return isProfileConnected(provider, resolvedProfileId);
     });
+}
+
+function getRouteDisconnectedAgents(route) {
+    const requiredAgents = getRouteRequiredAgents(route);
+    return requiredAgents.filter((agent) => {
+        const provider = normalizeProviderId(agent?.provider);
+        if (!provider) return true;
+        const resolvedProfileId = resolveAgentProfileId(agent);
+        if (!resolvedProfileId) return true;
+        return !isProfileConnected(provider, resolvedProfileId);
+    });
+}
+
+function getRouteConnectionCounts(route) {
+    const requiredAgents = getRouteRequiredAgents(route);
+    let connected = 0;
+    requiredAgents.forEach((agent) => {
+        const provider = normalizeProviderId(agent?.provider);
+        if (!provider) return;
+        const resolvedProfileId = resolveAgentProfileId(agent);
+        if (!resolvedProfileId) return;
+        if (isProfileConnected(provider, resolvedProfileId)) connected += 1;
+    });
+    return { connected, total: requiredAgents.length };
 }
 
 function clampInt(value, min, max) {
@@ -2603,7 +2595,7 @@ function upsertProfileInState(profile) {
     ensureProviderMaps();
 }
 
-async function openNewTabAndBindAgent(provider) {
+async function openNewTabAndBindAgent(provider, { targetAgentId = null } = {}) {
     const normalizedProvider = normalizeProviderId(provider);
     if (!normalizedProvider) return;
     ensureProviderMaps();
@@ -2652,19 +2644,32 @@ async function openNewTabAndBindAgent(provider) {
             return;
         }
         let targetIndex = -1;
-        for (let i = agents.length - 1; i >= 0; i -= 1) {
-            const agent = agents[i];
-            if (agent?.provider !== normalizedProvider) continue;
-            const selection = normalizeProfileSelection(agent?.profileId);
-            if (!selection) {
-                targetIndex = i;
-                break;
+        if (targetAgentId) {
+            const index = agents.findIndex((agent) => agent?.id === targetAgentId);
+            if (index >= 0 && agents[index]?.provider === normalizedProvider) {
+                targetIndex = index;
             }
-            if (selection === 'default') continue;
-            const profile = getProfileById(selection);
-            if (!profile || !isProfileRoutable(profile, normalizedProvider)) {
-                targetIndex = i;
-                break;
+        }
+        if (targetIndex < 0) {
+            for (let i = agents.length - 1; i >= 0; i -= 1) {
+                const agent = agents[i];
+                if (agent?.provider !== normalizedProvider) continue;
+                const selection = normalizeProfileSelection(agent?.profileId);
+                if (!selection) {
+                    targetIndex = i;
+                    break;
+                }
+                if (selection === 'default') continue;
+                const profile = getProfileById(selection);
+                if (!profile || !isProfileRoutable(profile, normalizedProvider)) {
+                    targetIndex = i;
+                    break;
+                }
+                const knownConnected = getKnownProfileConnection(selection);
+                if (knownConnected === false) {
+                    targetIndex = i;
+                    break;
+                }
             }
         }
         if (targetIndex >= 0) {
@@ -2690,10 +2695,43 @@ function connectAllProviders() {
     const supported = getSupportedProviders();
     if (supported.length === 0) return;
 
+    const route = getRoute();
+    const routeConfigured = isRouteValid(route) && isRouteSupported(route) && isRouteConfigured(route);
+    const providersToConnect = new Set();
+    const agentsToRepairByProvider = new Map();
+    const unknownProfileIds = [];
+
+    if (routeConfigured) {
+        const requiredAgents = getRouteRequiredAgents(route);
+        requiredAgents.forEach((agent) => {
+            const provider = normalizeProviderId(agent?.provider);
+            if (!provider) return;
+            const resolvedProfileId = resolveAgentProfileId(agent);
+            if (!resolvedProfileId) return;
+            if (isProfileConnected(provider, resolvedProfileId)) return;
+            const selection = normalizeProfileSelection(agent?.profileId);
+            if (selection === 'default') {
+                providersToConnect.add(provider);
+                return;
+            }
+            const knownConnected = getKnownProfileConnection(resolvedProfileId);
+            if (knownConnected === null) {
+                unknownProfileIds.push(resolvedProfileId);
+                return;
+            }
+            if (!agentsToRepairByProvider.has(provider)) {
+                agentsToRepairByProvider.set(provider, []);
+            }
+            agentsToRepairByProvider.get(provider).push(agent);
+        });
+    }
+
     supported.forEach((provider) => {
+        const shouldConnect = providersToConnect.has(provider);
         const profile = getDefaultProfile(provider);
         const ready = Boolean(state.connectionStatus?.[provider]);
-        const needsReconnect = !profile
+        const needsReconnect = shouldConnect
+            || !profile
             || profile.inUseBySessionId
             || profile.status === 'offline'
             || profile.status === 'wrong_host'
@@ -2702,6 +2740,20 @@ function connectAllProviders() {
         if (!needsReconnect) return;
         connectProvider(provider);
     });
+
+    agentsToRepairByProvider.forEach((agents, provider) => {
+        if (!Array.isArray(agents) || agents.length === 0) return;
+        if (providersToConnect.has(provider)) return;
+        if (state.connecting?.[provider]) return;
+        openNewTabAndBindAgent(provider, { targetAgentId: agents[0]?.id || null });
+    });
+
+    if (unknownProfileIds.length > 0) {
+        requestConnectionStatus({ profileIds: unknownProfileIds });
+        scheduleRouteConnectionStatusCheck();
+        window.setTimeout(scheduleRouteConnectionStatusCheck, 2500);
+        window.setTimeout(scheduleRouteConnectionStatusCheck, 8000);
+    }
 }
 
 function handleConnectionsListClick(event) {
@@ -2858,15 +2910,27 @@ function updateProviderUi() {
     });
 
     if (elements.providersButton) {
+        const route = getRoute();
+        const routeConfigured = isRouteValid(route) && isRouteSupported(route) && isRouteConfigured(route);
+        const routeCounts = routeConfigured ? getRouteConnectionCounts(route) : null;
+
         let text = 'Providers';
         if (connectingCount > 0) {
-            text = 'Providers: connecting…';
+            text = routeConfigured ? 'Route: connecting…' : 'Providers: connecting…';
+        } else if (routeCounts) {
+            text = `Route: ${routeCounts.connected}/${routeCounts.total} ready`;
         } else {
             text = `Providers: ${readyCount}/${providers.length} ready`;
         }
         elements.providersButton.textContent = text;
-        elements.providersButton.classList.toggle('is-ready', readyCount > 0 && connectingCount === 0);
-        elements.providersButton.classList.toggle('is-offline', readyCount === 0 && connectingCount === 0);
+        const ready = routeCounts
+            ? routeCounts.total > 0 && routeCounts.connected === routeCounts.total
+            : readyCount > 0;
+        const offline = routeCounts
+            ? routeCounts.total > 0 && routeCounts.connected === 0
+            : readyCount === 0;
+        elements.providersButton.classList.toggle('is-ready', ready && connectingCount === 0);
+        elements.providersButton.classList.toggle('is-offline', offline && connectingCount === 0);
         elements.providersButton.classList.toggle('is-connecting', connectingCount > 0);
     }
 
@@ -2901,7 +2965,18 @@ function updateComposerHint() {
     } else if (!configuredRoute) {
         hint = getRouteConfigurationIssue(route) || 'Fix the route to start.';
     } else if (!connected) {
-        hint = `Connect ${requiredLabel} to start.`;
+        const disconnectedAgents = getRouteDisconnectedAgents(route);
+        if (disconnectedAgents.length === 1) {
+            const agent = disconnectedAgents[0];
+            const selection = normalizeProfileSelection(agent?.profileId);
+            hint = selection === 'default'
+                ? `Connect ${requiredLabel} to start.`
+                : `Reconnect ${formatRouteAgentLabel(agent)} to start.`;
+        } else if (disconnectedAgents.length > 1) {
+            hint = `Reconnect ${disconnectedAgents.length} tabs to start.`;
+        } else {
+            hint = `Connect ${requiredLabel} to start.`;
+        }
     } else if (historyBlocked) {
         hint = 'Unlock history to continue.';
     } else if (!hasPrompt) {
@@ -2955,6 +3030,7 @@ function updateEmptyState() {
     const titleEl = elements.emptyState.querySelector('.empty-title');
     const subtitleEl = elements.emptyState.querySelector('.empty-subtitle');
     const actionsEl = elements.emptyState.querySelector('.empty-actions');
+    const actionButton = elements.emptyState.querySelector('#empty-open-route');
 
     if (ready && historyBlocked) {
         if (titleEl) titleEl.textContent = 'Unlock history';
@@ -2968,6 +3044,7 @@ function updateEmptyState() {
     if (!isRouteValid(route)) {
         if (titleEl) titleEl.textContent = 'New chat';
         if (subtitleEl) subtitleEl.textContent = 'Choose where to send your message.';
+        if (actionButton) actionButton.textContent = 'Choose agents';
         if (actionsEl) actionsEl.hidden = false;
         return;
     }
@@ -2975,6 +3052,7 @@ function updateEmptyState() {
     if (!isRouteSupported(route)) {
         if (titleEl) titleEl.textContent = 'Route not supported';
         if (subtitleEl) subtitleEl.textContent = 'This route is not supported yet.';
+        if (actionButton) actionButton.textContent = 'Choose agents';
         if (actionsEl) actionsEl.hidden = false;
         return;
     }
@@ -2983,12 +3061,27 @@ function updateEmptyState() {
         if (!isRouteConfigured(route)) {
             if (titleEl) titleEl.textContent = 'Fix route';
             if (subtitleEl) subtitleEl.textContent = getRouteConfigurationIssue(route) || 'Fix the route to start.';
+            if (actionButton) actionButton.textContent = 'Fix route';
             if (actionsEl) actionsEl.hidden = false;
             return;
         }
+        const disconnectedAgents = getRouteDisconnectedAgents(route);
         const label = getRouteRequiredProviders(route).map(formatProviderLabel).join(' + ');
         if (titleEl) titleEl.textContent = 'Connect to start';
-        if (subtitleEl) subtitleEl.textContent = `Connect ${label} to start.`;
+        if (subtitleEl) {
+            if (disconnectedAgents.length === 1) {
+                const agent = disconnectedAgents[0];
+                const selection = normalizeProfileSelection(agent?.profileId);
+                subtitleEl.textContent = selection === 'default'
+                    ? `Connect ${label} to start.`
+                    : `Reconnect ${formatRouteAgentLabel(agent)} to start.`;
+            } else if (disconnectedAgents.length > 1) {
+                subtitleEl.textContent = `Reconnect ${disconnectedAgents.length} tabs to start.`;
+            } else {
+                subtitleEl.textContent = `Connect ${label} to start.`;
+            }
+        }
+        if (actionButton) actionButton.textContent = 'Fix connections';
         if (actionsEl) actionsEl.hidden = false;
         return;
     }
@@ -3046,7 +3139,8 @@ async function startSession() {
     const required = getRouteRequiredProviders(route);
     if (!isRouteConnected(route)) {
         const autoConnect = [];
-        const manualFix = [];
+        const unknownProfiles = [];
+        const repairAgents = [];
         const requiredAgents = getRouteRequiredAgents(route);
 
         requiredAgents.forEach((agent) => {
@@ -3059,7 +3153,12 @@ async function startSession() {
             if (selection === 'default') {
                 if (!autoConnect.includes(provider)) autoConnect.push(provider);
             } else if (resolvedProfileId) {
-                manualFix.push({ agent, provider, profileId: resolvedProfileId });
+                const knownConnected = getKnownProfileConnection(resolvedProfileId);
+                if (knownConnected === null) {
+                    unknownProfiles.push({ provider, profileId: resolvedProfileId });
+                    return;
+                }
+                repairAgents.push({ agent, provider, profileId: resolvedProfileId });
             }
         });
 
@@ -3069,11 +3168,27 @@ async function startSession() {
             return;
         }
 
-        if (manualFix.length > 0) {
-            const first = manualFix[0]?.agent;
-            const label = first ? formatRouteAgentLabel(first) : 'Selected agent';
-            setSessionStatus(`${label} is not responding. Focus that tab, refresh, then try again.`);
-            openSettingsDrawer();
+        if (unknownProfiles.length > 0) {
+            requestConnectionStatus({ profileIds: unknownProfiles.map((item) => item.profileId) });
+            scheduleRouteConnectionStatusCheck();
+            window.setTimeout(scheduleRouteConnectionStatusCheck, 2500);
+            window.setTimeout(scheduleRouteConnectionStatusCheck, 8000);
+            setSessionStatus('Checking connections…');
+            return;
+        }
+
+        if (repairAgents.length > 0) {
+            const repaired = [];
+            const seenProviders = new Set();
+            repairAgents.forEach((item) => {
+                if (seenProviders.has(item.provider)) return;
+                seenProviders.add(item.provider);
+                openNewTabAndBindAgent(item.provider, { targetAgentId: item.agent?.id || null });
+                repaired.push(item);
+            });
+            const first = repaired[0]?.agent;
+            const label = first ? formatRouteAgentLabel(first) : 'connection';
+            setSessionStatus(repaired.length > 1 ? `Reconnecting ${repaired.length} tabs…` : `Reconnecting ${label}…`);
             return;
         }
 
