@@ -1,6 +1,36 @@
 (function initMlcBackgroundSessionHelpers(global) {
     const CHAT_DELIVERY_STATE_META_PREFIX = 'mlc_chat_delivery_state_v1:';
     const CHAT_DELIVERY_STATE_SCHEMA_VERSION = 2;
+    const providerApi = global.mlcProviders || null;
+
+    const normalizeProviderKey = typeof providerApi?.normalizeProviderKey === 'function'
+        ? providerApi.normalizeProviderKey
+        : (provider) => String(provider || '').trim().toLowerCase();
+
+    const getSupportedProviderKeys = typeof providerApi?.getSupportedProviderKeys === 'function'
+        ? providerApi.getSupportedProviderKeys
+        : () => ['chatgpt', 'gemini', 'claude', 'grok'];
+
+    const isSupportedProviderKey = typeof providerApi?.isSupportedProviderKey === 'function'
+        ? providerApi.isSupportedProviderKey
+        : (provider) => getSupportedProviderKeys().includes(normalizeProviderKey(provider));
+
+    const formatLLMLabel = typeof providerApi?.formatLLMLabel === 'function'
+        ? providerApi.formatLLMLabel
+        : (provider) => {
+            const normalized = normalizeProviderKey(provider);
+            if (normalized === 'gemini') return 'Gemini';
+            if (normalized === 'claude') return 'Claude';
+            if (normalized === 'grok') return 'Grok';
+            return 'ChatGPT';
+        };
+
+    const PROVIDER_CAPABILITIES = providerApi?.PROVIDER_CAPABILITIES || {
+        chatgpt: { attachments: { mode: 'auto' } },
+        gemini: { attachments: { mode: 'manual' } },
+        claude: { attachments: { mode: 'auto' } },
+        grok: { attachments: { mode: 'auto' } }
+    };
 
     function initProviderFlagMap(providers, initialValue) {
         const map = {};
