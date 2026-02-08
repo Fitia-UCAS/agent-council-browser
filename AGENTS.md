@@ -585,6 +585,32 @@ To add another provider safely:
 - Response capture relies on UI stability signals; adjust thresholds if models change rendering.
 - Model label detection is best‑effort only; never assumes a model was auto‑selected.
 
+## 12) Worktree extension variants (name/logo differentiation)
+
+When multiple branches/worktrees are loaded in Chrome at once, build and load a per-branch variant so each extension is visually distinct.
+
+- Script: `scripts/dev/build-extension-variant.sh`
+  - Copies the current workspace into `.dist/<branch-label>/`.
+  - Supports `--in-place` to rewrite the current workspace manifest/icons directly (useful when Chrome already points to that folder).
+  - Rewrites `.dist/<branch-label>/manifest.json` with:
+    - `name: "Multi-LLM Coder [<branch-label>]"`
+    - `action.default_title: "... [<branch-label>]"`
+    - `version_name: "dev-<branch-label>"`
+    - `icons` and `action.default_icon` set to generated branch-specific PNG icons (`variant-icons/variant-16.png`, `variant-icons/variant-32.png`, `variant-icons/variant-48.png`, `variant-icons/variant-128.png`)
+  - Excludes `.git`, `.dist`, `node_modules`, and `worktrees` from the build output.
+- NPM shortcut (main + worktrees): `npm run build:variant`
+- In-place branding for current workspace: `npm run brand:in-place`
+- Main-only batch helper: `npm run build:variant:all-local-worktrees`
+  - Builds `.dist` variants for all currently attached git worktrees.
+- Main/worktree helper for already-loaded extensions: `npm run brand:all-worktrees`
+  - Applies branch branding in place across all currently attached git worktrees.
+- Chrome usage:
+  - Open `chrome://extensions`
+  - If loading from `.dist`: use **Load unpacked** on each generated `.dist/<branch-label>` folder
+  - If loading from raw worktree folders: run `npm run brand:all-worktrees` first, then **Reload** each extension
+  - Click **Reload** if the extension is already loaded so new name/icon metadata is applied.
+  - Keep `"key"` unset in `manifest.json` so local unpacked variants can coexist.
+
 ---
 
 ## Maintenance rule (must follow)

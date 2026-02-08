@@ -4,7 +4,11 @@
   "description": "Send prompts to multiple LLM web UIs (ChatGPT, Gemini, Claude, Grok) simultaneously and compare responses side-by-side",
   "main": "background.js",
     "scripts": {
-      "test": "node tests/test-capture-heuristics.js && node tests/test-debate-prompt-utils.js"
+      "test": "node tests/test-capture-heuristics.js && node tests/test-debate-prompt-utils.js",
+      "build:variant": "bash scripts/dev/build-extension-variant.sh",
+      "build:variant:all-local-worktrees": "bash scripts/dev/build-all-local-worktrees-variants.sh",
+      "brand:in-place": "bash scripts/dev/build-extension-variant.sh --in-place",
+      "brand:all-worktrees": "bash scripts/dev/apply-worktree-branding.sh"
     },
     "author": "Multi-LLM Coder Team",
     "license": "ISC"
