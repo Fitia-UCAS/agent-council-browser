@@ -21,6 +21,7 @@ Claude is integrated as a first‑class provider (`claude`) alongside `chatgpt`,
 ### What works reliably
 
 - **Sending prompts** to `claude.ai` works via **Chrome DevTools Protocol (CDP)** using `chrome.debugger` (not DOM-only clicking).
+- Claude send is resilient to transient disabled-send states: it re-resolves composer refs and runs multiple fallbacks before failing.
 - **Capturing Claude answers** works via the existing content‑script capture pipeline, with Claude‑specific extraction heuristics.
 - **Claude attachments** can be **auto‑uploaded**:
   - attachments are prepared in the Claude page (DOM automation),
@@ -207,17 +208,22 @@ Key steps:
 7. **Verify input received text**:
    - `Runtime.evaluate` reads the editor’s text (contentEditable textContent / textarea.value)
 8. **Wait for send enabled**:
-   - Poll until the send button is visible and not disabled and not `pointer-events:none`
-   - Timeout configurable (`readyTimeoutMs`, longer when attachments exist)
-9. **Click send**:
-   - `Input.dispatchMouseEvent` at send coordinates
+   - Poll until the send button is visible/clickable (`!disabled`, `!aria-disabled`, `pointer-events != none`)
+   - Re-resolve composer/input/send refs while waiting (Claude often swaps nodes)
+   - Timeout configurable (`readyTimeoutMs`; default ~12s, longer when attachments exist)
+   - If send is still disabled after timeout, continue to fallback attempts (do not hard-fail here)
+9. **Attempt send with fallback chain**:
+   - pointer click at send coordinates (when clickable)
+   - Enter key fallback
+   - pointer retry after re-resolving composer refs
+   - DOM send fallback (`button.click()` + `dispatchEvent` + `form.requestSubmit`) after re-resolving refs
 10. **Confirm send acknowledgement**:
     - Claude may navigate `/new → /chat/<id>`; detect URL change
     - or detect “generating” state:
       - presence of stop/cancel button (includes FR labels: `Annuler`, `Arrêter`)
       - visible spinner/progress indicators
     - or detect input cleared
-    - if not acknowledged quickly, press Enter once and retry ack checks
+    - if none are observed, fail with rich state diagnostics to help troubleshooting
 11. **Detach debugger** (`chrome.debugger.detach`) in `finally`
 
 Important constraint:
@@ -351,9 +357,13 @@ What remains in `simpleInteraction()` for Claude:
   - CDP typed, but the editor didn’t accept the input (focus/overlay/iframe).
   - Fix: click inside the composer once manually, ensure no modal is open, retry.
 
-- **“send button stayed disabled after typing”**
-  - Claude still thinks composer is empty or upload not finished.
-  - Fix: wait for uploads; verify you can send manually; increase ready timeout if needed.
+- **“send button stayed disabled after typing”** (older guardrail / legacy message)
+  - Claude still reports composer as not ready.
+  - Current behavior should continue with fallbacks first; if this appears, inspect recent code path or stale extension build.
+
+- **“Claude send could not be confirmed ... sendDisabled=... ariaDisabled=... pointerEvents=...”**
+  - Fallback attempts executed but no ack signal was observed (navigation/generating/input-cleared).
+  - Fix: keep Claude tab visible and fully loaded, ensure no blocking modal, verify manual send works, then retry.
 
 ### 8.3 Quick DOM checks (Claude console)
 

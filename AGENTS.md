@@ -310,7 +310,9 @@ When a turn is sent:
 2. Background builds prompt via `buildDebatePrompt(...)`.
 3. Background sets `waitingFor`, `lastPromptId`, `lastPromptTimestamp` and persists state.
 4. UI receives `UI_SESSION_PROGRESS` for current round/agent.
-5. `injectAndExecute` sends the prompt into the right tab using `simpleInteraction`.
+5. `injectAndExecute` sends the prompt into the right tab:
+   - Claude: `sendPromptViaClaudeDebugger(...)` (CDP path with fallback send attempts).
+   - Others: `simpleInteraction(...)`.
 6. Background sends `MLC_PROMPT_SENT` to that tab’s content script.
 7. Content script captures response and sends `MLC_RESPONSE_CAPTURED`.
 8. Background validates response (session id, agentId, promptId/turnIndex), appends to state, and advances to next turn.
@@ -345,12 +347,26 @@ Defaults are intentionally lightweight; additional role reminders can be added v
 
 ## 4) Prompt injection (background.js)
 
+### Claude send path (`sendPromptViaClaudeDebugger`)
+
+- Claude prompt send uses `chrome.debugger` (CDP) in `sendPromptViaClaudeDebugger(...)` instead of the generic DOM sender.
+- Default Claude send-readiness wait is ~12s (longer when attachments exist; currently ~30s when Claude attachments are present).
+- After typing, if Claude still reports send disabled, the run does **not** fail immediately. The sender tries multiple fallbacks and only fails if none are acknowledged:
+  1. pointer click on resolved send coordinates
+  2. Enter key send
+  3. pointer click retry after re-resolving composer refs
+  4. DOM send fallback (`click`/`requestSubmit`) after re-resolving refs
+- Composer/input/send references are re-resolved during waits/retries to handle Claude DOM swaps (`chat-input-ssr` vs hydrated editor).
+- Send success is acknowledged by URL navigation (`/new` -> `/chat/...`), generating UI signals (stop/spinner), input clear, or assistant message append heuristics.
+- Final Claude send errors include richer diagnostics (`sendVisible`, `ariaDisabled`, `domDisabled`, `disabledAttr`, `pointerEvents`) to speed up troubleshooting.
+
 ### `simpleInteraction(prompt, llmType)`
 
 - Injected into the target page via `chrome.scripting.executeScript`.
 - Finds input element using LLM‑specific selectors:
   - ChatGPT: `#prompt-textarea`, `textarea[data-testid="prompt-textarea"]`, etc.
   - Gemini: `div.ql-editor[role="textbox"]`, contenteditable fallbacks.
+- Claude: primarily used for attachment preparation and generic fallback interactions; debate/session prompt send uses the Claude debugger path above.
 - Sets value using the correct method:
   - ChatGPT often uses **textarea**, Gemini uses **contenteditable**; uses native setters or `document.execCommand('insertText')`.
   - **Large prompts** (≈8k+ chars) use a faster contenteditable `textContent` set first, with an execCommand fallback if it doesn't stick.

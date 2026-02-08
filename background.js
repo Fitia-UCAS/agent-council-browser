@@ -5119,8 +5119,9 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         const readyTimeoutMs = (() => {
             const value = options && typeof options === 'object' ? options.readyTimeoutMs : null;
-            if (!Number.isFinite(value)) return 4000;
-            return Math.min(120000, Math.max(1500, Math.floor(value)));
+            const fallbackMs = 12000;
+            if (!Number.isFinite(value)) return fallbackMs;
+            return Math.min(120000, Math.max(2000, Math.floor(value)));
         })();
 
         // Make the tab active to maximize the chance CDP input targets the correct frame/element.
@@ -5360,23 +5361,29 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
             };
         })()`;
 
-        const focusResult = await debuggerSendCommand(debuggee, 'Runtime.evaluate', {
-            expression: focusExpr,
-            returnByValue: true
+        const evalFocus = async () => {
+            const focusResult = await debuggerSendCommand(debuggee, 'Runtime.evaluate', {
+                expression: focusExpr,
+                returnByValue: true
+            });
+            return focusResult?.result?.value || null;
+        };
+
+        const toFocusMeta = (value) => ({
+            inputTag: value?.inputTag || null,
+            inputTestId: value?.inputTestId || null,
+            inputRole: value?.inputRole || null,
+            inputContentEditable: Boolean(value?.inputContentEditable),
+            sendLabel: value?.sendLabel || null,
+            rootTag: value?.rootTag || null
         });
-        const focusValue = focusResult?.result?.value;
+
+        let focusValue = await evalFocus();
         if (!focusValue?.ok) {
             const details = focusValue ? ` details=${JSON.stringify(focusValue)}` : '';
             throw new Error(`Claude focus failed: ${focusValue?.error || 'unknown_error'}.${details}`);
         }
-        const focusMeta = {
-            inputTag: focusValue?.inputTag || null,
-            inputTestId: focusValue?.inputTestId || null,
-            inputRole: focusValue?.inputRole || null,
-            inputContentEditable: Boolean(focusValue?.inputContentEditable),
-            sendLabel: focusValue?.sendLabel || null,
-            rootTag: focusValue?.rootTag || null
-        };
+        let focusMeta = toFocusMeta(focusValue);
         if (focusMeta.inputTestId === 'chat-input-ssr') {
             console.warn('[MLC Background] Claude focus selected SSR textarea (chat-input-ssr); composer may not be fully hydrated yet.');
         }
@@ -5395,6 +5402,31 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
             await clickAt(inputX, inputY);
             await sleep(80);
         }
+
+        const refreshComposerRefs = async (reason) => {
+            try {
+                const refreshed = await evalFocus();
+                if (!refreshed?.ok) {
+                    console.warn('[MLC Background] Claude composer refresh failed:', reason, refreshed || null);
+                    return false;
+                }
+                focusValue = refreshed;
+                focusMeta = toFocusMeta(refreshed);
+                if (focusMeta.inputTestId === 'chat-input-ssr') {
+                    console.warn('[MLC Background] Claude refresh selected SSR textarea (chat-input-ssr); waiting for hydrated editor.', { reason });
+                }
+                const nextX = Number(refreshed?.inputX);
+                const nextY = Number(refreshed?.inputY);
+                if (Number.isFinite(nextX) && Number.isFinite(nextY)) {
+                    await clickAt(nextX, nextY);
+                    await sleep(80);
+                }
+                return true;
+            } catch (error) {
+                console.warn('[MLC Background] Claude composer refresh threw:', reason, error);
+                return false;
+            }
+        };
 
         const dispatchSelectAll = async (modifier) => {
             await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
@@ -5463,13 +5495,17 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
             const inputText = getText(input);
             const inputTrim = inputText.trim();
             const inputLen = inputTrim.length;
+            const btnVisible = Boolean(btn && isVisible(btn));
             const btnStyle = btn ? window.getComputedStyle(btn) : null;
             const pointerEvents = btnStyle ? btnStyle.pointerEvents : null;
-            const disabled = !btn || !isVisible(btn)
-                || Boolean(btn.disabled) || btn.getAttribute('disabled') !== null
-                || String(btn.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
+            const ariaDisabled = String(btn?.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
+            const disabledAttr = btn?.getAttribute('disabled') !== null;
+            const domDisabled = Boolean(btn?.disabled);
+            const disabled = !btnVisible
+                || domDisabled || disabledAttr
+                || ariaDisabled
                 || pointerEvents === 'none';
-            const rect = btn && isVisible(btn) ? btn.getBoundingClientRect() : null;
+            const rect = btnVisible ? btn.getBoundingClientRect() : null;
             const sendX = rect ? rect.left + rect.width / 2 : null;
             const sendY = rect ? rect.top + rect.height / 2 : null;
             let sendHit = null;
@@ -5494,7 +5530,11 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
                 inputLen,
                 inputPreview: inputTrim.slice(0, 160),
                 sendDisabled: disabled,
+                sendVisible: btnVisible,
                 sendPointerEvents: pointerEvents,
+                sendAriaDisabled: ariaDisabled,
+                sendDisabledAttr: disabledAttr,
+                sendDomDisabled: domDisabled,
                 sendLabel: btn?.getAttribute?.('aria-label') || '',
                 sendX,
                 sendY,
@@ -5521,27 +5561,65 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
 
         let state = await evalState();
         if (!state?.ok) {
+            await refreshComposerRefs('state_missing_after_typing');
+            state = await evalState();
+        }
+        if (!state?.ok) {
             throw new Error(`Claude composer state unavailable after typing (input/send references lost). focus=${JSON.stringify(focusMeta)}`);
         }
         if (!state.inputLen) {
             throw new Error(`Claude input stayed empty after typing (input did not receive programmatic text). focus=${JSON.stringify(focusMeta)}`);
         }
 
-        // Wait for Send to become enabled (or at least clickable).
+        // Wait for Send to become enabled/clickable, but do not hard-fail here:
+        // fallback send paths (Enter/DOM click) can still succeed on Claude UI transitions.
+        const isSendReady = (value) => Boolean(
+            value?.ok
+            && value.sendDisabled === false
+            && Number.isFinite(value.sendX)
+            && Number.isFinite(value.sendY)
+        );
+        let sendReady = isSendReady(state);
         const startedAt = Date.now();
-        while (Date.now() - startedAt < readyTimeoutMs) {
+        let lastRefreshAt = 0;
+        while (!sendReady && (Date.now() - startedAt < readyTimeoutMs)) {
             state = await evalState();
-            if (state?.ok && state.sendDisabled === false && Number.isFinite(state.sendX) && Number.isFinite(state.sendY)) {
-                break;
+            sendReady = isSendReady(state);
+            if (sendReady) break;
+
+            const shouldRefreshRefs = !state?.ok
+                || state.inputConnected === false
+                || state.sendConnected === false
+                || !Number.isFinite(state?.sendX)
+                || !Number.isFinite(state?.sendY);
+            if (shouldRefreshRefs && (Date.now() - lastRefreshAt >= 900)) {
+                await refreshComposerRefs('ready_wait_reacquire');
+                state = await evalState();
+                sendReady = isSendReady(state);
+                lastRefreshAt = Date.now();
+                if (sendReady) break;
             }
             await sleep(150);
         }
 
         if (!state?.ok) {
+            await refreshComposerRefs('ready_wait_failed');
+            state = await evalState();
+        }
+        if (!state?.ok) {
             throw new Error('Claude send readiness check failed (composer missing).');
         }
-        if (state.sendDisabled) {
-            throw new Error(`Claude send button stayed disabled after typing. inputLen=${state.inputLen} pointerEvents=${state.sendPointerEvents || 'unknown'} waitMs=${readyTimeoutMs} focus=${JSON.stringify(focusMeta)}`);
+        if (!sendReady) {
+            console.warn('[MLC Background] Claude send still not ready after wait; trying fallback send paths.', {
+                inputLen: state.inputLen,
+                pointerEvents: state.sendPointerEvents || 'unknown',
+                ariaDisabled: state.sendAriaDisabled,
+                domDisabled: state.sendDomDisabled,
+                disabledAttr: state.sendDisabledAttr,
+                visible: state.sendVisible,
+                waitMs: readyTimeoutMs,
+                focus: focusMeta
+            });
         }
 
         const ackExpr = `(() => {
@@ -5663,8 +5741,24 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
         const probe = normalize(text).slice(0, 80);
 
         const beforeSend = await evalAck();
+        const tryPointerSend = async (reason) => {
+            state = await evalState();
+            if (!state?.ok || !Number.isFinite(state.sendX) || !Number.isFinite(state.sendY)) {
+                await refreshComposerRefs(`pointer_send_${reason}`);
+                state = await evalState();
+            }
+            if (!state?.ok) return false;
+            if (state.sendDisabled === true) {
+                return false;
+            }
+            if (!Number.isFinite(state.sendX) || !Number.isFinite(state.sendY)) {
+                return false;
+            }
+            await clickAt(Number(state.sendX), Number(state.sendY));
+            return true;
+        };
 
-        await clickAt(Number(state.sendX), Number(state.sendY));
+        await tryPointerSend('initial');
 
         const pressEnter = async () => {
             await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
@@ -5800,8 +5894,14 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
         }
 
         if (!ack.ok) {
+            await tryPointerSend('retry');
+            ack = await waitForAck(ackTimeoutMs);
+        }
+
+        if (!ack.ok) {
             // When Chrome is not focused (user in another app), CDP mouse events can be flaky.
             // Fall back to triggering the send action via DOM APIs, then re-check for ack.
+            await refreshComposerRefs('before_dom_send');
             await tryDomSend();
             ack = await waitForAck(ackTimeoutMs);
         }
@@ -5826,6 +5926,11 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
             + `sendHit=${finalState?.sendHitTag ?? 'unknown'} `
             + `inputLen=${finalState?.inputLen ?? 'unknown'} `
             + `sendDisabled=${finalState?.sendDisabled ?? 'unknown'} `
+            + `sendVisible=${finalState?.sendVisible ?? 'unknown'} `
+            + `ariaDisabled=${finalState?.sendAriaDisabled ?? 'unknown'} `
+            + `domDisabled=${finalState?.sendDomDisabled ?? 'unknown'} `
+            + `disabledAttr=${finalState?.sendDisabledAttr ?? 'unknown'} `
+            + `pointerEvents=${finalState?.sendPointerEvents ?? 'unknown'} `
             + `ackBottomLen=${finalAck?.bottomLen ?? 'unknown'} `
             + `ackGenerating=${finalAck?.generating ?? 'unknown'} `
             + `focus=${JSON.stringify(focusMeta)}`
@@ -5914,6 +6019,12 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                 }
                 if (/send button stayed disabled/i.test(rawMessage)) {
                     tips.push('Verify you can type and send manually in that Claude tab; if not, Claude is blocking input (or the composer is not ready).');
+                }
+                if (/send could not be confirmed|CLAUDE_SEND_UNCONFIRMED/i.test(rawMessage)) {
+                    tips.push('Keep the Claude tab visible and fully loaded, then retry; transient UI transitions can delay send confirmation.');
+                }
+                if (/ariaDisabled=true|sendDisabled=true|pointerEvents=none/i.test(rawMessage)) {
+                    tips.push('Claude still reports the send control as disabled; wait briefly for composer readiness and retry.');
                 }
                 const suffix = tips.length ? ` ${tips.join(' ')}` : '';
                 const needsChromeFocus = originalCode === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED';
