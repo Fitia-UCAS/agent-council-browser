@@ -45,6 +45,12 @@ try {
     console.error('[MLC Profiles] Failed to import profile service module:', error);
 }
 
+try {
+    importScripts('src/background/prompt-service.js');
+} catch (error) {
+    console.error('[MLC Prompt] Failed to import prompt service module:', error);
+}
+
 // Extension installation
 chrome.runtime.onInstalled.addListener(() => {
     console.log('[MLC Background] Multi-LLM Coder extension installed/updated.');
@@ -379,6 +385,38 @@ const PROFILE_SERVICE_MESSAGE_TYPES = new Set(
         'CONNECT_PROVIDER',
         'CHECK_CONNECTION',
         'PROVIDER_MODEL_INFO'
+    ]
+);
+
+const createPromptServiceFn = globalThis.createPromptService;
+const promptService = typeof createPromptServiceFn === 'function'
+    ? createPromptServiceFn({
+        getDebatePromptConfigForUi,
+        setDebatePromptOverride,
+        clearDebatePromptOverride,
+        buildDebatePrompt,
+        buildSinglePrompt,
+        buildDirectPrompt,
+        buildSessionPrompt,
+        getChatDeliveryStateKey,
+        createEmptyDeliveryState,
+        normalizeDeliveryProviderState,
+        normalizeChatDeliveryState,
+        getProviderContextKey,
+        getEffectiveDeliveredUpTo,
+        error: (...args) => console.error(...args)
+    })
+    : null;
+
+if (!promptService) {
+    console.error('[MLC Prompt] Prompt service unavailable.');
+}
+
+const PROMPT_SERVICE_MESSAGE_TYPES = new Set(
+    promptService?.getHandledMessageTypes?.() || [
+        'GET_DEBATE_PROMPTS',
+        'SET_DEBATE_PROMPTS',
+        'RESET_DEBATE_PROMPTS'
     ]
 );
 
@@ -1569,6 +1607,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return false;
     }
 
+    if (promptService?.handlePromptMessage) {
+        const handled = promptService.handlePromptMessage(message, sendResponse);
+        if (handled) {
+            return true;
+        }
+    } else if (PROMPT_SERVICE_MESSAGE_TYPES.has(message?.type)) {
+        sendResponse({
+            ok: false,
+            error: 'Prompt service unavailable.',
+            code: 'SERVICE_UNAVAILABLE'
+        });
+        return false;
+    }
+
     switch (message.type) {
         case 'GET_PROVIDER_CAPABILITIES':
             sendResponse({ ok: true, capabilities: PROVIDER_CAPABILITIES });
@@ -1577,24 +1629,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             handleSendPrompt(message);
             sendResponse({ status: 'received', type: message.type });
             break;
-        case 'GET_DEBATE_PROMPTS':
-            getDebatePromptConfigForUi().then(sendResponse).catch(error => {
-                console.error('[MLC Debate] Error loading prompt templates:', error);
-                sendResponse({ ok: false, error: error.message });
-            });
-            return true;
-        case 'SET_DEBATE_PROMPTS':
-            setDebatePromptOverride(message.config).then(sendResponse).catch(error => {
-                console.error('[MLC Debate] Error saving prompt templates:', error);
-                sendResponse({ ok: false, error: error.message });
-            });
-            return true;
-        case 'RESET_DEBATE_PROMPTS':
-            clearDebatePromptOverride().then(sendResponse).catch(error => {
-                console.error('[MLC Debate] Error resetting prompt templates:', error);
-                sendResponse({ ok: false, error: error.message });
-            });
-            return true;
         case 'GEMINI_RESPONSE_CAPTURED':
             enqueueDebateResponse(message, 'Gemini response');
             handleGeminiResponse(message);
