@@ -9,7 +9,6 @@ It supports:
 1. **Single**: send to one agent (ChatGPT / Gemini / Claude / Grok).
 2. **Compare (Parallel)**: send the same prompt to 2+ agents.
 3. **Debate**: multi-round round-robin across 2+ agents.
-4. **In-page forwarding**: optional ⇄ toggle buttons on ChatGPT/Gemini pages (legacy flow).
 
 ## ✨ Features
 
@@ -18,8 +17,6 @@ It supports:
 -   **Connect-on-demand**: Connect only what your route needs (plus **Connect all**). Use **New tab** to create additional same-provider agents.
 -   **Encrypted Chat History (Local-First)**: Chats and messages are stored in IndexedDB and encrypted with a user passphrase.
 -   **Thread List + Paging**: Open past chats and load older messages on demand (avoids huge payloads).
--   **In-Page Forwarding**: Toggle buttons injected into ChatGPT and Gemini pages to send the current prompt to the other LLM.
--   **Auto Follow-up**: When forwarding from ChatGPT to Gemini, after both LLMs respond, the extension automatically inserts Gemini's response into ChatGPT for a comparative follow-up.
 -   **Attachments**: Attach files/images in the side panel.
     - ChatGPT: best-effort auto-upload.
     - Gemini: manual upload (text-only is sent from the side panel when files are attached).
@@ -64,20 +61,6 @@ It supports:
 4. **Write your prompt** and click **Send** (or press Ctrl/Cmd+Enter).
 5. **Optional**: attach files via **Attach** (see Attachments notes below).
 
-### In-page forwarding (optional)
-
-1.  **Navigate to an LLM Page**: Go to either `chatgpt.com` or `gemini.google.com`.
-2.  **Locate the Toggle Button**:
-    *   On **ChatGPT**: Look for a "⇄ Gemini" button near the prompt input area.
-    *   On **Gemini**: Look for a "⇄ ChatGPT" button near the prompt input area.
-3.  **Activate Forwarding**: Click the toggle button. It will turn green when active, indicating that sending a prompt on this page will also send it to the other LLM.
-4.  **Type and Send Your Prompt**: Write your message in the current LLM's input field and send it as you normally would (e.g., by pressing Enter or clicking its native send button).
-5.  **Automatic Forwarding**: The extension will automatically take the prompt you just sent and also input and send it on the other LLM's page.
-    *   *Example*: If you're on Gemini, activate "⇄ ChatGPT", and send "Hello world", "Hello world" will be sent to Gemini (by you) and then automatically sent to ChatGPT by the extension.
-6.  **Auto Follow-up** (ChatGPT to Gemini only):
-    *   When forwarding from ChatGPT to Gemini (but not the other way around), after both LLMs generate their responses, the extension will automatically populate ChatGPT's input field with Gemini's response and a prompt asking ChatGPT to compare and enhance its answer.
-    *   The follow-up text is inserted but NOT automatically sent - you can review and edit it before sending.
-
 ### Interface Overview
 
 - **Side panel chat**: timeline of messages + composer at the bottom.
@@ -86,9 +69,6 @@ It supports:
   - attachments (optional),
   - the `To` pill (Route Builder) to pick Single / Compare / Debate and connect the required agents/profiles.
 - **Provider status**: quick “Providers: X/Y ready” indicator, plus Settings.
-- **In-page toggle buttons** (optional):
-  - Appear on `chatgpt.com` (as "⇄ Gemini") and `gemini.google.com` (as "⇄ ChatGPT").
-  - Control the forwarding feature (green means active).
 
 ## 🔧 How It Works
 
@@ -112,7 +92,7 @@ Developer docs (canonical): `AGENTS.md` + `AGENTSMD/`.
 The extension's ability to interact with LLM websites (finding input fields, send buttons) depends heavily on their HTML structure (DOM selectors).
 -   **Websites Change**: LLM providers frequently update their websites. These updates can change the HTML, causing the extension's selectors to fail.
 -   **Troubleshooting**: If the extension stops writing text or sending messages on a specific site, the first suspect is a broken selector.
--   **Updating Selectors**: You'll need to inspect the LLM website's HTML (using browser developer tools) and update the corresponding selectors in `background.js` (within the `simpleInteraction` function) and `contentScript.js` (within `findInput` and `findSendButton`).
+-   **Updating Selectors**: You'll need to inspect the LLM website's HTML (using browser developer tools) and update the corresponding selectors in `background.js` (within `simpleInteraction`) and `contentScript.js` (capture/model-detection selectors).
 
 ### Limitations
 -   Requires being logged in on the provider websites.
@@ -127,7 +107,7 @@ The extension's ability to interact with LLM websites (finding input fields, sen
 ```
 manifest.json    # MV3 extension config (side panel)
 background.js    # service worker: routing + injection + sessions + profiles + history APIs
-contentScript.js # injected into provider pages: toggle button + response capture
+contentScript.js # injected into provider pages: PING/PONG + response capture + model hint updates
 sidepanel.html   # side panel UI structure
 sidepanel.js     # side panel UI logic + Route Builder + messaging
 styles.css       # side panel styling
@@ -153,10 +133,6 @@ tests/           # small node-based heuristics tests
 3.  **Selector Issues**: This is the most common problem. Website UIs change. You may need to update selectors in `background.js` (inside `simpleInteraction`) and `contentScript.js`.
 4.  **Refresh**: Try refreshing the LLM website tabs and then the extension (via `chrome://extensions/`).
 5.  **Re-enable Extension**: Disable and then re-enable the extension in `chrome://extensions/`.
-
-### In-Page Toggle Button Missing or Misplaced
-1.  Ensure the `contentScript.js` is running on the page (check console for its initial log).
-2.  The logic in `addToggleButton()` in `contentScript.js` might need adjustment if the site's layout around the input area has drastically changed.
 
 ### Connection Status in Side Panel Shows "Not Connected"
 1.  Make sure the LLM websites are fully loaded.

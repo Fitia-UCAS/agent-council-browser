@@ -217,16 +217,16 @@ The message type is:
 
 ---
 
-## Background storage + forwarding
+## Background storage + propagation
 
 Background behavior is unchanged for debate logic, except it now:
 
 - Accepts `message.contentHtml` (optional)
 - Caps HTML size again (defense-in-depth)
 - Stores `contentHtml` on the session message entry
-- Forwards `contentHtml` in `UI_MESSAGE_ADD`
+- Propagates `contentHtml` in `UI_MESSAGE_ADD`
 
-Non-session responses (`LLM_RESPONSE`) also forward `contentHtml` for consistency.
+Non-session responses (`LLM_RESPONSE`) also include `contentHtml` for consistency.
 
 This is backward-compatible: if content scripts don’t send HTML, UI still works.
 
