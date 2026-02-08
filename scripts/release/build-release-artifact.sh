@@ -33,6 +33,8 @@ required_files=(
   "sidepanel.html"
   "sidepanel.js"
   "styles.css"
+  "src/shared/providers.js"
+  "src/shared/storage-keys.js"
 )
 
 required_dirs=(

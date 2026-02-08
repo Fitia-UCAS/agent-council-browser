@@ -15,6 +15,12 @@ try {
     console.error('[MLC Debate] Failed to import debate prompt utils:', error);
 }
 
+try {
+    importScripts('src/shared/storage-keys.js', 'src/shared/providers.js');
+} catch (error) {
+    console.error('[MLC Shared] Failed to import shared constants:', error);
+}
+
 // Extension installation
 chrome.runtime.onInstalled.addListener(() => {
     console.log('[MLC Background] Multi-LLM Coder extension installed/updated.');
@@ -146,12 +152,6 @@ function generatePromptId() {
 }
 
 // DEBATE SESSION STATE MANAGEMENT
-const ACTIVE_SESSION_KEY = 'mlc_active_session_v2';
-const SESSIONS_KEY = 'mlc_sessions_v1';
-const PREFERRED_TABS_KEY = 'mlc_preferred_tabs';
-const TAB_PROFILES_KEY = 'mlc_tab_profiles_v1';
-const CHATS_KEY = 'mlc_chats_v1';
-
 let tabProfilesOpChain = Promise.resolve();
 
 function withTabProfilesLock(operation) {
@@ -821,24 +821,6 @@ function enqueueDebateResponse(message, label) {
 // sentTo: attachments have been accounted for that provider (uploaded+sent, or intentionally skipped).
 // preparedTo: attachments have been pre-attached to the provider UI but not necessarily sent yet.
 const sessionAttachmentsById = new Map(); // sessionId -> { sessionId, attachments, sentTo, preparedTo }
-
-function normalizeProviderKey(provider) {
-    return String(provider || '').trim().toLowerCase();
-}
-
-function getSupportedProviderKeys() {
-    const capabilities = PROVIDER_CAPABILITIES && typeof PROVIDER_CAPABILITIES === 'object'
-        ? Object.keys(PROVIDER_CAPABILITIES)
-        : [];
-    const normalized = capabilities.map(normalizeProviderKey).filter(Boolean);
-    return [...new Set(normalized)];
-}
-
-function isSupportedProviderKey(provider) {
-    const key = normalizeProviderKey(provider);
-    if (!key) return false;
-    return getSupportedProviderKeys().includes(key);
-}
 
 function initProviderFlagMap(providers, initialValue) {
     const map = {};
@@ -2959,68 +2941,6 @@ function formatLLMLabel(llmType) {
     return 'ChatGPT';
 }
 
-const PROVIDER_METADATA = {
-    chatgpt: {
-        label: 'ChatGPT',
-        openUrl: 'https://chatgpt.com/',
-        expectedHosts: ['chatgpt.com', 'chat.openai.com', 'openai.com', 'platform.openai.com'],
-        urlPatterns: [
-            '*://chat.openai.com/*',
-            '*://chatgpt.com/*',
-            '*://openai.com/chatgpt*',
-            '*://platform.openai.com/*'
-        ]
-    },
-    gemini: {
-        label: 'Gemini',
-        openUrl: 'https://gemini.google.com/',
-        expectedHosts: ['gemini.google.com'],
-        urlPatterns: ['*://gemini.google.com/*']
-    },
-    claude: {
-        label: 'Claude',
-        openUrl: 'https://claude.ai/new',
-        expectedHosts: ['claude.ai'],
-        urlPatterns: ['*://claude.ai/*', '*://*.claude.ai/*']
-    },
-    grok: {
-        label: 'Grok',
-        openUrl: 'https://grok.com/',
-        expectedHosts: ['grok.com'],
-        urlPatterns: ['*://grok.com/*', '*://*.grok.com/*']
-    }
-};
-
-const PROVIDER_CAPABILITIES = {
-    chatgpt: {
-        attachments: {
-            mode: 'auto'
-        }
-    },
-    gemini: {
-        // Gemini currently blocks reliable programmatic uploads from extension content scripts:
-        // - No discoverable <input type="file"> in light DOM / open shadow roots
-        // - Synthetic drag/drop events are ignored (event.isTrusted === false)
-        // Fall back to sending text-only (no programmatic upload).
-        attachments: {
-            mode: 'manual'
-        }
-    },
-    claude: {
-        // Claude (claude.ai) exposes a real <input type="file"> in the composer.
-        // We attempt programmatic upload via DataTransfer -> input.files + change/input events.
-        attachments: {
-            mode: 'auto'
-        }
-    },
-    grok: {
-        // Grok (grok.com) attachment automation is best-effort. If UI automation fails, we fall back to text-only.
-        attachments: {
-            mode: 'auto'
-        }
-    }
-};
-
 function getProviderAttachmentMode(provider) {
     const mode = PROVIDER_CAPABILITIES?.[provider]?.attachments?.mode;
     if (mode === 'manual' || mode === 'none') return mode;
@@ -3028,7 +2948,6 @@ function getProviderAttachmentMode(provider) {
 }
 
 const DEBATE_PROMPTS_PATH = 'debate_prompts.json';
-const PROMPT_TEMPLATES_OVERRIDE_KEY = 'mlc_debate_prompts_override_v1';
 let cachedDebatePromptConfig = null;
 let cachedDebatePromptSource = null;
 let debatePromptConfigLoadPromise = null;
