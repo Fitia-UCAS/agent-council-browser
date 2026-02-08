@@ -140,27 +140,6 @@ function sendMessageToPopup(message) {
     }
 }
 
-// FOLLOW-UP STATE FOR AUTO PROMPT V2
-const defaultFollowUpState = {
-    originalPrompt: null,
-    originalSourceLLM: null, // 'chatgpt' | 'gemini'
-    originalChatGPTTabId: null,
-    originalGeminiTabId: null,
-    geminiResponseContentForFollowUp: null,
-    geminiResponseScraped: false,
-    chatGPTResponseContentForFollowUp: null,
-    chatGPTResponseScraped: false,
-    promptTimestamp: 0, // Track when the prompt was sent
-    promptId: null, // Unique ID for this prompt-response cycle
-    waitingForResponse: false // Flag to track when we're waiting for a response
-};
-let activeFollowUpState = { ...defaultFollowUpState };
-
-function resetFollowUpState() {
-    activeFollowUpState = { ...defaultFollowUpState };
-    console.log('[MLC FollowUp] Follow-up state reset.');
-}
-
 // Generate a unique ID for each prompt-response cycle
 function generatePromptId() {
     return 'prompt_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
@@ -2020,10 +1999,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 });
             }
             sendResponse({ ok: true });
-            break;
-        case 'FORWARD_PROMPT':
-            handleForwardPrompt(message, sender);
-            sendResponse({ status: 'forward_received', type: message.type });
             break;
         case 'GEMINI_RESPONSE_CAPTURED':
             enqueueDebateResponse(message, 'Gemini response');
@@ -4987,86 +4962,12 @@ async function handleSendPrompt(message) {
     }
 }
 
-function handleForwardPrompt(message, sender) {
-    const { from, prompt } = message;
-    console.log('[MLC Background] Processing FORWARD_PROMPT:', { from, prompt: `"${prompt.substring(0,50)}..."` });
-    if (!prompt) {
-        console.warn('[MLC Background] Forward prompt is empty, aborting.');
-        return;
-    }
-
-    let targetLLM = null;
-    if (from === 'chatgpt') {
-        targetLLM = 'gemini';
-        // Initialise follow-up state – we only need to trigger when origin is ChatGPT
-        resetFollowUpState();
-
-        // Generate a unique prompt ID and store timestamp
-        const promptId = generatePromptId();
-        const timestamp = Date.now();
-
-        // Set up the follow-up state with more tracking info
-        activeFollowUpState.originalPrompt = prompt;
-        activeFollowUpState.originalSourceLLM = 'chatgpt';
-        activeFollowUpState.originalChatGPTTabId = sender?.tab?.id || null;
-        activeFollowUpState.promptTimestamp = timestamp;
-        activeFollowUpState.promptId = promptId;
-        activeFollowUpState.waitingForResponse = true;
-
-        console.log('[MLC FollowUp] Initialized follow-up tracking:', activeFollowUpState);
-
-    } else if (from === 'gemini') {
-        targetLLM = 'chatgpt';
-
-        resetFollowUpState();
-
-        const promptId = generatePromptId();
-        const timestamp = Date.now();
-
-        activeFollowUpState.originalPrompt = prompt;
-        activeFollowUpState.originalSourceLLM = 'gemini';
-        activeFollowUpState.originalGeminiTabId = sender?.tab?.id || null;
-        activeFollowUpState.promptTimestamp = timestamp;
-        activeFollowUpState.promptId = promptId;
-        activeFollowUpState.waitingForResponse = true;
-
-    }
-
-    if (targetLLM) {
-        console.log(`[MLC Background] Forwarding from ${from} to ${targetLLM}.`);
-        processLLM(targetLLM, prompt, { promptId: activeFollowUpState.promptId });
-    } else {
-        console.error('[MLC Background] Unknown "from" field for FORWARD_PROMPT:', from);
-    }
-}
-
 function handleGeminiResponse(message) {
     if (message.sessionId) return;
-
-    console.log('[MLC FollowUp] Gemini response received:', {
-        content: message.content ? message.content.substring(0, 50) + '...' : 'None',
-        promptId: message.promptId,
-        responseDelay: message.responseDelay,
-        waitingState: activeFollowUpState.waitingForResponse,
-        currentPromptId: activeFollowUpState.promptId
-    });
-    
-    // TEMPORARILY DISABLE STRICT VALIDATION
-    // Our validation may be too strict and blocking valid responses
-    
-    // Check if the response has content
     if (!message.content || message.content.trim().length === 0) {
-        console.log('[MLC FollowUp] Received empty Gemini response, ignoring.');
+        console.log('[MLC] Received empty Gemini response, ignoring.');
         return;
     }
-    
-    console.log(`[MLC FollowUp] Valid Gemini response received, accepting for follow-up.`);
-    activeFollowUpState.geminiResponseContentForFollowUp = message.content;
-    activeFollowUpState.geminiResponseScraped = true;
-    activeFollowUpState.waitingForResponse = false;
-    
-    console.log('[MLC FollowUp] Stored Gemini response, attempting trigger.');
-    triggerFollowUpIfReady();
 
     sendMessageToPopup({
         type: 'LLM_RESPONSE',
@@ -5079,24 +4980,10 @@ function handleGeminiResponse(message) {
 function handleChatGPTResponse(message) {
     if (message.sessionId) return;
 
-    console.log('[MLC FollowUp] ChatGPT response received:', {
-        content: message.content ? message.content.substring(0, 50) + '...' : 'None',
-        promptId: message.promptId,
-        waitingState: activeFollowUpState.waitingForResponse,
-        currentPromptId: activeFollowUpState.promptId
-    });
-
     if (!message.content || message.content.trim().length === 0) {
-        console.log('[MLC FollowUp] Received empty ChatGPT response, ignoring.');
+        console.log('[MLC] Received empty ChatGPT response, ignoring.');
         return;
     }
-
-    activeFollowUpState.chatGPTResponseContentForFollowUp = message.content;
-    activeFollowUpState.chatGPTResponseScraped = true;
-    activeFollowUpState.waitingForResponse = false;
-
-    console.log('[MLC FollowUp] Stored ChatGPT response, attempting trigger.');
-    triggerFollowUpIfReady();
 
     sendMessageToPopup({
         type: 'LLM_RESPONSE',
@@ -5136,146 +5023,6 @@ function handleGrokResponse(message) {
         content: message.content,
         contentHtml: message.contentHtml || undefined
     });
-}
-
-function triggerFollowUpIfReady() {
-    if (
-        activeFollowUpState.originalSourceLLM === 'chatgpt' &&
-        activeFollowUpState.geminiResponseScraped &&
-        activeFollowUpState.geminiResponseContentForFollowUp &&
-        activeFollowUpState.originalChatGPTTabId
-    ) {
-        console.log('[MLC FollowUp] Conditions met, injecting follow-up prompt to ChatGPT.');
-        const followUpPromptText = `I also asked Gemini the same question here's his answer:\n${activeFollowUpState.geminiResponseContentForFollowUp}\n\nCould you read your answer and his answer to see if you can enhance yours or if everything's good.`;
-        injectFollowUpIntoChatGPT(activeFollowUpState.originalChatGPTTabId, followUpPromptText);
-        resetFollowUpState();
-    } else if (
-        activeFollowUpState.originalSourceLLM === 'gemini' &&
-        activeFollowUpState.chatGPTResponseScraped &&
-        activeFollowUpState.chatGPTResponseContentForFollowUp &&
-        activeFollowUpState.originalGeminiTabId
-    ) {
-        console.log('[MLC FollowUp] Conditions met, injecting follow-up prompt to Gemini.');
-        const followUpPromptText = `I also asked ChatGPT the same question here's his answer:\n${activeFollowUpState.chatGPTResponseContentForFollowUp}\n\nCould you read your answer and his answer to see if you can enhance yours or if everything's good.`;
-        injectFollowUpIntoGemini(activeFollowUpState.originalGeminiTabId, followUpPromptText);
-        resetFollowUpState();
-    } else {
-        console.log('[MLC FollowUp] Not ready for follow-up yet.', activeFollowUpState);
-    }
-}
-
-async function injectFollowUpIntoChatGPT(tabId, promptText) {
-    try {
-        console.log(`[MLC FollowUp] Injecting follow-up into ChatGPT tab ${tabId}.`);
-        const results = await chrome.scripting.executeScript({
-            target: { tabId },
-            func: simpleInteraction_InjectOnly,
-            args: [promptText, 'chatgpt']
-        });
-        if (results && results[0] && results[0].result && results[0].result.success) {
-            console.log('[MLC FollowUp] Follow-up prompt injected successfully.');
-        } else {
-            console.error('[MLC FollowUp] Failed to inject follow-up prompt.', results);
-        }
-    } catch (error) {
-        console.error('[MLC FollowUp] Error during follow-up injection:', error);
-    }
-}
-
-async function injectFollowUpIntoGemini(tabId, promptText) {
-    try {
-        console.log(`[MLC FollowUp] Injecting follow-up into Gemini tab ${tabId}.`);
-        const results = await chrome.scripting.executeScript({
-            target: { tabId },
-            func: simpleInteraction_InjectOnly,
-            args: [promptText, 'gemini']
-        });
-        if (results && results[0] && results[0].result && results[0].result.success) {
-            console.log('[MLC FollowUp] Follow-up prompt injected successfully into Gemini.');
-        } else {
-            console.error('[MLC FollowUp] Failed to inject follow-up prompt into Gemini.', results);
-        }
-    } catch (error) {
-        console.error('[MLC FollowUp] Error during follow-up injection into Gemini:', error);
-    }
-}
-
-// Inject-only variant: sets text but does NOT send.
-function simpleInteraction_InjectOnly(prompt, llmType) {
-    const promptText = typeof prompt === 'string' ? prompt : String(prompt || '');
-    const LARGE_PROMPT_THRESHOLD = 8000;
-    const isLargePrompt = promptText.length >= LARGE_PROMPT_THRESHOLD;
-    console.log(`[SimpleInteraction_InjectOnly INJECTED] (${llmType}) attempting to set prompt length ${promptText.length}.`);
-    try {
-        const inputSelectors = {
-            chatgpt: [
-                '#prompt-textarea',
-                'textarea[data-testid="prompt-textarea"]',
-                'textarea[placeholder*="Message"]',
-                'textarea'
-            ],
-            gemini: [
-                'div.ql-editor[role="textbox"]',
-                '.ql-editor.textarea',
-                'div[contenteditable="true"]',
-                'textarea[placeholder*="Enter a prompt"]',
-                'textarea[placeholder*="Ask"]',
-                'textarea'
-            ],
-            claude: [
-                'textarea[data-testid="chat-input-ssr"]',
-                'textarea[placeholder*="Message" i]',
-                'textarea[aria-label*="Message" i]',
-                'textarea[placeholder*="Send" i]',
-                'textarea',
-                '.ProseMirror[contenteditable="true"]',
-                'div[contenteditable="true"][role="textbox"]',
-                'div[contenteditable="true"]',
-                '[contenteditable="true"]'
-            ],
-            grok: [
-                'textarea[aria-label*="message" i]',
-                'textarea[placeholder*="message" i]',
-                'textarea[placeholder*="ask" i]',
-                'textarea',
-                'div[contenteditable="true"][role="textbox"]',
-                '[contenteditable="true"][role="textbox"]',
-                '[contenteditable="true"]',
-                '[role="textbox"]'
-            ]
-        };
-        const selectors = inputSelectors[llmType] || [];
-        let inputEl = null;
-        for (const sel of selectors) {
-            inputEl = document.querySelector(sel);
-            if (inputEl) break;
-        }
-        if (!inputEl) {
-            console.error('[SimpleInteraction_InjectOnly INJECTED] No input element found.');
-            return { success:false, error:'input_not_found' };
-        }
-        inputEl.focus();
-        if (inputEl.tagName === 'TEXTAREA') {
-            const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-            setter ? setter.call(inputEl, promptText) : (inputEl.value = promptText);
-            inputEl.dispatchEvent(new Event('input', { bubbles:true, composed:true }));
-        } else if (inputEl.isContentEditable || inputEl.contentEditable === 'true') {
-            if (isLargePrompt) {
-                inputEl.textContent = promptText;
-            } else {
-                document.execCommand('selectAll', false, null);
-                document.execCommand('insertText', false, promptText);
-            }
-            inputEl.dispatchEvent(new Event('input', { bubbles:true, composed:true }));
-        } else {
-            inputEl.value = promptText;
-            inputEl.dispatchEvent(new Event('input', { bubbles:true, composed:true }));
-        }
-        return { success:true };
-    } catch(e) {
-        console.error('[SimpleInteraction_InjectOnly INJECTED] Exception', e);
-        return { success:false, error:e.message };
-    }
 }
 
 async function processLLM(llmType, prompt, context = {}) {
@@ -5462,8 +5209,9 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         const readyTimeoutMs = (() => {
             const value = options && typeof options === 'object' ? options.readyTimeoutMs : null;
-            if (!Number.isFinite(value)) return 4000;
-            return Math.min(120000, Math.max(1500, Math.floor(value)));
+            const fallbackMs = 12000;
+            if (!Number.isFinite(value)) return fallbackMs;
+            return Math.min(120000, Math.max(2000, Math.floor(value)));
         })();
 
         // Make the tab active to maximize the chance CDP input targets the correct frame/element.
@@ -5703,23 +5451,29 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
             };
         })()`;
 
-        const focusResult = await debuggerSendCommand(debuggee, 'Runtime.evaluate', {
-            expression: focusExpr,
-            returnByValue: true
+        const evalFocus = async () => {
+            const focusResult = await debuggerSendCommand(debuggee, 'Runtime.evaluate', {
+                expression: focusExpr,
+                returnByValue: true
+            });
+            return focusResult?.result?.value || null;
+        };
+
+        const toFocusMeta = (value) => ({
+            inputTag: value?.inputTag || null,
+            inputTestId: value?.inputTestId || null,
+            inputRole: value?.inputRole || null,
+            inputContentEditable: Boolean(value?.inputContentEditable),
+            sendLabel: value?.sendLabel || null,
+            rootTag: value?.rootTag || null
         });
-        const focusValue = focusResult?.result?.value;
+
+        let focusValue = await evalFocus();
         if (!focusValue?.ok) {
             const details = focusValue ? ` details=${JSON.stringify(focusValue)}` : '';
             throw new Error(`Claude focus failed: ${focusValue?.error || 'unknown_error'}.${details}`);
         }
-        const focusMeta = {
-            inputTag: focusValue?.inputTag || null,
-            inputTestId: focusValue?.inputTestId || null,
-            inputRole: focusValue?.inputRole || null,
-            inputContentEditable: Boolean(focusValue?.inputContentEditable),
-            sendLabel: focusValue?.sendLabel || null,
-            rootTag: focusValue?.rootTag || null
-        };
+        let focusMeta = toFocusMeta(focusValue);
         if (focusMeta.inputTestId === 'chat-input-ssr') {
             console.warn('[MLC Background] Claude focus selected SSR textarea (chat-input-ssr); composer may not be fully hydrated yet.');
         }
@@ -5738,6 +5492,31 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
             await clickAt(inputX, inputY);
             await sleep(80);
         }
+
+        const refreshComposerRefs = async (reason) => {
+            try {
+                const refreshed = await evalFocus();
+                if (!refreshed?.ok) {
+                    console.warn('[MLC Background] Claude composer refresh failed:', reason, refreshed || null);
+                    return false;
+                }
+                focusValue = refreshed;
+                focusMeta = toFocusMeta(refreshed);
+                if (focusMeta.inputTestId === 'chat-input-ssr') {
+                    console.warn('[MLC Background] Claude refresh selected SSR textarea (chat-input-ssr); waiting for hydrated editor.', { reason });
+                }
+                const nextX = Number(refreshed?.inputX);
+                const nextY = Number(refreshed?.inputY);
+                if (Number.isFinite(nextX) && Number.isFinite(nextY)) {
+                    await clickAt(nextX, nextY);
+                    await sleep(80);
+                }
+                return true;
+            } catch (error) {
+                console.warn('[MLC Background] Claude composer refresh threw:', reason, error);
+                return false;
+            }
+        };
 
         const dispatchSelectAll = async (modifier) => {
             await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
@@ -5806,13 +5585,17 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
             const inputText = getText(input);
             const inputTrim = inputText.trim();
             const inputLen = inputTrim.length;
+            const btnVisible = Boolean(btn && isVisible(btn));
             const btnStyle = btn ? window.getComputedStyle(btn) : null;
             const pointerEvents = btnStyle ? btnStyle.pointerEvents : null;
-            const disabled = !btn || !isVisible(btn)
-                || Boolean(btn.disabled) || btn.getAttribute('disabled') !== null
-                || String(btn.getAttribute('aria-disabled') || '').toLowerCase() === 'true'
+            const ariaDisabled = String(btn?.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
+            const disabledAttr = btn?.getAttribute('disabled') !== null;
+            const domDisabled = Boolean(btn?.disabled);
+            const disabled = !btnVisible
+                || domDisabled || disabledAttr
+                || ariaDisabled
                 || pointerEvents === 'none';
-            const rect = btn && isVisible(btn) ? btn.getBoundingClientRect() : null;
+            const rect = btnVisible ? btn.getBoundingClientRect() : null;
             const sendX = rect ? rect.left + rect.width / 2 : null;
             const sendY = rect ? rect.top + rect.height / 2 : null;
             let sendHit = null;
@@ -5837,7 +5620,11 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
                 inputLen,
                 inputPreview: inputTrim.slice(0, 160),
                 sendDisabled: disabled,
+                sendVisible: btnVisible,
                 sendPointerEvents: pointerEvents,
+                sendAriaDisabled: ariaDisabled,
+                sendDisabledAttr: disabledAttr,
+                sendDomDisabled: domDisabled,
                 sendLabel: btn?.getAttribute?.('aria-label') || '',
                 sendX,
                 sendY,
@@ -5864,27 +5651,65 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
 
         let state = await evalState();
         if (!state?.ok) {
+            await refreshComposerRefs('state_missing_after_typing');
+            state = await evalState();
+        }
+        if (!state?.ok) {
             throw new Error(`Claude composer state unavailable after typing (input/send references lost). focus=${JSON.stringify(focusMeta)}`);
         }
         if (!state.inputLen) {
             throw new Error(`Claude input stayed empty after typing (input did not receive programmatic text). focus=${JSON.stringify(focusMeta)}`);
         }
 
-        // Wait for Send to become enabled (or at least clickable).
+        // Wait for Send to become enabled/clickable, but do not hard-fail here:
+        // fallback send paths (Enter/DOM click) can still succeed on Claude UI transitions.
+        const isSendReady = (value) => Boolean(
+            value?.ok
+            && value.sendDisabled === false
+            && Number.isFinite(value.sendX)
+            && Number.isFinite(value.sendY)
+        );
+        let sendReady = isSendReady(state);
         const startedAt = Date.now();
-        while (Date.now() - startedAt < readyTimeoutMs) {
+        let lastRefreshAt = 0;
+        while (!sendReady && (Date.now() - startedAt < readyTimeoutMs)) {
             state = await evalState();
-            if (state?.ok && state.sendDisabled === false && Number.isFinite(state.sendX) && Number.isFinite(state.sendY)) {
-                break;
+            sendReady = isSendReady(state);
+            if (sendReady) break;
+
+            const shouldRefreshRefs = !state?.ok
+                || state.inputConnected === false
+                || state.sendConnected === false
+                || !Number.isFinite(state?.sendX)
+                || !Number.isFinite(state?.sendY);
+            if (shouldRefreshRefs && (Date.now() - lastRefreshAt >= 900)) {
+                await refreshComposerRefs('ready_wait_reacquire');
+                state = await evalState();
+                sendReady = isSendReady(state);
+                lastRefreshAt = Date.now();
+                if (sendReady) break;
             }
             await sleep(150);
         }
 
         if (!state?.ok) {
+            await refreshComposerRefs('ready_wait_failed');
+            state = await evalState();
+        }
+        if (!state?.ok) {
             throw new Error('Claude send readiness check failed (composer missing).');
         }
-        if (state.sendDisabled) {
-            throw new Error(`Claude send button stayed disabled after typing. inputLen=${state.inputLen} pointerEvents=${state.sendPointerEvents || 'unknown'} waitMs=${readyTimeoutMs} focus=${JSON.stringify(focusMeta)}`);
+        if (!sendReady) {
+            console.warn('[MLC Background] Claude send still not ready after wait; trying fallback send paths.', {
+                inputLen: state.inputLen,
+                pointerEvents: state.sendPointerEvents || 'unknown',
+                ariaDisabled: state.sendAriaDisabled,
+                domDisabled: state.sendDomDisabled,
+                disabledAttr: state.sendDisabledAttr,
+                visible: state.sendVisible,
+                waitMs: readyTimeoutMs,
+                focus: focusMeta
+            });
         }
 
         const ackExpr = `(() => {
@@ -6006,8 +5831,24 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
         const probe = normalize(text).slice(0, 80);
 
         const beforeSend = await evalAck();
+        const tryPointerSend = async (reason) => {
+            state = await evalState();
+            if (!state?.ok || !Number.isFinite(state.sendX) || !Number.isFinite(state.sendY)) {
+                await refreshComposerRefs(`pointer_send_${reason}`);
+                state = await evalState();
+            }
+            if (!state?.ok) return false;
+            if (state.sendDisabled === true) {
+                return false;
+            }
+            if (!Number.isFinite(state.sendX) || !Number.isFinite(state.sendY)) {
+                return false;
+            }
+            await clickAt(Number(state.sendX), Number(state.sendY));
+            return true;
+        };
 
-        await clickAt(Number(state.sendX), Number(state.sendY));
+        await tryPointerSend('initial');
 
         const pressEnter = async () => {
             await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
@@ -6143,8 +5984,14 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
         }
 
         if (!ack.ok) {
+            await tryPointerSend('retry');
+            ack = await waitForAck(ackTimeoutMs);
+        }
+
+        if (!ack.ok) {
             // When Chrome is not focused (user in another app), CDP mouse events can be flaky.
             // Fall back to triggering the send action via DOM APIs, then re-check for ack.
+            await refreshComposerRefs('before_dom_send');
             await tryDomSend();
             ack = await waitForAck(ackTimeoutMs);
         }
@@ -6169,6 +6016,11 @@ async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
             + `sendHit=${finalState?.sendHitTag ?? 'unknown'} `
             + `inputLen=${finalState?.inputLen ?? 'unknown'} `
             + `sendDisabled=${finalState?.sendDisabled ?? 'unknown'} `
+            + `sendVisible=${finalState?.sendVisible ?? 'unknown'} `
+            + `ariaDisabled=${finalState?.sendAriaDisabled ?? 'unknown'} `
+            + `domDisabled=${finalState?.sendDomDisabled ?? 'unknown'} `
+            + `disabledAttr=${finalState?.sendDisabledAttr ?? 'unknown'} `
+            + `pointerEvents=${finalState?.sendPointerEvents ?? 'unknown'} `
             + `ackBottomLen=${finalAck?.bottomLen ?? 'unknown'} `
             + `ackGenerating=${finalAck?.generating ?? 'unknown'} `
             + `focus=${JSON.stringify(focusMeta)}`
@@ -6257,6 +6109,12 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                 }
                 if (/send button stayed disabled/i.test(rawMessage)) {
                     tips.push('Verify you can type and send manually in that Claude tab; if not, Claude is blocking input (or the composer is not ready).');
+                }
+                if (/send could not be confirmed|CLAUDE_SEND_UNCONFIRMED/i.test(rawMessage)) {
+                    tips.push('Keep the Claude tab visible and fully loaded, then retry; transient UI transitions can delay send confirmation.');
+                }
+                if (/ariaDisabled=true|sendDisabled=true|pointerEvents=none/i.test(rawMessage)) {
+                    tips.push('Claude still reports the send control as disabled; wait briefly for composer readiness and retry.');
                 }
                 const suffix = tips.length ? ` ${tips.join(' ')}` : '';
                 const needsChromeFocus = originalCode === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED';
@@ -6401,7 +6259,7 @@ async function injectAndPrepareAttachments(tabId, llmType, attachments) {
 
 // This function is injected and executed in the context of the target LLM's page
 // ... (keep all other parts of background.js from the previous good version) ...
-// ... (including onInstalled, sendMessageToPopup, onMessage, handleSendPrompt, handleForwardPrompt, processLLM, findLLMTab, injectAndExecute, checkConnectionStatus) ...
+// ... (including onInstalled, sendMessageToPopup, onMessage, handleSendPrompt, processLLM, findLLMTab, injectAndExecute, checkConnectionStatus) ...
 
 // THIS IS THE FUNCTION THAT GETS INJECTED AND EXECUTED IN THE TARGET PAGE
 async function simpleInteraction(prompt, llmType, attachments, options = null) { // Added async here for the setTimeout
