@@ -1038,13 +1038,6 @@ async function setPreferredTabs(payload = {}) {
     return next;
 }
 
-function normalizeProvider(provider) {
-    const key = normalizeProviderKey(provider);
-    if (key && isSupportedProviderKey(key)) return key;
-    // Preserve legacy behavior: unknown providers map to ChatGPT.
-    return 'chatgpt';
-}
-
 function getTabUrlCandidate(tab) {
     if (!tab) return '';
     if (typeof tab.url === 'string' && tab.url) return tab.url;
@@ -1124,24 +1117,6 @@ function sanitizeProfilesState(state) {
     });
     const nextState = changed ? { ...state, profiles: nextProfiles } : state;
     return { state: nextState, changed };
-}
-
-function getExpectedHosts(provider) {
-    const normalized = normalizeProvider(provider);
-    const hosts = PROVIDER_METADATA?.[normalized]?.expectedHosts;
-    if (Array.isArray(hosts) && hosts.length > 0) return hosts;
-    return PROVIDER_METADATA.chatgpt.expectedHosts;
-}
-
-function isExpectedHost(provider, url) {
-    if (!url) return false;
-    try {
-        const { hostname } = new URL(url);
-        const expected = getExpectedHosts(provider);
-        return expected.some(host => hostname === host || hostname.endsWith(`.${host}`));
-    } catch (error) {
-        return false;
-    }
 }
 
 async function loadTabProfiles() {
@@ -1719,7 +1694,7 @@ async function runParallelAutoFocusCycle() {
 
 async function openProviderTab(provider, options = {}) {
     const normalizedProvider = normalizeProvider(provider);
-    const url = PROVIDER_METADATA?.[normalizedProvider]?.openUrl || PROVIDER_METADATA.chatgpt.openUrl;
+    const url = getProviderOpenUrl(normalizedProvider);
     const focus = options.focus !== false;
     const tab = await chrome.tabs.create({
         url,
@@ -2929,16 +2904,6 @@ function getTurnLLM(session, turnIndex) {
         if (participant?.provider) return participant.provider;
     }
     return turnIndex % 2 === 1 ? session.firstLLM : session.secondLLM;
-}
-
-function formatLLMLabel(llmType) {
-    const normalized = normalizeProviderKey(llmType);
-    const label = PROVIDER_METADATA?.[normalized]?.label;
-    if (label) return label;
-    if (normalized === 'gemini') return 'Gemini';
-    if (normalized === 'claude') return 'Claude';
-    if (normalized === 'grok') return 'Grok';
-    return 'ChatGPT';
 }
 
 function getProviderAttachmentMode(provider) {
@@ -4980,7 +4945,7 @@ async function processLLM(llmType, prompt, context = {}) {
 
 async function listLLMTabs(llmType) {
     const normalized = normalizeProviderKey(llmType);
-    const patterns = PROVIDER_METADATA?.[normalized]?.urlPatterns;
+    const patterns = getProviderUrlPatterns(normalized);
     if (!patterns) {
         throw new Error(`[MLC Background] Unknown LLM type for listLLMTabs: ${llmType}`);
     }

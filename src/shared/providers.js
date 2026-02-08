@@ -77,3 +77,50 @@ function isSupportedProviderKey(provider) {
     if (!key) return false;
     return getSupportedProviderKeys().includes(key);
 }
+
+function normalizeProvider(provider) {
+    const key = normalizeProviderKey(provider);
+    if (key && isSupportedProviderKey(key)) return key;
+    // Preserve legacy behavior: unknown providers map to ChatGPT.
+    return 'chatgpt';
+}
+
+function getExpectedHosts(provider) {
+    const normalized = normalizeProvider(provider);
+    const hosts = PROVIDER_METADATA?.[normalized]?.expectedHosts;
+    if (Array.isArray(hosts) && hosts.length > 0) return hosts;
+    return PROVIDER_METADATA.chatgpt.expectedHosts;
+}
+
+function isExpectedHost(provider, url) {
+    if (!url) return false;
+    try {
+        const { hostname } = new URL(url);
+        const expected = getExpectedHosts(provider);
+        return expected.some((host) => hostname === host || hostname.endsWith(`.${host}`));
+    } catch (error) {
+        return false;
+    }
+}
+
+function getProviderOpenUrl(provider) {
+    const normalized = normalizeProvider(provider);
+    return PROVIDER_METADATA?.[normalized]?.openUrl || PROVIDER_METADATA.chatgpt.openUrl;
+}
+
+function getProviderUrlPatterns(provider) {
+    const normalized = normalizeProviderKey(provider);
+    const patterns = PROVIDER_METADATA?.[normalized]?.urlPatterns;
+    if (Array.isArray(patterns) && patterns.length > 0) return patterns;
+    return null;
+}
+
+function formatLLMLabel(provider) {
+    const normalized = normalizeProviderKey(provider);
+    const label = PROVIDER_METADATA?.[normalized]?.label;
+    if (label) return label;
+    if (normalized === 'gemini') return 'Gemini';
+    if (normalized === 'claude') return 'Claude';
+    if (normalized === 'grok') return 'Grok';
+    return 'ChatGPT';
+}
