@@ -20,6 +20,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
 ### Main user flow (runs)
 
 1. User connects providers (creates default tabs) via **Connect** / **Connect all** in the Route Builder provider list.
+   - If the current route has no agents, **Connect all** seeds the route with one `Default` agent per supported provider before connecting tabs.
 2. In the side panel composer, user selects a **Route** from the `To` pill:
    - Add one or more **agents** from the **Providers** list via **New tab** (opens a new provider tab and binds/assigns it).
    - The **Agents** list is order-only: drag to reorder and `×` to remove.
@@ -57,7 +58,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
 ### Quick connect (side panel)
 
 - The Route builder shows a per‑provider **Connect** button when a required provider is not ready, plus a **Connect all** button.
-- When the route is empty, **Connect all** also bootstraps one default agent per provider so the route is immediately usable.
+- When no agents are selected, **Connect all** acts as a bootstrap action: it adds default agents and opens/reconnects provider tabs.
 - Provider rows also expose **New tab**, which opens a fresh provider tab, claims it into a new Tab Profile, and assigns it to an agent (useful for multiple agents on the same provider).
 - These send `CONNECT_PROVIDER` to the background, which:
   - opens the provider homepage tab, then
