@@ -39,6 +39,12 @@ try {
     console.error('[MLC Session] Failed to import session registry module:', error);
 }
 
+try {
+    importScripts('src/background/profile-service.js');
+} catch (error) {
+    console.error('[MLC Profiles] Failed to import profile service module:', error);
+}
+
 // Extension installation
 chrome.runtime.onInstalled.addListener(() => {
     console.log('[MLC Background] Multi-LLM Coder extension installed/updated.');
@@ -327,6 +333,54 @@ const getSessionForChat = sessionRegistry?.getSessionForChat || (async () => nul
 const saveSession = sessionRegistry?.saveSession || (async (session) => session);
 const removeSession = sessionRegistry?.removeSession || (async () => {});
 const pickMostRecentSession = sessionRegistry?.pickMostRecentSession || (() => null);
+
+const createProfileServiceFn = globalThis.createProfileService;
+const profileService = typeof createProfileServiceFn === 'function'
+    ? createProfileServiceFn({
+        sendMessageToPopup,
+        checkConnectionStatus,
+        notifyTabProfiles,
+        createProfileFromActiveTab,
+        claimTabAsProfile,
+        updateTabProfile,
+        deleteTabProfile,
+        setDefaultProfile,
+        focusTab,
+        openProviderTab,
+        connectProvider,
+        normalizeProvider,
+        sanitizeModelHint,
+        updateProfileModelHint,
+        updateProfilesForTab,
+        handleTabRemoved,
+        handleTabActivated,
+        handleWindowFocusChanged,
+        getTabUrlCandidate,
+        isExpectedHost,
+        warn: (...args) => console.warn(...args),
+        error: (...args) => console.error(...args)
+    })
+    : null;
+
+if (!profileService) {
+    console.error('[MLC Profiles] Profile service unavailable.');
+}
+
+const PROFILE_SERVICE_MESSAGE_TYPES = new Set(
+    profileService?.getHandledMessageTypes?.() || [
+        'GET_TAB_PROFILES',
+        'CREATE_PROFILE_FROM_ACTIVE_TAB',
+        'CLAIM_TAB_AS_PROFILE',
+        'UPDATE_TAB_PROFILE',
+        'DELETE_TAB_PROFILE',
+        'SET_DEFAULT_PROFILE',
+        'FOCUS_TAB',
+        'OPEN_PROVIDER_TAB',
+        'CONNECT_PROVIDER',
+        'CHECK_CONNECTION',
+        'PROVIDER_MODEL_INFO'
+    ]
+);
 
 // Tracks whether any Chrome window is currently focused (i.e., Chrome is the active app).
 // Used to avoid stealing OS focus when auto-focusing provider tabs while the user is in another app.
@@ -1501,6 +1555,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return false;
     }
 
+    if (profileService?.handleProfileMessage) {
+        const handled = profileService.handleProfileMessage(message, sender, sendResponse);
+        if (handled) {
+            return true;
+        }
+    } else if (PROFILE_SERVICE_MESSAGE_TYPES.has(message?.type)) {
+        sendResponse({
+            ok: false,
+            error: 'Profile service unavailable.',
+            code: 'SERVICE_UNAVAILABLE'
+        });
+        return false;
+    }
+
     switch (message.type) {
         case 'GET_PROVIDER_CAPABILITIES':
             sendResponse({ ok: true, capabilities: PROVIDER_CAPABILITIES });
@@ -1508,12 +1576,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'SEND_PROMPT':
             handleSendPrompt(message);
             sendResponse({ status: 'received', type: message.type });
-            break;
-        case 'GET_TAB_PROFILES':
-            notifyTabProfiles().catch(error => {
-                console.error('[MLC Profiles] Error listing profiles:', error);
-            });
-            sendResponse({ status: 'profiles_sent', type: message.type });
             break;
         case 'GET_DEBATE_PROMPTS':
             getDebatePromptConfigForUi().then(sendResponse).catch(error => {
@@ -1533,70 +1595,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 sendResponse({ ok: false, error: error.message });
             });
             return true;
-        case 'CREATE_PROFILE_FROM_ACTIVE_TAB':
-            createProfileFromActiveTab(message.provider, message.label, message.profileId).then(sendResponse).catch(error => {
-                console.error('[MLC Profiles] Error creating profile from active tab:', error);
-                sendResponse({ ok: false, error: error.message });
-            });
-            return true;
-        case 'CLAIM_TAB_AS_PROFILE':
-            claimTabAsProfile(message).then(sendResponse).catch(error => {
-                console.error('[MLC Profiles] Error claiming tab as profile:', error);
-                sendResponse({ ok: false, error: error.message });
-            });
-            return true;
-        case 'UPDATE_TAB_PROFILE':
-            updateTabProfile(message.profileId, message.patch || {}).then(sendResponse).catch(error => {
-                console.error('[MLC Profiles] Error updating profile:', error);
-                sendResponse({ ok: false, error: error.message });
-            });
-            return true;
-        case 'DELETE_TAB_PROFILE':
-            deleteTabProfile(message.profileId).then(sendResponse).catch(error => {
-                console.error('[MLC Profiles] Error deleting profile:', error);
-                sendResponse({ ok: false, error: error.message });
-            });
-            return true;
-        case 'SET_DEFAULT_PROFILE':
-            setDefaultProfile(message.provider, message.profileId || null).then(sendResponse).catch(error => {
-                console.error('[MLC Profiles] Error setting default profile:', error);
-                sendResponse({ ok: false, error: error.message });
-            });
-            return true;
-        case 'FOCUS_TAB':
-            focusTab(message.tabId, { forceWindowFocus: true }).then(sendResponse).catch(error => {
-                console.error('[MLC Profiles] Error focusing tab:', error);
-                sendResponse({ ok: false, error: error.message });
-            });
-            return true;
-        case 'OPEN_PROVIDER_TAB':
-            openProviderTab(message.provider, message).then(sendResponse).catch(error => {
-                console.error('[MLC Profiles] Error opening provider tab:', error);
-                sendResponse({ ok: false, error: error.message });
-            });
-            return true;
-        case 'CONNECT_PROVIDER':
-            connectProvider(message.provider, { focus: true }).then(sendResponse).catch((error) => {
-                console.error('[MLC Profiles] Error connecting provider:', error);
-                sendResponse({ ok: false, error: error.message });
-            });
-            return true;
-        case 'PROVIDER_MODEL_INFO':
-            if (sender?.tab?.id) {
-                const provider = normalizeProvider(message.provider);
-                const modelLabel = sanitizeModelHint(provider, message.modelLabel || '');
-                if (modelLabel) {
-                    updateProfileModelHint(sender.tab.id, provider, modelLabel);
-                }
-                sendMessageToPopup({
-                    type: 'PROVIDER_MODEL_INFO',
-                    provider,
-                    tabId: sender.tab.id,
-                    modelLabel
-                });
-            }
-            sendResponse({ ok: true });
-            break;
         case 'GEMINI_RESPONSE_CAPTURED':
             enqueueDebateResponse(message, 'Gemini response');
             handleGeminiResponse(message);
@@ -1625,24 +1623,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             enqueueDebateResponse(message, 'multi-agent response');
             sendResponse({ status: 'multi_agent_response_received', type: message.type });
             break;
-        case 'CHECK_CONNECTION': {
-            const profileIds = Array.isArray(message.profileIds)
-                ? message.profileIds.map((id) => String(id || '').trim()).filter(Boolean)
-                : [];
-            checkConnectionStatus({ profileIds }).then((result) => {
-                sendMessageToPopup({
-                    type: 'CONNECTION_STATUS',
-                    status: result.status,
-                    profileStatus: result.profileStatus
-                });
-                sendResponse({
-                    type: 'CONNECTION_STATUS',
-                    status: result.status,
-                    profileStatus: result.profileStatus
-                });
-            });
-            return true; // Keep message channel open for async response
-        }
         case 'LIST_LLM_TABS':
             handleListLLMTabs().catch(error => {
                 console.error('[MLC Debate] Error listing tabs:', error);
@@ -3667,12 +3647,20 @@ async function handleWindowFocusChanged(windowId) {
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+    if (profileService?.onTabRemoved) {
+        profileService.onTabRemoved(tabId);
+        return;
+    }
     handleTabRemoved(tabId).catch(error => {
         console.warn('[MLC Profiles] Failed to handle tab removal:', error);
     });
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (profileService?.onTabUpdated) {
+        profileService.onTabUpdated(tabId, changeInfo, tab);
+        return;
+    }
     if (!tab || !Number.isFinite(tabId)) return;
     if (changeInfo.url || changeInfo.status === 'complete' || changeInfo.title) {
         updateProfilesForTab(tab).catch(error => {
@@ -3682,12 +3670,20 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 chrome.tabs.onActivated.addListener((activeInfo) => {
+    if (profileService?.onTabActivated) {
+        profileService.onTabActivated(activeInfo);
+        return;
+    }
     handleTabActivated(activeInfo).catch(error => {
         console.warn('[MLC Profiles] Failed to handle tab activation:', error);
     });
 });
 
 chrome.windows.onFocusChanged.addListener((windowId) => {
+    if (profileService?.onWindowFocusChanged) {
+        profileService.onWindowFocusChanged(windowId);
+        return;
+    }
     handleWindowFocusChanged(windowId).catch(error => {
         console.warn('[MLC Profiles] Failed to handle window focus change:', error);
     });
