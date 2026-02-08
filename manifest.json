@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Multi-LLM Coder [main]",
+  "name": "Multi-LLM Coder",
   "version": "0.1.0",
   "description": "Send prompts to multiple LLM providers (ChatGPT, Gemini, Claude, Grok) simultaneously and compare responses side-by-side",
   "permissions": [
@@ -65,7 +65,7 @@
     "default_path": "sidepanel.html"
   },
   "action": {
-    "default_title": "Click to open Multi-LLM Coder [main]",
+    "default_title": "Click to open Multi-LLM Coder",
     "default_icon": {
       "16": "variant-icons/variant-16.png",
       "32": "variant-icons/variant-32.png",
@@ -80,6 +80,5 @@
     "32": "variant-icons/variant-32.png",
     "48": "variant-icons/variant-48.png",
     "128": "variant-icons/variant-128.png"
-  },
-  "version_name": "dev-main"
+  }
 }
