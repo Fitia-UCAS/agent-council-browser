@@ -94,6 +94,7 @@ The provider list is always shown (supported providers).
 At the top of this section:
 
 - **Connect all**: large, full-width button that connects any provider that is not ready.
+  - If the route has no agents yet, Connect all first seeds one default agent per provider (bootstrap).
   - Label/disabled state:
     - `Connecting…` when any provider is currently connecting.
     - `All connected` when none need connection **and** no default is blocked by another session.

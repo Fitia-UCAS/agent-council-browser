@@ -2819,7 +2819,23 @@ function connectAllProviders() {
     const supported = getSupportedProviders();
     if (supported.length === 0) return;
 
-    const route = getRoute();
+    let route = getRoute();
+    const routeAgents = getRouteAgents(route);
+
+    // Bootstrap flow: when route is empty, Connect all should create one default
+    // agent per provider so users can start immediately after connecting tabs.
+    if (routeAgents.length === 0) {
+        route = {
+            ...route,
+            agents: supported.map((provider) => ({
+                id: generateRouteAgentId(),
+                provider,
+                profileId: 'default'
+            }))
+        };
+        setRoute(route);
+    }
+
     const routeConfigured = isRouteValid(route) && isRouteSupported(route) && isRouteConfigured(route);
     const providersToConnect = new Set();
     const agentsToRepairByProvider = new Map();
