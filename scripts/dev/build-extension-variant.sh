@@ -5,13 +5,34 @@ repo_root="$(git rev-parse --show-toplevel)"
 branch_name="$(git -C "$repo_root" rev-parse --abbrev-ref HEAD)"
 
 mode="dist"
-if [[ "${1:-}" == "--in-place" ]]; then
-  mode="in_place"
-  shift
-fi
+icons_only="false"
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --in-place)
+      mode="in_place"
+      shift
+      ;;
+    --icons-only)
+      icons_only="true"
+      mode="in_place"
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "Usage: bash scripts/dev/build-extension-variant.sh [--in-place] [--icons-only] [label]" >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
 if [[ "$#" -gt 1 ]]; then
-  echo "Usage: bash scripts/dev/build-extension-variant.sh [--in-place] [label]" >&2
+  echo "Usage: bash scripts/dev/build-extension-variant.sh [--in-place] [--icons-only] [label]" >&2
   exit 1
 fi
 
@@ -49,7 +70,7 @@ if [[ "$mode" != "in_place" ]]; then
     "$repo_root/" "$out_dir/"
 fi
 
-node - "$out_dir" "$label" "$mode" <<'NODE'
+node - "$out_dir" "$label" "$mode" "$icons_only" <<'NODE'
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -58,6 +79,7 @@ const crypto = require('crypto');
 const outDir = process.argv[2];
 const label = process.argv[3];
 const mode = process.argv[4];
+const iconsOnly = process.argv[5] === 'true';
 const manifestPath = path.join(outDir, 'manifest.json');
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 
@@ -231,28 +253,32 @@ for (const size of iconSizes) {
   icons[String(size)] = `${iconDirName}/${filename}`;
 }
 
-const baseName = stripVariantSuffix(manifest.name || 'Extension');
-manifest.name = `${baseName} [${label}]`;
+if (!iconsOnly) {
+  const baseName = stripVariantSuffix(manifest.name || 'Extension');
+  manifest.name = `${baseName} [${label}]`;
 
-const existingAction = manifest.action && typeof manifest.action === 'object' ? manifest.action : {};
-const baseTitle = stripVariantSuffix(existingAction.default_title || baseName);
-manifest.action = {
-  ...existingAction,
-  default_title: `${baseTitle} [${label}]`,
-  default_icon: icons
-};
+  const existingAction = manifest.action && typeof manifest.action === 'object' ? manifest.action : {};
+  const baseTitle = stripVariantSuffix(existingAction.default_title || baseName);
+  manifest.action = {
+    ...existingAction,
+    default_title: `${baseTitle} [${label}]`,
+    default_icon: icons
+  };
 
-manifest.icons = icons;
-manifest.version_name = `dev-${label}`;
+  manifest.icons = icons;
+  manifest.version_name = `dev-${label}`;
 
-fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+}
 
-if (mode === 'in_place') {
+if (mode === 'in_place' && !iconsOnly) {
   console.log(`[build-variant] Applied in-place branding for ${label} in ${outDir}`);
 }
 NODE
 
-if [[ "$mode" == "in_place" ]]; then
+if [[ "$icons_only" == "true" ]]; then
+  echo "[build-variant] Icons ensured for label '$label': $out_dir/variant-icons"
+elif [[ "$mode" == "in_place" ]]; then
   echo "[build-variant] In-place branding applied: $out_dir"
 else
   echo "[build-variant] Built: $out_dir"

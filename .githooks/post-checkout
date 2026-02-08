@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -u
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+script="$repo_root/scripts/dev/ensure-variant-icons.sh"
+
+if [[ -x "$script" ]]; then
+  "$script" >/dev/null 2>&1 || true
+fi
