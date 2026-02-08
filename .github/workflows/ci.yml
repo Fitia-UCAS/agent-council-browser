@@ -24,6 +24,7 @@ jobs:
           node --check src/background/session-helpers.js
           node --check src/background/profile-service.js
           node --check src/background/prompt-service.js
+          node --check src/background/transport-service.js
           node --check src/background/history-chat-service.js
           node --check src/background/session-registry.js
           node --check sidepanel.js

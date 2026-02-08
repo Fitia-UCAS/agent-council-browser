@@ -51,6 +51,12 @@ try {
     console.error('[MLC Prompt] Failed to import prompt service module:', error);
 }
 
+try {
+    importScripts('src/background/transport-service.js');
+} catch (error) {
+    console.error('[MLC Transport] Failed to import transport service module:', error);
+}
+
 // Extension installation
 chrome.runtime.onInstalled.addListener(() => {
     console.log('[MLC Background] Multi-LLM Coder extension installed/updated.');
@@ -419,6 +425,24 @@ const PROMPT_SERVICE_MESSAGE_TYPES = new Set(
         'RESET_DEBATE_PROMPTS'
     ]
 );
+
+const createTransportServiceFn = globalThis.createTransportService;
+const transportService = typeof createTransportServiceFn === 'function'
+    ? createTransportServiceFn({
+        processLLM,
+        listLLMTabs,
+        resolveTabForLLM,
+        findLLMTab,
+        injectAndExecute,
+        injectAndPrepareAttachments,
+        sendPromptViaClaudeDebugger,
+        simpleInteraction
+    })
+    : null;
+
+if (!transportService) {
+    console.error('[MLC Transport] Transport service unavailable.');
+}
 
 // Tracks whether any Chrome window is currently focused (i.e., Chrome is the active app).
 // Used to avoid stealing OS focus when auto-focusing provider tabs while the user is in another app.
@@ -1725,8 +1749,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function handleListLLMTabs() {
-    const chatgptTabs = await listLLMTabs('chatgpt');
-    const geminiTabs = await listLLMTabs('gemini');
+    const listTabs = transportService?.listLLMTabs || listLLMTabs;
+    const chatgptTabs = await listTabs('chatgpt');
+    const geminiTabs = await listTabs('gemini');
     const sanitize = (tab) => ({
         id: tab.id,
         title: tab.title,
@@ -4417,16 +4442,17 @@ async function handleSendPrompt(message) {
     }
     
     // Regular mode - send to individual LLMs
+    const sendToLlm = transportService?.processLLM || processLLM;
     if (targets.claude) {
-        await processLLM('claude', prompt);
+        await sendToLlm('claude', prompt);
     }
     
     if (targets.gemini) {
-        await processLLM('gemini', prompt);
+        await sendToLlm('gemini', prompt);
     }
     
     if (targets.chatgpt) {
-        await processLLM('chatgpt', prompt);
+        await sendToLlm('chatgpt', prompt);
     }
 }
 

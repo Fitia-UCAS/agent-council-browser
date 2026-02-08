@@ -12,6 +12,7 @@ Notable extractions completed so far:
 - `background/history-chat-service.js`: history/chat persistence and history message routing handlers.
 - `background/profile-service.js`: profile/connection message routing and tab lifecycle routing wrappers.
 - `background/prompt-service.js`: prompt template message routing and prompt/delivery helper facade.
+- `background/transport-service.js`: provider transport/injection facade for tab resolution and prompt delivery.
 - `background/session-helpers.js`: session routing/turn helpers and delivery-state normalization.
 - `background/session-registry.js`: active-session registry/persistence/hydration and response queueing.
 - `shared/providers.js`: provider metadata/capabilities plus host/label helper utilities.
