@@ -4688,8 +4688,20 @@ async function handleParallelResponse(session, message) {
     const provider = normalizeProviderKey(participant?.provider || message.sourceLLM || message.provider || '');
     if (!provider || !isSupportedProviderKey(provider)) return;
 
-    const content = (message.content || '').trim();
-    if (!content) return;
+    const rawContent = typeof message.content === 'string' ? message.content : '';
+    const content = rawContent.trim();
+    if (!content) {
+        console.warn('[MLC Parallel] Dropping captured response: empty content.', {
+            reason: 'empty_content_after_capture',
+            sessionId,
+            promptId: message.promptId || null,
+            turnIndex: Number.isFinite(message.turnIndex) ? message.turnIndex : null,
+            agentId,
+            sourceLLM: message.sourceLLM || message.provider || null,
+            contentHtmlLength: typeof message.contentHtml === 'string' ? message.contentHtml.length : 0
+        });
+        return;
+    }
     const rawHtml = typeof message.contentHtml === 'string' ? message.contentHtml : '';
     const trimmedHtml = rawHtml.trim();
     const MAX_HTML_CHARS = 120000;
@@ -4810,8 +4822,20 @@ async function handleDebateResponse(message) {
         return;
     }
 
-    const content = (message.content || '').trim();
-    if (!content) return;
+    const rawContent = typeof message.content === 'string' ? message.content : '';
+    const content = rawContent.trim();
+    if (!content) {
+        console.warn('[MLC Debate] Dropping captured response: empty content.', {
+            reason: 'empty_content_after_capture',
+            sessionId: message.sessionId,
+            promptId: message.promptId || null,
+            turnIndex: hasTurnIndex ? messageTurnIndex : null,
+            agentId: messageAgentId || expectedAgentId || null,
+            sourceLLM: message.sourceLLM || null,
+            contentHtmlLength: typeof message.contentHtml === 'string' ? message.contentHtml.length : 0
+        });
+        return;
+    }
     const rawHtml = typeof message.contentHtml === 'string' ? message.contentHtml : '';
     const trimmedHtml = rawHtml.trim();
     const MAX_HTML_CHARS = 120000;
@@ -6268,8 +6292,9 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
     const promptText = typeof prompt === 'string' ? prompt : String(prompt || '');
     const LARGE_PROMPT_THRESHOLD = 8000;
     const isLargePrompt = promptText.length >= LARGE_PROMPT_THRESHOLD;
+    const SIMPLE_INTERACTION_BUILD = 'grok-fix-r3-2026-02-08';
 
-    console.log(`[SimpleInteraction INJECTED] Attempting on ${llmType} (mode=${prepareAttachmentsOnly ? 'prepare_attachments' : 'send'}) with prompt: "${promptText.substring(0, 50)}..."`);
+    console.log(`[SimpleInteraction INJECTED] Attempting on ${llmType} (mode=${prepareAttachmentsOnly ? 'prepare_attachments' : 'send'}, build=${SIMPLE_INTERACTION_BUILD}) with prompt: "${promptText.substring(0, 50)}..."`);
 
     try {
         let inputElement = null;
@@ -6683,16 +6708,69 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             }
         };
 
+        const normalizePromptForCompare = (value) => String(value || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        const selectContentEditable = (el, { collapseToEnd = false } = {}) => {
+            if (!el) return false;
+            try {
+                const selection = window.getSelection();
+                if (!selection) return false;
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                if (collapseToEnd) range.collapse(false);
+                selection.removeAllRanges();
+                selection.addRange(range);
+                return true;
+            } catch (error) {
+                return false;
+            }
+        };
+
+        const commitGrokEditorState = (el) => {
+            if (llmType !== 'grok') return;
+            if (!el || !(el.isContentEditable || el.contentEditable === 'true')) return;
+            const originalText = String(el.textContent || '');
+            try {
+                el.focus();
+                selectContentEditable(el, { collapseToEnd: true });
+                document.execCommand('insertText', false, ' ');
+                el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                document.execCommand('delete', false, null);
+                el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                // Ensure no accidental text drift.
+                if (String(el.textContent || '') !== originalText) {
+                    el.textContent = originalText;
+                    dispatchInputEvents(el, originalText);
+                }
+            } catch (error) {
+                // best effort
+            }
+        };
+
         const setContentEditableValue = (el, value, { fast = false } = {}) => {
             if (!el) return false;
             if (fast) {
                 el.textContent = value;
                 dispatchInputEvents(el, value);
+                if (llmType === 'grok') commitGrokEditorState(el);
                 return true;
             }
-            document.execCommand('selectAll', false, null);
+            el.focus();
+            selectContentEditable(el);
             const insertSuccess = document.execCommand('insertText', false, value);
             el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            if (llmType === 'grok') {
+                try {
+                    const data = String(value || '').slice(-1);
+                    el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, composed: true, inputType: 'insertFromPaste', data }));
+                } catch (error) {
+                    // fallback ignored
+                }
+                dispatchInputEvents(el, value);
+                commitGrokEditorState(el);
+            }
             return insertSuccess;
         };
 
@@ -6727,15 +6805,24 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
         await new Promise(resolve => setTimeout(resolve, 50));
         const expectedPrefix = promptText.substring(0, Math.min(promptText.length, 50));
         let currentText = isContentEditable ? inputElement.textContent : inputElement.value;
-        if (usedFastContentEditable && expectedPrefix && !String(currentText || '').includes(expectedPrefix)) {
+        const evaluatePrefixMatch = (candidateText) => {
+            if (!expectedPrefix) return true;
+            if (llmType !== 'grok') return String(candidateText || '').includes(expectedPrefix);
+            const currentNormalized = normalizePromptForCompare(candidateText);
+            const expectedNormalized = normalizePromptForCompare(expectedPrefix);
+            return Boolean(expectedNormalized && currentNormalized.includes(expectedNormalized));
+        };
+        let prefixMatches = evaluatePrefixMatch(currentText);
+        if (usedFastContentEditable && expectedPrefix && !prefixMatches) {
             console.warn(`[SimpleInteraction INJECTED] Fast contentEditable set may have failed for ${llmType}; retrying with execCommand.`);
             const retrySuccess = setContentEditableValue(inputElement, promptText, { fast: false });
             console.log(`[SimpleInteraction INJECTED] Retry with execCommand success: ${retrySuccess}.`);
             await new Promise(resolve => setTimeout(resolve, 50));
             currentText = isContentEditable ? inputElement.textContent : inputElement.value;
+            prefixMatches = evaluatePrefixMatch(currentText);
         }
         console.log(`[SimpleInteraction INJECTED] Text in input field for ${llmType} after setting: "${currentText.substring(0,100)}..."`);
-        if (expectedPrefix && !currentText.includes(expectedPrefix)) {
+        if (expectedPrefix && !prefixMatches) {
             console.warn(`[SimpleInteraction INJECTED] WARNING: Prompt may not have been set correctly for ${llmType}. Expected start: "${promptText.substring(0,50)}...", Got: "${currentText.substring(0,50)}..."`);
         }
 
@@ -6777,19 +6864,36 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             grok: {
                 sendSelectors: [
                     'button[aria-label="Send message" i]',
+                    'button[aria-label*="soumettre" i]',
+                    'button[aria-label*="submit" i]',
                     'button[data-testid*="send" i]',
+                    'button[title*="soumettre" i]',
+                    'button[title*="submit" i]',
                     'button[title*="send" i]',
                     'button[type="submit"]'
                 ],
                 sendFallbackSelectors: [
+                    'button[aria-label*="soumettre" i]',
+                    'button[aria-label*="submit" i]',
                     'button[aria-label*="send" i]',
                     'button[type="submit"]'
                 ],
                 stopSelectors: [
                     'button[aria-label*="stop" i]',
                     'button[aria-label*="cancel" i]',
+                    'button[aria-label*="arrêter" i]',
+                    'button[aria-label*="annuler" i]',
                     'button[title*="stop" i]',
+                    'button[title*="arrêter" i]',
+                    'button[title*="annuler" i]',
                     'button[data-testid*="stop" i]'
+                ],
+                voiceSelectors: [
+                    'button[aria-label*="passer en mode vocal" i]',
+                    'button[aria-label*="mode vocal" i]',
+                    'button[aria-label*="voice mode" i]',
+                    'button[title*="mode vocal" i]',
+                    'button[title*="voice mode" i]'
                 ]
             },
             generic: {
@@ -6804,7 +6908,8 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                 stopSelectors: [
                     'button[aria-label*="stop" i]',
                     'button[data-testid*="stop" i]'
-                ]
+                ],
+                voiceSelectors: []
             }
         };
 
@@ -6850,6 +6955,55 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             return false;
         };
 
+        const normalizeControlLabel = (value) => String(value || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+
+        const getButtonControlLabel = (button) => {
+            if (!button) return '';
+            const attrs = [
+                button.getAttribute?.('aria-label') || '',
+                button.getAttribute?.('title') || '',
+                button.textContent || '',
+                button.getAttribute?.('data-testid') || ''
+            ];
+            return normalizeControlLabel(attrs.filter(Boolean).join(' '));
+        };
+
+        const classifyGrokControlButton = (button) => {
+            if (!button) return 'unknown';
+            const label = getButtonControlLabel(button);
+            const stopPatterns = [
+                /\bstop\b/i,
+                /\bcancel\b/i,
+                /\bannuler\b/i,
+                /\barreter\b/i,
+                /\barreter la reponse du modele\b/i
+            ];
+            if (stopPatterns.some((re) => re.test(label))) return 'stop';
+
+            const voicePatterns = [
+                /\bpasser en mode vocal\b/i,
+                /\bmode vocal\b/i,
+                /\bvoice mode\b/i
+            ];
+            if (voicePatterns.some((re) => re.test(label))) return 'voice';
+
+            const sendPatterns = [
+                /\bsend\b/i,
+                /\bsubmit\b/i,
+                /\bsoumettre\b/i,
+                /\benvoyer\b/i
+            ];
+            const typeAttr = normalizeControlLabel(button.getAttribute?.('type') || '');
+            if (sendPatterns.some((re) => re.test(label)) || typeAttr === 'submit') return 'send';
+
+            return 'unknown';
+        };
+
         const resolveComposerRoot = () => {
             const inputEl = resolveInputElement();
             const root = inputEl?.closest?.('form')
@@ -6860,8 +7014,10 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             return root && root.isConnected ? root : document.body;
         };
 
-        const findFirstButton = (selectors, { allowDisabled = false } = {}) => {
+        const findButtons = (selectors, { allowDisabled = false } = {}) => {
             const list = Array.isArray(selectors) ? selectors : [];
+            const matched = [];
+            const seen = new Set();
             for (const selector of list) {
                 const roots = (() => {
                     const root = resolveComposerRoot();
@@ -6876,10 +7032,44 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                     }
                     for (const node of nodes) {
                         if (!(node instanceof HTMLElement)) continue;
+                        if (seen.has(node)) continue;
                         if (!isVisible(node)) continue;
                         if (!allowDisabled && isDisabledButton(node)) continue;
-                        return node;
+                        seen.add(node);
+                        matched.push(node);
                     }
+                }
+            }
+            return matched;
+        };
+
+        const findFirstButton = (selectors, { allowDisabled = false } = {}) => {
+            const matches = findButtons(selectors, { allowDisabled });
+            return matches[0] || null;
+        };
+
+        const findGrokControlButton = (targetRole, { allowDisabled = true } = {}) => {
+            if (llmType !== 'grok') return null;
+            const roots = (() => {
+                const root = resolveComposerRoot();
+                return root === document.body ? [document.body] : [root, document.body];
+            })();
+            const seen = new Set();
+            for (const root of roots) {
+                let buttons = [];
+                try {
+                    buttons = Array.from(root.querySelectorAll('button'));
+                } catch (error) {
+                    buttons = [];
+                }
+                for (const button of buttons) {
+                    if (!(button instanceof HTMLElement)) continue;
+                    if (seen.has(button)) continue;
+                    seen.add(button);
+                    if (!isVisible(button)) continue;
+                    if (!allowDisabled && isDisabledButton(button)) continue;
+                    const role = classifyGrokControlButton(button);
+                    if (role === targetRole) return button;
                 }
             }
             return null;
@@ -6889,41 +7079,235 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             const selectors = includeFallback
                 ? [...ui.sendSelectors, ...ui.sendFallbackSelectors]
                 : ui.sendSelectors;
-            return findFirstButton(selectors, { allowDisabled });
+            const direct = findFirstButton(selectors, { allowDisabled });
+            if (llmType !== 'grok') return direct;
+            if (direct) {
+                const role = classifyGrokControlButton(direct);
+                if (role === 'send' || role === 'unknown') return direct;
+            }
+            return findGrokControlButton('send', { allowDisabled });
         };
 
-        const findStopButton = () => findFirstButton(ui.stopSelectors, { allowDisabled: true });
+        const findStopButton = () => {
+            if (llmType === 'grok') return findGrokControlButton('stop', { allowDisabled: true });
+            return findFirstButton(ui.stopSelectors, { allowDisabled: true });
+        };
 
+        const findVoiceButton = () => {
+            if (llmType === 'grok') return findGrokControlButton('voice', { allowDisabled: true });
+            return findFirstButton(ui.voiceSelectors, { allowDisabled: true });
+        };
+
+        const findNearestSubmitButton = ({ allowDisabled = false } = {}) => {
+            const root = resolveComposerRoot();
+            const selectors = [
+                'button[type="submit"]',
+                'button[aria-label*="soumettre" i]',
+                'button[aria-label*="submit" i]',
+                'button[aria-label*="send" i]',
+                'button[title*="soumettre" i]',
+                'button[title*="submit" i]',
+                'button[title*="send" i]'
+            ];
+            const candidates = [];
+            const seen = new Set();
+            for (const sel of selectors) {
+                let nodes = [];
+                try {
+                    nodes = Array.from(root.querySelectorAll(sel));
+                } catch (error) {
+                    nodes = [];
+                }
+                for (const node of nodes) {
+                    if (!(node instanceof HTMLElement)) continue;
+                    if (seen.has(node)) continue;
+                    seen.add(node);
+                    if (!isVisible(node)) continue;
+                    if (!allowDisabled && isDisabledButton(node)) continue;
+                    candidates.push(node);
+                }
+            }
+            if (!candidates.length) return null;
+            let best = candidates[0];
+            let bestBottom = -Infinity;
+            for (const node of candidates) {
+                const rect = node.getBoundingClientRect();
+                const bottom = Number.isFinite(rect.bottom) ? rect.bottom : 0;
+                if (bottom >= bestBottom) {
+                    best = node;
+                    bestBottom = bottom;
+                }
+            }
+            return best;
+        };
+
+        const describeVisibleComposerButtons = () => {
+            const root = resolveComposerRoot();
+            let buttons = [];
+            try {
+                buttons = Array.from(root.querySelectorAll('button'));
+            } catch (error) {
+                buttons = [];
+            }
+            return buttons
+                .filter((btn) => btn instanceof HTMLElement && isVisible(btn))
+                .slice(0, 12)
+                .map((btn) => {
+                    const role = llmType === 'grok' ? classifyGrokControlButton(btn) : 'unknown';
+                    const rect = btn.getBoundingClientRect();
+                    return {
+                        role,
+                        disabled: isDisabledButton(btn),
+                        label: getButtonControlLabel(btn).slice(0, 80),
+                        bottom: Math.round(Number.isFinite(rect.bottom) ? rect.bottom : 0),
+                        type: String(btn.getAttribute('type') || '')
+                    };
+                });
+        };
+
+        const submitViaComposerForm = () => {
+            const inputEl = resolveInputElement();
+            const form = inputEl?.closest?.('form');
+            if (!form || typeof form.requestSubmit !== 'function') return false;
+            try {
+                form.requestSubmit();
+                return true;
+            } catch (error) {
+                return false;
+            }
+        };
+
+        const captureSendAckBaseline = () => {
+            const draftText = getInputText().trim();
+            const sendButton = findSendButton({ allowDisabled: true, includeFallback: true });
+            const stopButton = findStopButton();
+            const voiceButton = findVoiceButton();
+            return {
+                draftLen: draftText.length,
+                sendVisible: Boolean(sendButton && isVisible(sendButton)),
+                sendEnabled: Boolean(sendButton && isVisible(sendButton) && !isDisabledButton(sendButton)),
+                stopVisible: Boolean(stopButton && isVisible(stopButton)),
+                voiceVisible: Boolean(voiceButton && isVisible(voiceButton)),
+                sendRole: sendButton ? classifyGrokControlButton(sendButton) : null,
+                sendLabel: sendButton ? getButtonControlLabel(sendButton) : ''
+            };
+        };
+
+        let lastGrokNudgeAt = 0;
         const waitForSendReady = async ({ timeoutMs, stableMs = 350, pollMs = 200 } = {}) => {
             const startedAt = Date.now();
             let stableSince = 0;
             while (Date.now() - startedAt < timeoutMs) {
-                const btn = findSendButton({ allowDisabled: false, includeFallback: false });
+                let btn = findSendButton({ allowDisabled: false, includeFallback: false });
+                if (!btn && llmType === 'grok') {
+                    btn = findNearestSubmitButton({ allowDisabled: false });
+                }
                 if (btn) {
                     if (!stableSince) stableSince = Date.now();
                     if (Date.now() - stableSince >= stableMs) return btn;
                 } else {
                     stableSince = 0;
+                    if (llmType === 'grok') {
+                        const inputValue = getInputText().trim();
+                        const now = Date.now();
+                        if (inputValue && now - lastGrokNudgeAt >= 600) {
+                            const inputEl = resolveInputElement();
+                            commitGrokEditorState(inputEl);
+                            lastGrokNudgeAt = now;
+                        }
+                    }
                 }
                 await sleep(pollMs);
             }
-            const disabledCandidate = findSendButton({ allowDisabled: true, includeFallback: true });
+            const disabledCandidate = findSendButton({ allowDisabled: true, includeFallback: true })
+                || (llmType === 'grok' ? findNearestSubmitButton({ allowDisabled: true }) : null);
+            const candidateRole = llmType === 'grok' && disabledCandidate
+                ? classifyGrokControlButton(disabledCandidate)
+                : null;
             const hint = disabledCandidate
-                ? `found disabled send button (${disabledCandidate.tagName.toLowerCase()})`
+                ? `found disabled send button (${disabledCandidate.tagName.toLowerCase()}${candidateRole ? ` role=${candidateRole}` : ''})`
                 : 'send button not found';
+            if (llmType === 'grok') {
+                console.warn('[SimpleInteraction INJECTED] Grok button snapshot at send-ready timeout:', describeVisibleComposerButtons());
+            }
             throw new Error(`Timed out waiting for Send to become ready (${hint}).`);
         };
 
-        const waitForSendAcknowledged = async ({ timeoutMs = 10000, pollMs = 150 } = {}) => {
+        const waitForSendAcknowledged = async ({ timeoutMs = 10000, pollMs = 150, baseline = null } = {}) => {
             const startedAt = Date.now();
+
+            if (llmType !== 'grok') {
+                while (Date.now() - startedAt < timeoutMs) {
+                    const current = getInputText().trim();
+                    if (!current) return { ok: true, reason: 'input_cleared' };
+                    const stopBtn = findStopButton();
+                    if (stopBtn && isVisible(stopBtn) && !isDisabledButton(stopBtn)) {
+                        return { ok: true, reason: 'stop_visible' };
+                    }
+                    await sleep(pollMs);
+                }
+                return { ok: false, reason: 'timeout_no_signal' };
+            }
+
+            const before = baseline || captureSendAckBaseline();
+            let sawStop = Boolean(before.stopVisible);
+            const strongSignals = new Set();
+            const secondarySignals = new Set();
+
             while (Date.now() - startedAt < timeoutMs) {
                 const current = getInputText().trim();
-                if (!current) return true;
+                const currentLen = current.length;
                 const stopBtn = findStopButton();
-                if (stopBtn && isVisible(stopBtn) && !isDisabledButton(stopBtn)) return true;
+                const voiceBtn = findVoiceButton();
+                const sendBtn = findSendButton({ allowDisabled: true, includeFallback: true })
+                    || findNearestSubmitButton({ allowDisabled: true });
+                const sendVisible = Boolean(sendBtn && isVisible(sendBtn));
+                const sendDisabled = Boolean(sendBtn && isDisabledButton(sendBtn));
+
+                if (stopBtn && isVisible(stopBtn) && !isDisabledButton(stopBtn)) {
+                    sawStop = true;
+                    strongSignals.add('stop_visible');
+                }
+
+                if (sawStop && voiceBtn && isVisible(voiceBtn)) {
+                    strongSignals.add('voice_after_stop');
+                }
+
+                if (before.draftLen > 0 && currentLen === 0) {
+                    secondarySignals.add('draft_cleared');
+                } else if (before.draftLen >= 10 && currentLen <= Math.max(2, Math.floor(before.draftLen * 0.3))) {
+                    secondarySignals.add('draft_shrunk');
+                }
+
+                if (before.sendVisible && !sendVisible) {
+                    secondarySignals.add('submit_hidden');
+                } else if (before.sendEnabled && sendVisible && sendDisabled) {
+                    secondarySignals.add('submit_disabled');
+                }
+
+                if (strongSignals.size >= 1 || secondarySignals.size >= 2) {
+                    const reason = strongSignals.size >= 1
+                        ? [...strongSignals].join('+')
+                        : [...secondarySignals].join('+');
+                    console.log(`[SimpleInteraction INJECTED] Grok send acknowledged (reason=${reason}; strong=${[...strongSignals].join(',') || 'none'}; secondary=${[...secondarySignals].join(',') || 'none'}).`);
+                    return {
+                        ok: true,
+                        reason,
+                        strongSignals: [...strongSignals],
+                        secondarySignals: [...secondarySignals]
+                    };
+                }
+
                 await sleep(pollMs);
             }
-            return false;
+
+            const timeoutReason = `timeout strong=${[...strongSignals].join(',') || 'none'} secondary=${[...secondarySignals].join(',') || 'none'}`;
+            return {
+                ok: false,
+                reason: timeoutReason,
+                strongSignals: [...strongSignals],
+                secondarySignals: [...secondarySignals]
+            };
         };
 
         const clickSendButton = (btn) => {
@@ -6940,15 +7324,34 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, composed: true }));
         };
 
+        const pressModifierEnterToSend = (modifier) => {
+            const el = resolveInputElement();
+            if (!el) return;
+            const eventInit = {
+                key: 'Enter',
+                code: 'Enter',
+                keyCode: 13,
+                which: 13,
+                bubbles: true,
+                composed: true,
+                ctrlKey: modifier === 'ctrl',
+                metaKey: modifier === 'meta'
+            };
+            el.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+            el.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+        };
+
         const hasAttachments = attachmentPayloads.length > 0;
         const readyTimeoutMs = hasAttachments ? 120000 : (isLargePrompt ? 20000 : 6000);
         const maxAttempts = hasAttachments ? 3 : (isLargePrompt ? 3 : 2);
         const disabledCandidate = (() => {
-            const candidate = findSendButton({ allowDisabled: true, includeFallback: true });
+            const candidate = findSendButton({ allowDisabled: true, includeFallback: true })
+                || (llmType === 'grok' ? findNearestSubmitButton({ allowDisabled: true }) : null);
             return Boolean(candidate && isVisible(candidate) && isDisabledButton(candidate));
         })();
         const shouldWaitForReadyFirst = hasAttachments || isLargePrompt || disabledCandidate;
         const initialWaitMs = isLargePrompt ? 150 : 75;
+        let lastAckReason = '';
 
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
             if (shouldWaitForReadyFirst || attempt > 1) {
@@ -6959,29 +7362,63 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                 await sleep(initialWaitMs);
             }
 
-            const button = findSendButton({ allowDisabled: false, includeFallback: true });
-            if (button) {
-                console.log(`[SimpleInteraction INJECTED] Clicking Send for ${llmType} (attempt ${attempt}).`, button);
-                clickSendButton(button);
-            } else {
-                console.warn(`[SimpleInteraction INJECTED] Send button not found for ${llmType}; attempting Enter (attempt ${attempt}).`);
-                pressEnterToSend();
+            const ackBaseline = llmType === 'grok' ? captureSendAckBaseline() : null;
+            if (llmType === 'grok' && ackBaseline) {
+                console.log(`[SimpleInteraction INJECTED] Grok controls before send (attempt ${attempt}): sendRole=${ackBaseline.sendRole || 'none'}, sendVisible=${ackBaseline.sendVisible}, sendEnabled=${ackBaseline.sendEnabled}, stopVisible=${ackBaseline.stopVisible}, voiceVisible=${ackBaseline.voiceVisible}.`);
             }
 
-            const acknowledged = await waitForSendAcknowledged({ timeoutMs: isLargePrompt ? 12000 : 10000 });
-            if (acknowledged) {
+            let button = findSendButton({ allowDisabled: false, includeFallback: true });
+            if (!button && llmType === 'grok') {
+                button = findNearestSubmitButton({ allowDisabled: false });
+            }
+            if (button) {
+                const controlType = llmType === 'grok' ? classifyGrokControlButton(button) : 'send';
+                console.log(`[SimpleInteraction INJECTED] Clicking Send for ${llmType} (attempt ${attempt}, control=${controlType}).`, button);
+                clickSendButton(button);
+            } else {
+                const submitted = submitViaComposerForm();
+                if (submitted) {
+                    console.warn(`[SimpleInteraction INJECTED] Send button not found for ${llmType}; submitted nearest form (attempt ${attempt}).`);
+                } else {
+                    console.warn(`[SimpleInteraction INJECTED] Send button not found for ${llmType}; attempting Enter/modifier fallbacks (attempt ${attempt}).`);
+                }
+                pressEnterToSend();
+                pressModifierEnterToSend('meta');
+                pressModifierEnterToSend('ctrl');
+                if (llmType === 'grok') {
+                    console.warn('[SimpleInteraction INJECTED] Grok button snapshot before ack wait:', describeVisibleComposerButtons());
+                }
+            }
+
+            const acknowledged = await waitForSendAcknowledged({
+                timeoutMs: isLargePrompt ? 12000 : 10000,
+                baseline: ackBaseline
+            });
+            if (acknowledged.ok) {
                 return {
                     success: true,
                     method: button ? `button_click_for_${llmType}` : `enter_key_for_${llmType}`,
-                    details: { stage: 'send', attempts: attempt }
+                    details: {
+                        stage: 'send',
+                        attempts: attempt,
+                        ackReason: acknowledged.reason
+                    }
                 };
             }
-            console.warn(`[SimpleInteraction INJECTED] Send not acknowledged for ${llmType} (attempt ${attempt}).`);
+            lastAckReason = acknowledged.reason || '';
+            console.warn(`[SimpleInteraction INJECTED] Send not acknowledged for ${llmType} (attempt ${attempt}, reason=${lastAckReason || 'none'}).`);
         }
 
         const errMsg = `[SimpleInteraction INJECTED] Failed to send message for ${llmType}: no acknowledgement after ${maxAttempts} attempt(s).`;
         console.error(errMsg);
-        return { success: false, error: errMsg, details: { stage: 'send_not_acknowledged' } };
+        return {
+            success: false,
+            error: errMsg,
+            details: {
+                stage: 'send_not_acknowledged',
+                ackReason: lastAckReason || null
+            }
+        };
         
     } catch (error) {
         const errMsg = `[SimpleInteraction INJECTED] Error during interaction with ${llmType}: ${error.message} (Stack: ${error.stack})`;

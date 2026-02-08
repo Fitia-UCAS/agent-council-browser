@@ -7,8 +7,9 @@
     if (!isChatGPT && !isGemini && !isClaude && !isGrok) return;
 
     const currentLLM = isChatGPT ? 'chatgpt' : (isGemini ? 'gemini' : (isClaude ? 'claude' : 'grok'));
+    const CONTENT_SCRIPT_BUILD = 'grok-capture-r5-2026-02-08';
 
-	    console.log(`[MLC ContentScript] Initializing for ${currentLLM}.`);
+	    console.log(`[MLC ContentScript] Initializing for ${currentLLM} (build=${CONTENT_SCRIPT_BUILD}).`);
 
 	    const CaptureUtils = globalThis.MLCCaptureUtils || null;
 
@@ -50,7 +51,14 @@
             sawGenerating: false,
 	        lastTextChangeAt: 0,
 	        lastEmitAt: 0,
-	        lastExtractionMeta: null
+	        lastExtractionMeta: null,
+            grokBaselineBestBottom: null,
+            grokBaselineCandidateCount: null,
+            grokLastBestBottom: null,
+            grokLastShapeSignature: '',
+            grokSawStopControl: false,
+            grokSawVoiceAfterStop: false,
+            grokBaselineTranscriptTail: ''
 	    };
 
     // Global message listener for connection testing and capture arming
@@ -155,6 +163,19 @@
 	        captureState.lastTextChangeAt = captureState.startedAt;
 	        captureState.lastEmitAt = 0;
 	        captureState.lastExtractionMeta = null;
+            captureState.grokBaselineBestBottom = Number.isFinite(baselineExtraction.meta?.bestBottom)
+                ? baselineExtraction.meta.bestBottom
+                : null;
+            captureState.grokBaselineCandidateCount = Number.isFinite(baselineExtraction.meta?.candidateCount)
+                ? baselineExtraction.meta.candidateCount
+                : null;
+            captureState.grokLastBestBottom = captureState.grokBaselineBestBottom;
+            captureState.grokLastShapeSignature = typeof baselineExtraction.meta?.bestShapeSignature === 'string'
+                ? baselineExtraction.meta.bestShapeSignature
+                : '';
+            captureState.grokSawStopControl = false;
+            captureState.grokSawVoiceAfterStop = false;
+            captureState.grokBaselineTranscriptTail = isGrok ? extractGrokTranscriptTailText() : '';
 	        console.log(`[MLC Capture - ${currentLLM}] Armed for prompt ${message.promptId}`);
 	        captureDebug('Armed', {
 	            llm: currentLLM,
@@ -272,11 +293,135 @@
         return false;
     }
 
+    function normalizeGrokControlLabel(value) {
+        return String(value || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+    }
+
+    function getGrokControlLabel(element) {
+        if (!element) return '';
+        const parts = [
+            element.getAttribute?.('aria-label') || '',
+            element.getAttribute?.('title') || '',
+            element.textContent || '',
+            element.getAttribute?.('data-testid') || ''
+        ];
+        return normalizeGrokControlLabel(parts.filter(Boolean).join(' '));
+    }
+
+    function classifyGrokControlElement(element) {
+        if (!element) return 'unknown';
+        const label = getGrokControlLabel(element);
+        const stopPatterns = [
+            /\bstop\b/i,
+            /\bcancel\b/i,
+            /\bannuler\b/i,
+            /\barreter\b/i,
+            /\barreter la reponse du modele\b/i
+        ];
+        if (stopPatterns.some((re) => re.test(label))) return 'stop';
+
+        const voicePatterns = [
+            /\bpasser en mode vocal\b/i,
+            /\bmode vocal\b/i,
+            /\bvoice mode\b/i
+        ];
+        if (voicePatterns.some((re) => re.test(label))) return 'voice';
+
+        const sendPatterns = [
+            /\bsend\b/i,
+            /\bsubmit\b/i,
+            /\bsoumettre\b/i,
+            /\benvoyer\b/i
+        ];
+        const typeAttr = normalizeGrokControlLabel(element.getAttribute?.('type') || '');
+        if (sendPatterns.some((re) => re.test(label)) || typeAttr === 'submit') return 'send';
+        return 'unknown';
+    }
+
+    function findGrokControlButton(role, { allowDisabled = true, includeDocument = true } = {}) {
+        const inputEl = findInput({ silent: true });
+        const composerRoot = inputEl
+            ? (inputEl.closest('form') || inputEl.closest('footer') || inputEl.closest('[role="form"]') || inputEl.parentElement)
+            : null;
+        const roots = [];
+        if (composerRoot) roots.push(composerRoot);
+        if (includeDocument) roots.push(document);
+        const seen = new Set();
+
+        for (const root of roots) {
+            let buttons = [];
+            try {
+                buttons = Array.from(root.querySelectorAll('button'));
+            } catch (error) {
+                buttons = [];
+            }
+            for (const button of buttons) {
+                if (!(button instanceof HTMLElement)) continue;
+                if (seen.has(button)) continue;
+                seen.add(button);
+                if (!isElementVisible(button)) continue;
+                if (!allowDisabled && (button.disabled || String(button.getAttribute?.('aria-disabled') || '').toLowerCase() === 'true')) continue;
+                const currentRole = classifyGrokControlElement(button);
+                if (currentRole === role) return button;
+            }
+        }
+        return null;
+    }
+
+    function getGrokControlState() {
+        const stopButton = findGrokControlButton('stop', { allowDisabled: true, includeDocument: true });
+        const voiceButton = findGrokControlButton('voice', { allowDisabled: true, includeDocument: true });
+        const sendButton = findGrokControlButton('send', { allowDisabled: true, includeDocument: true });
+        return {
+            stopVisible: Boolean(stopButton && isElementVisible(stopButton)),
+            voiceVisible: Boolean(voiceButton && isElementVisible(voiceButton)),
+            sendVisible: Boolean(sendButton && isElementVisible(sendButton)),
+            sendDisabled: Boolean(sendButton && (sendButton.disabled || String(sendButton.getAttribute?.('aria-disabled') || '').toLowerCase() === 'true'))
+        };
+    }
+
+    function isGrokControlOnlyText(text) {
+        if (!text || !String(text).trim()) return false;
+        if (CaptureUtils && typeof CaptureUtils.looksLikeUiControlText === 'function') {
+            return CaptureUtils.looksLikeUiControlText(text, { provider: 'grok' });
+        }
+        const normalized = normalizeGrokControlLabel(text);
+        if (!normalized) return false;
+        const lines = normalized.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+        if (lines.length === 0 || lines.length > 5) return false;
+        const wordCount = normalized.split(/\s+/).filter(Boolean).length;
+        if (wordCount > 24) return false;
+        const patterns = [
+            /\bsend\b/i,
+            /\bsubmit\b/i,
+            /\bsoumettre\b/i,
+            /\benvoyer\b/i,
+            /\bstop\b/i,
+            /\bcancel\b/i,
+            /\bannuler\b/i,
+            /\barreter\b/i,
+            /\bpasser en mode vocal\b/i,
+            /\bmode vocal\b/i,
+            /\bvoice mode\b/i,
+            /\bare you satisfied with .* answer\b/i,
+            /\bsatisfied with .* answer\b/i,
+            /\betes[-\s]?vous satisfait\b/i
+        ];
+        const latencyOnlyPattern = /^\s*~?\d+(?:[.,]\d+)?\s*(ms|s)\s*$/i;
+        if (lines.length === 1 && latencyOnlyPattern.test(lines[0])) return true;
+        const controlLines = lines.filter((line) => patterns.some((pattern) => pattern.test(line)));
+        return controlLines.length > 0 && controlLines.length === lines.length;
+    }
+
     function isGrokGenerating() {
-        const stopButton = document.querySelector(
-            'button[aria-label*=\"Stop\" i], button[aria-label*=\"Cancel\" i], button[title*=\"Stop\" i], button[title*=\"Cancel\" i], button[data-testid*=\"stop\" i]'
-        );
-        if (stopButton && isElementVisible(stopButton)) return true;
+        const control = getGrokControlState();
+        if (control.voiceVisible) return false;
+        if (control.stopVisible) return true;
         const spinner = document.querySelector('[role=\"progressbar\"], .loading, .spinner, .animate-spin');
         if (spinner && isElementVisible(spinner)) return true;
         return false;
@@ -940,6 +1085,17 @@
         return raw.replace(/\s+/g, ' ').trim();
     }
 
+    function stableTextSignature(text) {
+        const value = normalizeCaptureText(text);
+        if (!value) return 'empty';
+        let hash = 0;
+        for (let i = 0; i < value.length; i += 1) {
+            hash = ((hash << 5) - hash) + value.charCodeAt(i);
+            hash |= 0;
+        }
+        return `${value.length}:${hash}`;
+    }
+
     function looksLikePromptEcho(text) {
         const preview = normalizeCaptureText(captureState.promptPreview || '');
         if (!preview) return false;
@@ -959,6 +1115,85 @@
         if (extraWords <= 6) return true;
         if (extraChars <= 40) return true;
         return false;
+    }
+
+    function normalizePromptScaffoldText(value) {
+        return String(value || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+    }
+
+    function isGrokPromptScaffoldLine(line) {
+        const raw = String(line || '').trim();
+        if (!raw) return false;
+        if (CaptureUtils && typeof CaptureUtils.looksLikePromptScaffoldText === 'function') {
+            if (CaptureUtils.looksLikePromptScaffoldText(raw, { provider: 'grok' })) {
+                return true;
+            }
+        }
+
+        const normalized = normalizePromptScaffoldText(raw);
+        if (!normalized) return false;
+
+        const scaffoldPatterns = [
+            /^conversation so far:?$/,
+            /^here'?s a new message from the user:?$/,
+            /^please grok answer(?:\.+)?$/,
+            /^user:?$/
+        ];
+        if (scaffoldPatterns.some((pattern) => pattern.test(normalized))) return true;
+
+        const previewNormalized = normalizePromptScaffoldText(captureState.promptPreview || '');
+        if (!previewNormalized) return false;
+        const previewPrefix = previewNormalized.slice(0, Math.min(220, previewNormalized.length));
+        if (!previewPrefix || previewPrefix.length < 24) return false;
+        if (normalized === previewPrefix) return true;
+        if (previewPrefix.startsWith(normalized) && normalized.length >= 24) return true;
+        return false;
+    }
+
+    function stripGrokUiFooterArtifacts(value) {
+        let text = String(value || '').trim();
+        if (!text) return '';
+
+        const satisfactionTailRe = /(?:~?\d+(?:[.,]\d+)?\s*(?:ms|s)\s*)?(?:are you satisfied with|satisfied with|etes[-\s]?vous satisfait(?:e)?(?: de)?|êtes[-\s]?vous satisfait(?:e)?(?: de)?)[^?\n]*\?\s*$/i;
+        const latencyTailRe = /(^|[^0-9A-Za-z])~?\d+(?:[.,]\d+)?\s*(?:ms|s)\s*$/i;
+
+        let previous = '';
+        while (text && text !== previous) {
+            previous = text;
+            text = text.replace(satisfactionTailRe, '').trim();
+            text = text.replace(latencyTailRe, '$1').trim();
+        }
+        return text;
+    }
+
+    function sanitizeGrokTranscriptCandidate(text, { allowShort = false } = {}) {
+        const raw = String(text || '').trim();
+        if (!raw) return '';
+
+        const lines = raw
+            .split(/\r?\n/)
+            .map((line) => stripGrokUiFooterArtifacts(line))
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .filter((line) => !isGrokControlOnlyText(line))
+            .filter((line) => !isGrokPromptScaffoldLine(line));
+        if (!lines.length) return '';
+
+        const sanitized = stripGrokUiFooterArtifacts(lines.join('\n').trim());
+        if (!sanitized) return '';
+        if (isGrokControlOnlyText(sanitized)) return '';
+        if (looksLikePromptEcho(sanitized)) return '';
+
+        if (!allowShort) {
+            const wordCount = sanitized.split(/\s+/).filter(Boolean).length;
+            if (wordCount < 6 && sanitized.length < 30) return '';
+        }
+        return sanitized;
     }
 
     function isClaudeUserMessage(node) {
@@ -1330,11 +1565,27 @@
             ? (inputEl.closest('form') || inputEl.closest('footer') || inputEl.closest('[role="form"]') || inputEl.parentElement)
             : null;
         const roots = [document.querySelector('main'), document.querySelector('[role="main"]'), document.body].filter(Boolean);
+        let composerTop = null;
+        if (composerRoot) {
+            try {
+                const composerRect = composerRoot.getBoundingClientRect();
+                composerTop = Number.isFinite(composerRect.top) ? composerRect.top : null;
+            } catch (error) {
+                composerTop = null;
+            }
+        }
 
-        const selectors = [
+        const rootSelectors = [
             '[data-testid*="assistant" i]',
             '[data-role*="assistant" i]',
             '[data-author*="assistant" i]',
+            'article',
+            '[role="article"]',
+            '[class*="assistant" i]',
+            '[class*="message" i]'
+        ];
+
+        const contentSelectors = [
             '[data-testid="message-content"]',
             '[data-testid*="message" i]',
             '[data-testid*="chat-message" i]',
@@ -1342,16 +1593,160 @@
             '.markdown',
             '.prose',
             '[class*="markdown" i]',
-            '[class*="prose" i]',
-            'article',
-            '[role="article"]',
-            '[class*="assistant" i]',
-            '[class*="message" i]'
+            '[class*="prose" i]'
         ];
 
         const candidates = [];
-        const seen = new Set();
+        const seenNodes = new Set();
+        const seenText = new Set();
         let sawPromptEcho = false;
+        const rejectionCounts = {
+            promptEcho: 0,
+            controlOnly: 0,
+            composerOverlap: 0,
+            composerZoneOverlap: 0,
+            userMessage: 0,
+            empty: 0
+        };
+
+        const overlapsComposerZone = (candidate) => {
+            if (!composerRoot || !Number.isFinite(composerTop)) return false;
+            if (!candidate || !(candidate instanceof Element)) return false;
+            let rect = null;
+            try {
+                rect = candidate.getBoundingClientRect();
+            } catch (error) {
+                rect = null;
+            }
+            if (!rect || !Number.isFinite(rect.bottom)) return false;
+            // Anything overlapping the composer lane is likely draft/editor UI, not assistant output.
+            return rect.bottom >= (composerTop - 4);
+        };
+
+        const buildCandidateFromRoot = (node, selector) => {
+            if (!node || seenNodes.has(node)) return;
+            seenNodes.add(node);
+            if (inputEl && (node === inputEl || inputEl.contains(node))) {
+                rejectionCounts.composerOverlap += 1;
+                captureDebug('Grok candidate rejected: composer_overlap', { selector, reason: 'input_overlap' });
+                return;
+            }
+            if (composerRoot && composerRoot.contains(node)) {
+                rejectionCounts.composerOverlap += 1;
+                captureDebug('Grok candidate rejected: composer_overlap', { selector, reason: 'inside_composer' });
+                return;
+            }
+            if (isGrokUserMessage(node)) {
+                rejectionCounts.userMessage += 1;
+                return;
+            }
+            const wrapperContainsComposer = Boolean(
+                composerRoot
+                && node !== composerRoot
+                && node.contains(composerRoot)
+            );
+
+            const contentNodes = [];
+            for (const sel of contentSelectors) {
+                try {
+                    node.querySelectorAll(sel).forEach((child) => contentNodes.push(child));
+                } catch (error) {
+                    // ignore selector failures
+                }
+            }
+            const topLevel = getTopLevelNodes(contentNodes);
+            const nodes = topLevel.length
+                ? topLevel
+                : (wrapperContainsComposer ? [] : [node]);
+
+            const parts = [];
+            const htmlParts = [];
+            const localSeen = new Set();
+
+            for (const child of nodes) {
+                if (!child || isGrokUserMessage(child)) continue;
+                if (composerRoot && (composerRoot.contains(child) || child.contains(composerRoot))) {
+                    rejectionCounts.composerOverlap += 1;
+                    captureDebug('Grok candidate rejected: composer_overlap', { selector, reason: 'composer_overlap' });
+                    continue;
+                }
+                if (overlapsComposerZone(child)) {
+                    rejectionCounts.composerZoneOverlap += 1;
+                    captureDebug('Grok candidate rejected: composer_zone_overlap', { selector, reason: 'composer_zone_overlap' });
+                    continue;
+                }
+                const text = (child.innerText || child.textContent || '').trim();
+                if (!text) continue;
+                if (isGrokControlOnlyText(text)) {
+                    rejectionCounts.controlOnly += 1;
+                    captureDebug('Grok candidate rejected: control_only', { selector, preview: String(text).slice(0, 140) });
+                    continue;
+                }
+                const sanitizedText = sanitizeGrokTranscriptCandidate(text, { allowShort: true });
+                if (!sanitizedText) {
+                    rejectionCounts.empty += 1;
+                    captureDebug('Grok candidate rejected: sanitized_out', { selector, preview: String(text).slice(0, 140) });
+                    continue;
+                }
+                const normalized = normalizeCaptureCandidateText(sanitizedText);
+                if (!normalized || localSeen.has(normalized)) continue;
+                localSeen.add(normalized);
+                parts.push(sanitizedText);
+                if (options.withHtml) {
+                    const html = extractCleanHtmlFromNode(child);
+                    if (html) htmlParts.push(html);
+                }
+            }
+
+            let combinedText = parts.join('\n\n').trim();
+            combinedText = sanitizeGrokTranscriptCandidate(combinedText, { allowShort: true });
+            if (!combinedText) {
+                rejectionCounts.empty += 1;
+                return;
+            }
+            if (looksLikePromptEcho(combinedText)) {
+                sawPromptEcho = true;
+                rejectionCounts.promptEcho += 1;
+                captureDebug('Grok candidate rejected: prompt_echo', { selector, preview: String(combinedText).slice(0, 140) });
+                return;
+            }
+            if (isGrokControlOnlyText(combinedText)) {
+                rejectionCounts.controlOnly += 1;
+                captureDebug('Grok candidate rejected: control_only_combined', { selector, preview: String(combinedText).slice(0, 140) });
+                return;
+            }
+
+            const normalizedCombined = normalizeCaptureCandidateText(combinedText);
+            if (!normalizedCombined || seenText.has(normalizedCombined)) return;
+            seenText.add(normalizedCombined);
+
+            let rect;
+            try {
+                rect = node.getBoundingClientRect();
+            } catch (error) {
+                rect = null;
+            }
+            const bottom = rect && Number.isFinite(rect.bottom) ? rect.bottom : 0;
+            const shapeSignature = `${selector}|${Math.round(bottom)}|${parts.length}|${nodes.length}`;
+
+            let combinedHtml = '';
+            if (options.withHtml && htmlParts.length) {
+                combinedHtml = htmlParts.join('\n').trim();
+                const MAX_HTML_CHARS = 120000;
+                if (combinedHtml.length > MAX_HTML_CHARS) combinedHtml = '';
+            }
+
+            candidates.push({
+                node,
+                selector,
+                text: combinedText,
+                html: combinedHtml,
+                bottom,
+                partCount: parts.length,
+                nodeCount: nodes.length,
+                shapeSignature
+            });
+        };
 
         const collect = (root, selector, limit) => {
             let nodes = [];
@@ -1361,76 +1756,260 @@
                 nodes = [];
             }
             if (nodes.length > limit) nodes = nodes.slice(nodes.length - limit);
-            nodes.forEach((node) => {
-                if (!node || seen.has(node)) return;
-                seen.add(node);
-                candidates.push({ node, selector });
-            });
+            nodes.forEach((node) => buildCandidateFromRoot(node, selector));
         };
 
         for (const root of roots) {
-            for (const sel of selectors) {
-                collect(root, sel, 50);
+            for (const sel of rootSelectors) {
+                collect(root, sel, 45);
             }
             if (candidates.length > 0) break;
         }
 
-        const scored = [];
-        for (const entry of candidates) {
-            const node = entry.node;
-            if (!node) continue;
-            if (inputEl && (node === inputEl || node.contains(inputEl))) continue;
-            if (composerRoot && (composerRoot.contains(node) || node.contains(composerRoot))) continue;
-            if (isGrokUserMessage(node)) continue;
-
-            const text = (node.innerText || node.textContent || '').trim();
-            if (!text) continue;
-            if (looksLikePromptEcho(text)) {
-                sawPromptEcho = true;
-                continue;
-            }
-
-            let rect;
-            try {
-                rect = node.getBoundingClientRect();
-            } catch (error) {
-                rect = null;
-            }
-            const bottom = rect && Number.isFinite(rect.bottom) ? rect.bottom : 0;
-            scored.push({ node, selector: entry.selector, text, bottom });
-        }
-
-        scored.sort((a, b) => b.bottom - a.bottom);
-        const recent = scored.slice(0, 14);
-
-        let best = recent[0] || null;
-        let bestIsReferenceList = false;
-        if (CaptureUtils && typeof CaptureUtils.chooseBestTextCandidate === 'function' && recent.length > 1) {
-            const pick = CaptureUtils.chooseBestTextCandidate(recent.map(item => item.text), { provider: 'grok' });
-            if (Number.isFinite(pick.bestIndex) && pick.bestIndex >= 0 && recent[pick.bestIndex]) {
-                best = recent[pick.bestIndex];
-                bestIsReferenceList = Boolean(pick.best?.isReferenceList);
+        if (candidates.length === 0) {
+            for (const root of roots) {
+                for (const sel of contentSelectors) {
+                    collect(root, sel, 60);
+                }
+                if (candidates.length > 0) break;
             }
         }
 
-        const bestBottom = best ? best.bottom : -Infinity;
-        const bestLen = best ? best.text.length : null;
+        if (candidates.length === 0) {
+            return options.withMeta
+                ? { text: '', meta: { provider: 'grok', candidateCount: 0, sawPromptEcho, ...rejectionCounts } }
+                : { text: '' };
+        }
+
+        const orderedByBottom = candidates
+            .map((candidate, index) => ({ ...candidate, index }))
+            .sort((a, b) => {
+                const aBottom = Number.isFinite(a.bottom) ? a.bottom : -Infinity;
+                const bBottom = Number.isFinite(b.bottom) ? b.bottom : -Infinity;
+                if (bBottom !== aBottom) return bBottom - aBottom;
+                return b.index - a.index;
+            });
+
+        const topBottom = Number.isFinite(orderedByBottom[0]?.bottom)
+            ? orderedByBottom[0].bottom
+            : -Infinity;
+        const recentWindowPx = 520;
+        const recentCandidates = orderedByBottom
+            .filter((entry, index) => index < 12 || (Number.isFinite(entry.bottom) && (topBottom - entry.bottom) <= recentWindowPx))
+            .slice(0, 18);
+
+        const rankingPool = recentCandidates.length ? recentCandidates : orderedByBottom.slice(0, 12);
+        const texts = rankingPool.map((candidate) => candidate.text);
+        const ranking = CaptureUtils?.chooseBestTextCandidate
+            ? CaptureUtils.chooseBestTextCandidate(texts, { provider: 'grok' })
+            : { bestIndex: 0, best: { index: 0, isReferenceList: false, isUiControlText: false }, ranked: [] };
+
+        const rankingBestIndex = Number.isFinite(ranking.bestIndex) && ranking.bestIndex >= 0
+            ? ranking.bestIndex
+            : 0;
+        let bestPoolIndex = rankingBestIndex;
+
+        const rankedByIndex = new Map();
+        if (Array.isArray(ranking.ranked)) {
+            ranking.ranked.forEach((item) => rankedByIndex.set(item.index, item));
+        }
+
+        const isControlRank = (poolIndex) => {
+            const item = rankedByIndex.get(poolIndex);
+            if (item && item.isUiControlText) return true;
+            return isGrokControlOnlyText(texts[poolIndex] || '');
+        };
+
+        const isReferenceRank = (poolIndex) => {
+            const item = rankedByIndex.get(poolIndex);
+            return Boolean(item?.isReferenceList);
+        };
+
+        if (isControlRank(bestPoolIndex) && Array.isArray(ranking.ranked)) {
+            const alternative = ranking.ranked.find((item) => item.index !== bestPoolIndex && !item.isUiControlText);
+            if (alternative && Number.isFinite(alternative.index) && alternative.index >= 0) {
+                bestPoolIndex = alternative.index;
+            }
+        }
+
+        let bestCandidate = rankingPool[bestPoolIndex] || rankingPool[rankingBestIndex] || rankingPool[0] || null;
+        if (bestCandidate && isGrokControlOnlyText(bestCandidate.text || '')) {
+            const nonControlRecent = rankingPool.find((entry) => !isGrokControlOnlyText(entry.text || ''));
+            if (nonControlRecent) bestCandidate = nonControlRecent;
+        }
+        if (!bestCandidate && orderedByBottom.length > 0) {
+            bestCandidate = orderedByBottom.find((entry) => !isGrokControlOnlyText(entry.text || '')) || orderedByBottom[0];
+        }
+        if (options.grokPreferLatestBottom) {
+            const latestNonControl = orderedByBottom.find((entry) => !isGrokControlOnlyText(entry.text || ''));
+            if (latestNonControl) bestCandidate = latestNonControl;
+        }
+
+        const resolvedPoolIndex = rankingPool.findIndex((entry) => entry === bestCandidate);
+        const bestBottom = bestCandidate ? bestCandidate.bottom : -Infinity;
+        const bestLen = bestCandidate ? bestCandidate.text.length : null;
+        const bestShapeSignature = bestCandidate?.shapeSignature || null;
 
         const meta = {
             provider: 'grok',
             candidateCount: candidates.length,
+            recentCandidateCount: rankingPool.length,
             sawPromptEcho,
-            bestSelector: best?.selector || null,
+            bestSelector: bestCandidate?.selector || null,
             bestBottom: Number.isFinite(bestBottom) ? Math.round(bestBottom) : null,
             bestLen: Number.isFinite(bestLen) ? bestLen : null,
-            bestIsReferenceList
+            bestIsReferenceList: resolvedPoolIndex >= 0 ? isReferenceRank(resolvedPoolIndex) : false,
+            bestIsControlOnly: resolvedPoolIndex >= 0 ? isControlRank(resolvedPoolIndex) : isGrokControlOnlyText(bestCandidate?.text || ''),
+            bestShapeSignature,
+            rejectionCounts
         };
+        captureDebug('extractGrokResponse', meta);
 
-        const result = { text: best?.text || '' };
+        const result = { text: bestCandidate?.text || '' };
         if (options.withHtml) {
-            result.html = best?.node ? extractCleanHtmlFromNode(best.node) : '';
+            result.html = bestCandidate?.html || (bestCandidate?.node ? extractCleanHtmlFromNode(bestCandidate.node) : '');
         }
         return options.withMeta ? { ...result, meta } : result;
+    }
+
+    function extractGrokTranscriptTailText(options = {}) {
+        const inputEl = findInput({ silent: true });
+        const composerRoot = inputEl
+            ? (inputEl.closest('form') || inputEl.closest('footer') || inputEl.closest('[role="form"]') || inputEl.parentElement)
+            : null;
+        const root = document.querySelector('main') || document.querySelector('[role="main"]') || document.body;
+        if (!root) {
+            return options.withMeta
+                ? { text: '', meta: { provider: 'grok', source: 'transcript_tail', reason: 'no_root' } }
+                : '';
+        }
+
+        const clone = root.cloneNode(true);
+        const removeSelectors = [
+            'script',
+            'style',
+            'noscript',
+            'button',
+            'input',
+            'textarea',
+            'select',
+            'option',
+            'svg',
+            'canvas',
+            'picture',
+            'video',
+            'audio'
+        ];
+        try {
+            clone.querySelectorAll(removeSelectors.join(',')).forEach((node) => node.remove());
+        } catch (error) {
+            // ignore
+        }
+
+        // Remove obvious composer-like sections in the cloned tree to avoid recapturing draft input.
+        try {
+            clone.querySelectorAll('footer, [role="form"], form, [role="textbox"], [contenteditable="true"], .tiptap.ProseMirror').forEach((node) => node.remove());
+        } catch (error) {
+            // ignore
+        }
+
+        let rawText = '';
+        try {
+            rawText = (clone.innerText || clone.textContent || '').trim();
+        } catch (error) {
+            rawText = '';
+        }
+        if (!rawText) {
+            return options.withMeta
+                ? { text: '', meta: { provider: 'grok', source: 'transcript_tail', reason: 'empty_after_clone' } }
+                : '';
+        }
+
+        const rawLines = rawText.split(/\r?\n/);
+        const lines = rawLines
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .filter((line) => !isGrokControlOnlyText(line))
+            .filter((line) => !isGrokPromptScaffoldLine(line));
+        if (!lines.length) {
+            return options.withMeta
+                ? { text: '', meta: { provider: 'grok', source: 'transcript_tail', reason: 'only_controls_or_scaffold' } }
+                : '';
+        }
+
+        const chunks = [];
+        let current = [];
+        for (const line of rawLines) {
+            const trimmed = String(line || '').trim();
+            if (!trimmed) {
+                if (current.length) {
+                    chunks.push(current.join('\n').trim());
+                    current = [];
+                }
+                continue;
+            }
+            if (isGrokControlOnlyText(trimmed)) continue;
+            if (isGrokPromptScaffoldLine(trimmed)) continue;
+            current.push(trimmed);
+        }
+        if (current.length) chunks.push(current.join('\n').trim());
+
+        let chosenChunk = '';
+        for (let i = chunks.length - 1; i >= 0; i -= 1) {
+            const chunk = sanitizeGrokTranscriptCandidate(chunks[i], { allowShort: false });
+            if (!chunk) continue;
+            chosenChunk = chunk;
+            break;
+        }
+
+        const fallbackLines = lines.slice(Math.max(0, lines.length - 140));
+        const fallbackTail = sanitizeGrokTranscriptCandidate(fallbackLines.join('\n').trim(), { allowShort: false });
+        const selected = chosenChunk || fallbackTail;
+        if (!selected) {
+            return options.withMeta
+                ? {
+                    text: '',
+                    meta: {
+                        provider: 'grok',
+                        source: 'transcript_tail',
+                        reason: 'filtered_or_low_quality',
+                        lineCount: lines.length,
+                        chunkCount: chunks.length
+                    }
+                }
+                : '';
+        }
+
+        const bounded = selected.length > 20000 ? selected.slice(selected.length - 20000) : selected;
+        const finalText = sanitizeGrokTranscriptCandidate(bounded, { allowShort: false });
+        if (!finalText) {
+            return options.withMeta
+                ? {
+                    text: '',
+                    meta: {
+                        provider: 'grok',
+                        source: 'transcript_tail',
+                        reason: 'low_quality_after_bound',
+                        lineCount: lines.length,
+                        chunkCount: chunks.length
+                    }
+                }
+                : '';
+        }
+
+        if (options.withMeta) {
+            return {
+                text: finalText,
+                meta: {
+                    provider: 'grok',
+                    source: 'transcript_tail',
+                    lineCount: lines.length,
+                    chunkCount: chunks.length,
+                    usedChunk: Boolean(chosenChunk)
+                }
+            };
+        }
+        return finalText;
     }
 
 	    function extractLatestResponse(options = {}) {
@@ -1649,6 +2228,94 @@
         });
     }
 
+    function emitCaptureFromResolvedExtraction(reason, extraction) {
+        const baseExtraction = (typeof extraction === 'object' && extraction)
+            ? extraction
+            : { text: String(extraction || '') };
+        let resolved = { ...baseExtraction };
+        let text = String(resolved?.text || resolved?.content || '').trim();
+        let source = resolved?.meta?.source || 'primary';
+
+        if (!text && isGrok) {
+            const fallback = extractGrokTranscriptTailText({ withMeta: true });
+            const fallbackText = sanitizeGrokTranscriptCandidate(fallback?.text || '', { allowShort: false });
+            if (fallbackText) {
+                resolved = {
+                    text: fallbackText,
+                    meta: {
+                        ...(fallback?.meta || {}),
+                        source: 'transcript_tail_emit_fallback'
+                    }
+                };
+                text = fallbackText;
+                source = 'transcript_tail_emit_fallback';
+            }
+        }
+
+        if (isGrok) {
+            const shouldUseStrictTailGate = source.startsWith('transcript_tail');
+            if (shouldUseStrictTailGate) {
+                const sanitizedTail = sanitizeGrokTranscriptCandidate(text, { allowShort: false });
+                if (!sanitizedTail) {
+                    captureDebug('Capture emit skipped (grok tail rejected)', {
+                        llm: currentLLM,
+                        reason,
+                        source,
+                        textLen: String(text || '').length
+                    });
+                    return false;
+                }
+                text = sanitizedTail;
+            }
+            if (isGrokControlOnlyText(text)) {
+                captureDebug('Capture emit skipped (control_only)', {
+                    llm: currentLLM,
+                    reason,
+                    source,
+                    textLen: String(text || '').length
+                });
+                return false;
+            }
+        }
+
+        const normalizedText = normalizeCaptureCandidateText(text);
+        if (!normalizedText) {
+            captureDebug('Capture emit skipped (empty)', {
+                llm: currentLLM,
+                reason,
+                source,
+                textLen: String(text || '').length
+            });
+            return false;
+        }
+
+        if (isGrok) {
+            text = stripGrokUiFooterArtifacts(text);
+            if (!normalizeCaptureCandidateText(text)) {
+                captureDebug('Capture emit skipped (grok footer-only)', {
+                    llm: currentLLM,
+                    reason,
+                    source
+                });
+                return false;
+            }
+            // Grok rich HTML frequently includes UI footer widgets; render as plain text only.
+            resolved.html = '';
+            resolved.contentHtml = '';
+        }
+        resolved.text = text;
+        captureDebug('Capture emit', {
+            llm: currentLLM,
+            reason,
+            textLen: text.length,
+            source,
+            bestSelector: resolved?.meta?.bestSelector || null,
+            bestBottom: Number.isFinite(resolved?.meta?.bestBottom) ? resolved.meta.bestBottom : null
+        });
+        sendCapturedResponse(resolved);
+        return true;
+    }
+
     let scheduledEvaluateHandle = null;
     function scheduleEvaluateCapture(delayMs = 0) {
         if (!captureState.active) return;
@@ -1666,12 +2333,97 @@
 	        const minDelayMs = isChatGPT ? 1200 : 800;
 	        if (now - captureState.startedAt < minDelayMs) return;
 
-	        const extraction = extractLatestResponse({ withMeta: true });
-	        const text = extraction.text || '';
-	        captureState.lastExtractionMeta = extraction.meta || null;
+        let extraction = extractLatestResponse({ withMeta: true, withHtml: true });
+        let text = extraction.text || '';
+        captureState.lastExtractionMeta = extraction.meta || null;
+            let meta = captureState.lastExtractionMeta || {};
+
+            const grokControl = isGrok ? getGrokControlState() : null;
+            if (isGrok && grokControl?.stopVisible) captureState.grokSawStopControl = true;
+            if (isGrok && captureState.grokSawStopControl && grokControl?.voiceVisible) {
+                captureState.grokSawVoiceAfterStop = true;
+            }
+            const grokCompletedByControls = Boolean(
+                isGrok
+                && captureState.grokSawStopControl
+                && !grokControl?.stopVisible
+                && (grokControl?.voiceVisible || grokControl?.sendVisible || captureState.grokSawVoiceAfterStop)
+            );
+            const grokLooksComplete = Boolean(
+                isGrok
+                && !grokControl?.stopVisible
+                && (grokControl?.voiceVisible || grokControl?.sendVisible)
+            );
+
+            let currentGrokBestBottom = isGrok && Number.isFinite(meta.bestBottom) ? meta.bestBottom : null;
+            let currentGrokCandidateCount = isGrok && Number.isFinite(meta.candidateCount) ? meta.candidateCount : null;
+            let currentGrokShapeSignature = isGrok && typeof meta.bestShapeSignature === 'string'
+                ? meta.bestShapeSignature
+                : '';
+            const baselineGrokBestBottom = isGrok && Number.isFinite(captureState.grokBaselineBestBottom)
+                ? captureState.grokBaselineBestBottom
+                : null;
+            const baselineGrokCandidateCount = isGrok && Number.isFinite(captureState.grokBaselineCandidateCount)
+                ? captureState.grokBaselineCandidateCount
+                : null;
+
+            const tryGrokFallbackExtraction = (reason) => {
+                if (!isGrok) return false;
+                const fallback = extractGrokTranscriptTailText({ withMeta: true });
+                const fallbackText = String(fallback?.text || '').trim();
+                if (!fallbackText) return false;
+                if (isGrokControlOnlyText(fallbackText)) return false;
+
+                const fallbackNormalized = normalizeCaptureCandidateText(fallbackText);
+                if (!fallbackNormalized) return false;
+
+                const baselineTailNormalized = normalizeCaptureCandidateText(captureState.grokBaselineTranscriptTail || '');
+                const baselinePrimaryNormalized = normalizeCaptureCandidateText(captureState.baselineText || '');
+                const sameAsBaselineTail = Boolean(baselineTailNormalized && fallbackNormalized === baselineTailNormalized);
+                const sameAsBaselinePrimary = Boolean(baselinePrimaryNormalized && fallbackNormalized === baselinePrimaryNormalized);
+                const materiallyLongerThanTail = Boolean(
+                    baselineTailNormalized
+                    && fallbackNormalized.startsWith(baselineTailNormalized)
+                    && fallbackNormalized.length > baselineTailNormalized.length + 120
+                );
+                if ((sameAsBaselineTail || sameAsBaselinePrimary) && !materiallyLongerThanTail) return false;
+
+                extraction = {
+                    text: fallbackText,
+                    meta: {
+                        ...(fallback?.meta || {}),
+                        bestBottom: Number.isFinite(currentGrokBestBottom)
+                            ? currentGrokBestBottom
+                            : (Number.isFinite(baselineGrokBestBottom) ? baselineGrokBestBottom + 8 : null),
+                        candidateCount: Number.isFinite(currentGrokCandidateCount)
+                            ? currentGrokCandidateCount
+                            : (Number.isFinite(baselineGrokCandidateCount) ? baselineGrokCandidateCount + 1 : 1),
+                        bestShapeSignature: `fallback:${reason}:${stableTextSignature(fallbackText)}`
+                    }
+                };
+                text = extraction.text;
+                captureState.lastExtractionMeta = extraction.meta || null;
+                meta = captureState.lastExtractionMeta || {};
+                currentGrokBestBottom = Number.isFinite(meta.bestBottom) ? meta.bestBottom : currentGrokBestBottom;
+                currentGrokCandidateCount = Number.isFinite(meta.candidateCount) ? meta.candidateCount : currentGrokCandidateCount;
+                currentGrokShapeSignature = typeof meta.bestShapeSignature === 'string'
+                    ? meta.bestShapeSignature
+                    : currentGrokShapeSignature;
+                captureDebug('Grok transcript-tail fallback selected', {
+                    reason,
+                    lineCount: fallback?.meta?.lineCount ?? null,
+                    chunkCount: fallback?.meta?.chunkCount ?? null,
+                    usedChunk: fallback?.meta?.usedChunk ?? null
+                });
+                return true;
+            };
 
 	        if (!captureState.hasNewText) {
-	            if (!text) return;
+	            if (!text) {
+                    if (!(grokCompletedByControls || grokLooksComplete) || !tryGrokFallbackExtraction('empty_primary')) {
+                        return;
+                    }
+                }
 
 	            if (isChatGPT) {
 	                const baselineCount = Number.isFinite(captureState.baselineAssistantCount)
@@ -1689,7 +2441,54 @@
 	                const baselineNormalized = normalizeCaptureCandidateText(captureState.baselineText || '');
 	                const textNormalized = normalizeCaptureCandidateText(text);
 	                if (baselineNormalized && textNormalized && textNormalized === baselineNormalized) return;
-	            } else {
+	            } else if (isGrok) {
+                    const baselineNormalized = normalizeCaptureCandidateText(captureState.baselineText || '');
+                    const textNormalized = normalizeCaptureCandidateText(text);
+                    const sameAsBaseline = Boolean(baselineNormalized && textNormalized && textNormalized === baselineNormalized);
+                    const shapeSuggestsNewTurn = Boolean(
+                        (baselineGrokBestBottom !== null && currentGrokBestBottom !== null && currentGrokBestBottom > baselineGrokBestBottom + 6)
+                        || (baselineGrokCandidateCount !== null && currentGrokCandidateCount !== null && currentGrokCandidateCount > baselineGrokCandidateCount)
+                    );
+                    if (sameAsBaseline && !shapeSuggestsNewTurn) {
+                        if (!grokCompletedByControls && !grokLooksComplete) return;
+                        const latestExtraction = extractLatestResponse({ withMeta: true, withHtml: true, grokPreferLatestBottom: true });
+                        const latestText = latestExtraction.text || '';
+                        const latestNormalized = normalizeCaptureCandidateText(latestText);
+                        const latestSameAsBaseline = Boolean(
+                            baselineNormalized
+                            && latestNormalized
+                            && latestNormalized === baselineNormalized
+                        );
+                        if (!latestText || latestSameAsBaseline || isGrokControlOnlyText(latestText)) {
+                            if (!tryGrokFallbackExtraction('same_as_baseline_after_latest')) {
+                                return;
+                            }
+                        } else {
+                            extraction = latestExtraction;
+                            text = latestText;
+                            captureState.lastExtractionMeta = latestExtraction.meta || null;
+                            meta = captureState.lastExtractionMeta || {};
+                            currentGrokBestBottom = Number.isFinite(meta.bestBottom) ? meta.bestBottom : null;
+                            currentGrokCandidateCount = Number.isFinite(meta.candidateCount) ? meta.candidateCount : null;
+                            currentGrokShapeSignature = typeof meta.bestShapeSignature === 'string'
+                                ? meta.bestShapeSignature
+                                : '';
+                            captureDebug('Grok switched to latest-bottom candidate after control completion', {
+                                baselineBottom: baselineGrokBestBottom,
+                                selectedBottom: currentGrokBestBottom,
+                                selectedShape: currentGrokShapeSignature
+                            });
+                        }
+                    }
+                    if (sameAsBaseline && shapeSuggestsNewTurn) {
+                        captureDebug('Grok new text inferred by shape', {
+                            baselineBottom: baselineGrokBestBottom,
+                            currentBottom: currentGrokBestBottom,
+                            baselineCandidateCount: baselineGrokCandidateCount,
+                            currentCandidateCount: currentGrokCandidateCount
+                        });
+                    }
+                } else {
 	                if (text === captureState.baselineText) return;
 	            }
 	            captureState.hasNewText = true;
@@ -1697,15 +2496,37 @@
             captureState.lastTextChangeAt = now;
         }
 
-        if (!text) return;
+        if (!text) {
+            if (!(grokCompletedByControls || grokLooksComplete) || !tryGrokFallbackExtraction('post_has_new_empty')) {
+                return;
+            }
+        }
 
         const textChanged = text !== captureState.lastText;
-        if (textChanged) {
+        const grokShapeChanged = isGrok && Boolean(
+            (Number.isFinite(captureState.grokLastBestBottom) && currentGrokBestBottom !== null && Math.abs(currentGrokBestBottom - captureState.grokLastBestBottom) >= 4)
+            || (captureState.grokLastShapeSignature && currentGrokShapeSignature && currentGrokShapeSignature !== captureState.grokLastShapeSignature)
+        );
+
+        if (textChanged || grokShapeChanged) {
             captureState.lastText = text;
             captureState.lastTextChangeAt = now;
+            if (isGrok && grokShapeChanged) {
+                captureDebug('Grok shape progressed', {
+                    previousBottom: captureState.grokLastBestBottom,
+                    currentBottom: currentGrokBestBottom,
+                    previousShape: captureState.grokLastShapeSignature,
+                    currentShape: currentGrokShapeSignature
+                });
+            }
 	        }
+            if (isGrok) {
+                if (currentGrokBestBottom !== null) captureState.grokLastBestBottom = currentGrokBestBottom;
+                if (currentGrokShapeSignature) captureState.grokLastShapeSignature = currentGrokShapeSignature;
+            }
 
-	        const generating = isGenerating();
+	        const generatingRaw = isGenerating();
+            const generating = (isGrok && grokLooksComplete) ? false : generatingRaw;
             if (generating) captureState.sawGenerating = true;
 	        const stableForMs = now - captureState.lastTextChangeAt;
             const totalForMs = now - captureState.startedAt;
@@ -1723,7 +2544,7 @@
                     /(?:\bhttps?:\/\/\S+|\bwww\.\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,24}\b)/i.test(text))
                 : false;
 
-	        const baseForceCaptureMs = isChatGPT ? 45000 : 15000;
+	        const baseForceCaptureMs = isChatGPT ? 45000 : (isGrok ? 20000 : 15000);
 	        const isLikelyReferenceOnly = isChatGPT
 	            ? Boolean(captureState.lastExtractionMeta?.bestIsReferenceList || looksLikeChatGPTSourcesOnly(text) || looksUrlishOnly)
 	            : false;
@@ -1732,10 +2553,20 @@
             let stableCaptureMs = isLikelyReferenceOnly
                 ? (isChatGPT ? 9000 : 3000)
                 : (isChatGPT ? 3000 : 1200);
-            const maxWaitMs = isChatGPT ? 180000 : 120000;
+            const maxWaitMs = isChatGPT ? 180000 : (isGrok ? 150000 : 120000);
 
             if (isChatGPT && !isLikelyReferenceOnly && wordCount > 0 && wordCount < 12) {
                 stableCaptureMs = Math.max(stableCaptureMs, 4500);
+            }
+
+            if (isGrok) {
+                stableCaptureMs = Math.max(stableCaptureMs, 2400);
+                if (!captureState.sawGenerating) {
+                    stableCaptureMs = Math.max(stableCaptureMs, 3500);
+                }
+                if (wordCount > 0 && wordCount < 10) {
+                    stableCaptureMs = Math.max(stableCaptureMs, 4200);
+                }
             }
 
             const nonEmptyLineCount = String(text || '')
@@ -1764,14 +2595,14 @@
             const tabHidden = document.visibilityState !== 'visible';
             const visibilityMultiplier = tabHidden ? 2 : 1;
             if (tabHidden) {
-                const hiddenStableMin = isChatGPT ? 6000 : 3000;
+                const hiddenStableMin = isChatGPT ? 6000 : (isGrok ? 4500 : 3000);
                 stableCaptureMs = Math.max(stableCaptureMs, hiddenStableMin);
             }
             const finalForceCaptureMs = forceCaptureMs * visibilityMultiplier;
             const finalMaxWaitMs = maxWaitMs * visibilityMultiplier;
             const minStableForTimeoutMs = tabHidden
                 ? (isChatGPT ? 8000 : 5000)
-                : (isChatGPT ? 6000 : 4000);
+                : (isChatGPT ? 6000 : (isGrok ? 5000 : 4000));
 
 	        if (generating) {
 	            if (stableForMs >= finalForceCaptureMs && text.length >= minTextLen) {
@@ -1785,10 +2616,25 @@
 	                    textLen: text.length,
 	                    meta: captureState.lastExtractionMeta
 	                });
-	                sendCapturedResponse(extractLatestResponse({ withMeta: false, withHtml: true }));
-	            }
-	            return;
-	        }
+                emitCaptureFromResolvedExtraction('force_capture', extraction);
+            }
+            return;
+        }
+
+            const grokFinalizedByControlTransition = grokCompletedByControls || grokLooksComplete;
+            if (grokFinalizedByControlTransition && text.length >= minTextLen && stableForMs >= 800) {
+                if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
+                captureDebug('Stable capture (grok stop->voice/idle)', {
+                    llm: currentLLM,
+                    stableForMs,
+                    sawStop: captureState.grokSawStopControl,
+                    sawVoiceAfterStop: captureState.grokSawVoiceAfterStop,
+                    control: grokControl,
+                    meta: captureState.lastExtractionMeta
+                });
+                emitCaptureFromResolvedExtraction('grok_stop_voice_idle', extraction);
+                return;
+            }
 
             if (text.length < minTextLen) return;
             const canStableCapture = stableForMs >= stableCaptureMs;
@@ -1811,11 +2657,13 @@
                 minStableForTimeoutMs,
                 isLikelyReferenceOnly,
                 generating,
+                generatingRaw: isGrok ? generatingRaw : undefined,
+                grokLooksComplete: isGrok ? grokLooksComplete : undefined,
                 textLen: text.length,
                 meta: captureState.lastExtractionMeta
             });
-            sendCapturedResponse(extractLatestResponse({ withMeta: false, withHtml: true }));
-	    }
+            emitCaptureFromResolvedExtraction(canTimeoutCapture && !canStableCapture ? 'timeout_capture' : 'stable_capture', extraction);
+    }
 
     function startCaptureObservers() {
         const observer = new MutationObserver(() => {

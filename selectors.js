@@ -30,10 +30,10 @@ const LLM_SELECTORS = {
 
   grok: {
     input: 'textarea, [contenteditable="true"][role="textbox"], [role="textbox"]',
-    sendButton: 'button[aria-label*="Send" i], button[type="submit"]',
+    sendButton: 'button[aria-label*="Send" i], button[aria-label*="Submit" i], button[aria-label*="Soumettre" i], button[type="submit"]',
     responseArea: 'main, [role="main"]',
     lastResponseBlock: '[data-testid*="assistant" i], [data-testid*="message" i], article, [role="article"]',
-    doneIndicator: 'button[aria-label*="Stop" i], button[aria-label*="Cancel" i], button[data-testid*="stop" i]'
+    doneIndicator: 'button[aria-label*="Stop" i], button[aria-label*="Cancel" i], button[aria-label*="Arrêter" i], button[aria-label*="Annuler" i], button[aria-label*="Passer en mode vocal" i], button[aria-label*="voice mode" i], button[data-testid*="stop" i]'
   }
 };
 

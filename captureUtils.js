@@ -12,6 +12,11 @@
     return String(value || '').replace(/\s+/g, ' ').trim();
   }
 
+  function normalizeControlMatch(value) {
+    const normalized = String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    return normalizeWhitespace(normalized).toLowerCase();
+  }
+
   function splitNonEmptyLines(text) {
     return String(text || '')
       .split(/\r?\n/)
@@ -121,6 +126,79 @@
     return false;
   }
 
+  function looksLikeUiControlText(text, options) {
+    const provider = String(options?.provider || '').trim().toLowerCase();
+    if (provider && provider !== 'grok') return false;
+
+    const raw = String(text || '').trim();
+    if (!raw) return false;
+
+    const normalized = normalizeControlMatch(raw);
+    const lines = splitNonEmptyLines(normalized);
+    if (lines.length === 0 || lines.length > 5) return false;
+
+    const wordCount = normalized.split(/\s+/).filter(Boolean).length;
+    if (wordCount > 24) return false;
+
+    const sentenceEndPunctCount = countSentenceEndPunct(raw);
+    const controlPatterns = [
+      /\b(send|submit|soumettre|envoyer)\b/i,
+      /\b(stop|cancel|annuler|arreter)\b/i,
+      /\barreter la reponse du modele\b/i,
+      /\bpasser en mode vocal\b/i,
+      /\bmode vocal\b/i,
+      /\bvoice mode\b/i,
+      /\bare you satisfied with .* answer\b/i,
+      /\bsatisfied with .* answer\b/i,
+      /\betes[-\s]?vous satisfait\b/i
+    ];
+
+    const latencyOnlyPattern = /^\s*~?\d+(?:[.,]\d+)?\s*(ms|s)\s*$/i;
+    if (lines.length === 1 && latencyOnlyPattern.test(lines[0])) return true;
+
+    const controlLineCount = lines.filter((line) => controlPatterns.some((pattern) => pattern.test(line))).length;
+    if (controlLineCount === 0) return false;
+
+    const allControl = controlLineCount === lines.length;
+    const controlQuestion = /\?\s*$/.test(raw);
+    if (allControl && (sentenceEndPunctCount === 0 || controlQuestion)) return true;
+
+    if (lines.length === 1 && controlLineCount === 1 && wordCount <= 12 && (sentenceEndPunctCount === 0 || controlQuestion)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function looksLikePromptScaffoldText(text, options) {
+    const provider = String(options?.provider || '').trim().toLowerCase();
+    if (provider && provider !== 'grok') return false;
+
+    const raw = String(text || '').trim();
+    if (!raw) return false;
+    const normalized = normalizeWhitespace(raw);
+    if (!normalized) return false;
+
+    const lines = splitNonEmptyLines(raw).map((line) => normalizeControlMatch(line));
+    if (!lines.length) return false;
+    if (lines.length > 20) return false;
+
+    const scaffoldPatterns = [
+      /^conversation so far:?$/,
+      /^here'?s a new message from the user:?$/,
+      /^please grok answer(?:\.+)?$/,
+      /^user:?$/
+    ];
+    const hitCount = lines.filter((line) => scaffoldPatterns.some((pattern) => pattern.test(line))).length;
+    if (hitCount === 0) return false;
+    if (hitCount >= 2) return true;
+    if (lines.length === 1) return true;
+
+    const sentenceEndPunctCount = countSentenceEndPunct(raw);
+    const wordCount = normalized.split(/\s+/).filter(Boolean).length;
+    return sentenceEndPunctCount === 0 && wordCount <= 40;
+  }
+
   function scoreTextCandidate(text, options) {
     const analysis = analyzeText(text);
     if (!analysis.raw) {
@@ -128,6 +206,8 @@
     }
 
     const isReferenceList = looksLikeReferenceList(text, options);
+    const isUiControlText = looksLikeUiControlText(text, options);
+    const isPromptScaffoldText = looksLikePromptScaffoldText(text, options);
 
     // Base: reward meaningful length but with diminishing returns.
     const lengthScore = Math.min(30, Math.log2(analysis.wordCount + 1) * 8);
@@ -140,8 +220,11 @@
     const bulletPenalty = analysis.bulletLikeCount >= 8 && analysis.sentenceEndPunctCount === 0 ? 8 : 0;
     const referencePenalty = isReferenceList ? 60 : 0;
 
-    const score = lengthScore + punctScore + structureScore + codeScore - urlPenalty - bulletPenalty - referencePenalty;
-    return { score, analysis, isReferenceList };
+    const controlPenalty = isUiControlText ? 80 : 0;
+    const scaffoldPenalty = isPromptScaffoldText ? 70 : 0;
+
+    const score = lengthScore + punctScore + structureScore + codeScore - urlPenalty - bulletPenalty - referencePenalty - controlPenalty - scaffoldPenalty;
+    return { score, analysis, isReferenceList, isUiControlText, isPromptScaffoldText };
   }
 
   function rankTextCandidates(candidates, options) {
@@ -152,6 +235,8 @@
         index,
         score: result.score,
         isReferenceList: result.isReferenceList,
+        isUiControlText: result.isUiControlText,
+        isPromptScaffoldText: result.isPromptScaffoldText,
         analysis: result.analysis
       };
     });
@@ -178,6 +263,8 @@
     normalizeWhitespace,
     analyzeText,
     looksLikeReferenceList,
+    looksLikeUiControlText,
+    looksLikePromptScaffoldText,
     scoreTextCandidate,
     rankTextCandidates,
     chooseBestTextCandidate

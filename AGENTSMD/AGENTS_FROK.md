@@ -24,6 +24,11 @@ Grok is integrated as a first‑class provider (`grok`) alongside `chatgpt`, `ge
 
 - **Sending prompts** to Grok works via the existing DOM-injection sender (`simpleInteraction(...)`).
 - **Capturing Grok answers** works via the content-script capture pipeline (`contentScript.js`) with Grok-specific extraction heuristics.
+- Grok send acknowledgment uses a **guarded best-effort policy** tuned for the new UI states:
+  - send/draft: `Soumettre` (submit),
+  - generating: `Arrêter la réponse du modèle`,
+  - done/idle: `Passer en mode vocal`.
+- Grok capture strips UI footer artifacts (latency labels like `773ms` and satisfaction prompts) so transcript entries only include answer text.
 - **Attachments** are **best-effort auto-uploaded** to Grok using the same attachment automation system as ChatGPT/Claude:
   - If attachment automation fails on Grok, the run continues **text-only** and a notice is appended in the transcript.
 - Grok works in:
@@ -174,10 +179,10 @@ The injected function `simpleInteraction(...)` does:
    - Uses `providerUiConfig.grok.sendSelectors` to locate the send button.
    - Clicks send, or falls back to Enter.
 5. **Acknowledge**
-   - Considers send “acknowledged” if:
-     - the input is cleared, or
-     - a stop button appears (generating), or
-     - the input becomes empty within a timeout.
+   - Grok uses signal-based acknowledgment:
+     - Strong signals: stop control visible, or voice control after stop.
+     - Secondary signals: draft shrinks/clears and submit visibility/enabled transitions.
+   - Ack rule: `strong >= 1` OR `secondary >= 2` within timeout.
 
 ### 4.3 Why “pickBestVisibleElement” matters
 
@@ -238,6 +243,7 @@ Best-effort heuristics:
 
 - visible Stop/Cancel button
 - visible spinners/progress bars
+- explicit voice-mode detection as “not generating” for modern Grok UI
 
 This is deliberately heuristic because Grok can change UI.
 
@@ -253,10 +259,23 @@ Strategy:
   - the composer subtree (to avoid capturing the input itself),
   - nodes that appear to be user messages (`isGrokUserMessage(...)`),
   - nodes that are just prompt echoes (`looksLikePromptEcho(...)`).
+- composer overlap filtering is geometry-aware:
+  - reject nodes inside composer,
+  - reject candidate content that overlaps the composer zone,
+  - do not blanket-reject wrappers that merely contain composer subtree.
 - pick the best candidate using `CaptureUtils.chooseBestTextCandidate(..., { provider: 'grok' })`.
 - ship both:
   - `text` (canonical, used for debate logic),
-  - `html` (optional, UI-only rendering).
+  - `html` (optional, UI-only rendering), except Grok now emits plain text only to avoid footer widget leakage.
+
+### 5.5 Emission + fallback hardening (important)
+
+- Capture decisions and emission now use the **same resolved extraction object** (no second fresh re-extract at emit time).
+- Grok transcript-tail fallback is gated to avoid false positives:
+  - strips scaffold lines,
+  - strips control/footer text,
+  - rejects low-quality short fragments.
+- Background now logs explicit empty-content drops (`empty_content_after_capture`) instead of silently returning.
 
 ---
 
@@ -358,7 +377,8 @@ Update:
 
 - `background.js` → injected `simpleInteraction`:
   - `inputSelectors.grok`
-  - `providerUiConfig.grok.sendSelectors` / `stopSelectors`
+  - `providerUiConfig.grok.sendSelectors` / `stopSelectors` / `voiceSelectors`
+  - Grok control classifier + `waitForSendAcknowledged(...)` signal policy
 
 Sanity checks in Grok DevTools:
 
@@ -371,7 +391,9 @@ Update:
 
 - `contentScript.js`:
   - `isGrokGenerating()` (stop/spinner selectors)
-  - `extractGrokResponse()` candidate selectors and user-message detection
+  - `extractGrokResponse()` candidate selectors, composer zone filtering, and user-message detection
+  - `emitCaptureFromResolvedExtraction(...)` for final payload emission
+  - `sanitizeGrokTranscriptCandidate(...)` / footer artifact stripping
 
 Enable capture debug (optional):
 
@@ -379,6 +401,13 @@ Enable capture debug (optional):
   - `localStorage.setItem('mlc_capture_debug', '1')`
 
 Reload Grok and retry to see capture decision logs.
+
+If content script says “Response captured” but UI is still empty:
+
+- Check service-worker logs for:
+  - `[MLC Debate] Dropping captured response: empty content.`
+  - `[MLC Parallel] Dropping captured response: empty content.`
+- Those logs include `sessionId`, `promptId`, `turnIndex`, `agentId`, and `sourceLLM`.
 
 ### 9.5 If attachment upload fails
 
