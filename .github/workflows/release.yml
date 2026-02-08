@@ -40,6 +40,9 @@ jobs:
             npm run build:release
           fi
 
+      - name: Audit release artifact contents
+        run: npm run audit:release
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

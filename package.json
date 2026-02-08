@@ -7,6 +7,7 @@
     "test": "node tests/test-capture-heuristics.js && node tests/test-debate-prompt-utils.js && node tests/test-manifest.js && node tests/test-selectors.js",
     "build:variant": "bash scripts/dev/build-extension-variant.sh",
     "build:release": "bash scripts/release/build-release-artifact.sh",
+    "audit:release": "bash scripts/release/audit-release-artifact.sh release/*.zip",
     "build:variant:all-local-worktrees": "bash scripts/dev/build-all-local-worktrees-variants.sh",
     "brand:in-place": "bash scripts/dev/build-extension-variant.sh --in-place",
     "brand:all-worktrees": "bash scripts/dev/apply-worktree-branding.sh",

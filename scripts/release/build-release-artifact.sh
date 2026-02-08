@@ -3,9 +3,15 @@ set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 manifest_path="$repo_root/manifest.json"
+audit_script="$repo_root/scripts/release/audit-release-artifact.sh"
 
 if [[ ! -f "$manifest_path" ]]; then
   echo "[build-release] manifest.json not found at $manifest_path" >&2
+  exit 1
+fi
+
+if [[ ! -x "$audit_script" ]]; then
+  echo "[build-release] audit script not found or not executable: $audit_script" >&2
   exit 1
 fi
 
@@ -16,17 +22,42 @@ build_dir="$repo_root/.dist/release"
 rm -rf "$build_dir"
 mkdir -p "$build_dir" "$release_root"
 
-rsync -a --delete \
-  --exclude '.git' \
-  --exclude '.github' \
-  --exclude '.dist' \
-  --exclude 'release' \
-  --exclude 'worktrees' \
-  --exclude 'node_modules' \
-  --exclude '.env' \
-  --exclude '.env.*' \
-  --exclude '.DS_Store' \
-  "$repo_root/" "$build_dir/"
+required_files=(
+  "manifest.json"
+  "background.js"
+  "contentScript.js"
+  "captureUtils.js"
+  "historyStore.js"
+  "debatePromptUtils.js"
+  "debate_prompts.json"
+  "sidepanel.html"
+  "sidepanel.js"
+  "styles.css"
+)
+
+required_dirs=(
+  "variant-icons"
+)
+
+for file in "${required_files[@]}"; do
+  src="$repo_root/$file"
+  if [[ ! -f "$src" ]]; then
+    echo "[build-release] required file missing: $file" >&2
+    exit 1
+  fi
+  mkdir -p "$build_dir/$(dirname "$file")"
+  cp -p "$src" "$build_dir/$file"
+done
+
+for dir in "${required_dirs[@]}"; do
+  src="$repo_root/$dir"
+  if [[ ! -d "$src" ]]; then
+    echo "[build-release] required directory missing: $dir" >&2
+    exit 1
+  fi
+  mkdir -p "$build_dir/$dir"
+  cp -R "$src"/. "$build_dir/$dir/"
+done
 
 node - "$build_dir" "$requested_version" <<'NODE'
 const fs = require('fs');
@@ -66,5 +97,6 @@ zip_path="$release_root/$zip_name"
 
 rm -f "$zip_path"
 (cd "$build_dir" && zip -qr "$zip_path" .)
+"$audit_script" "$zip_path"
 
 echo "[build-release] Built artifact: $zip_path"
