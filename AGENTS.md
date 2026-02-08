@@ -14,7 +14,6 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Claude: attachments are auto-uploaded when possible (uploaded first, then the prompt is sent).
   - Gemini: attachments are **not auto-uploaded**; Gemini receives text-only when files are attached in the side panel (UI warns before sending).
   - Grok: attachments are **best-effort auto-uploaded**; if Grok blocks automation, Grok receives text-only and the UI logs a notice.
-- It can also **forward prompts between LLM pages** via injected toggle buttons (legacy flow, still present).
 - The side panel is the primary UI: clicking the extension icon opens the side panel (no popup).
 
 ### Main user flow (runs)
@@ -53,7 +52,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - **Agents** list is order-only (drag + remove).
   - Provider-level tab creation happens in the **Providers** section (`Connect`, `Connect all`, `New tab`).
   - Agent-level repairs happen in the **Agents** section (`Reconnect`/`Focus` on each row).
-- The Settings drawer shows per-provider connection status + basic actions (no per-profile CRUD UI currently).
+- The Settings drawer no longer includes provider connection controls; provider connect/focus/new-tab lives in the Route Builder.
 
 ### Quick connect (side panel)
 
@@ -132,7 +131,6 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 - `contentScript.js`
   - Runs in ChatGPT/Gemini/Claude/Grok pages.
-  - Injects “⇄ OtherLLM” toggle button and forwarding listeners (legacy).
   - Captures LLM responses and posts them back to background.
   - Sends best‑effort model label updates for the active tab.
   - Model label updates are periodic and non-blocking; failures are ignored.
@@ -360,11 +358,6 @@ Defaults are intentionally lightweight; additional role reminders can be added v
 - Finds send button using selector lists; if not found, **falls back to Enter key**.
 - Send readiness waits are adaptive: longer when attachments or large prompts are present, shorter otherwise.
 
-### `simpleInteraction_InjectOnly(...)`
-
-- Used for **legacy follow‑up** (forwarding flow).
-- Injects text into the input without sending.
-
 ## 5) Response capture (contentScript.js)
 
 ### Capture arming
@@ -540,7 +533,6 @@ TAB_PROFILES updates:
   - `{ sessionId, promptId, llmType, agentId?, turnIndex, timestamp, promptPreview? }`
 - `MLC_RESPONSE_CAPTURED` (session)
 - `CHATGPT_RESPONSE_CAPTURED`, `GEMINI_RESPONSE_CAPTURED` (non‑session)
-- `FORWARD_PROMPT` (legacy in‑page forwarding)
 - `PING` / `PONG` for connection checks
 - `PROVIDER_MODEL_INFO` (content -> background/UI)
 
@@ -574,13 +566,10 @@ Non-session prompt behavior:
   - Prefers the default profile tabId if available.
   - Otherwise falls back to legacy preferred tabs and auto-selection.
 
-## 8) Legacy forwarding flow (still present)
+## 8) Legacy in-page forwarding status
 
-- `contentScript.js` injects a **⇄** toggle button on ChatGPT and Gemini pages.
-- When enabled, user’s prompt is forwarded to the other LLM (`FORWARD_PROMPT`).
-- Background maintains a follow‑up state (`activeFollowUpState`) to optionally insert the other model’s response back into the original tab (`simpleInteraction_InjectOnly`).
-
-This flow is separate from debate sessions but shares capture logic.
+- The old in-page forwarding flow (toggle buttons on ChatGPT/Gemini + `FORWARD_PROMPT`) has been removed.
+- Prompt routing now happens through side panel routes (Single / Compare / Debate) or legacy non-session `SEND_PROMPT`.
 
 ## 9) Debugging and troubleshooting
 
