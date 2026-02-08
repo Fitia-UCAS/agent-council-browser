@@ -57,6 +57,7 @@ if [[ ! -f "$manifest_path" ]]; then
 fi
 
 if [[ "$mode" != "in_place" ]]; then
+  rm -rf "$out_dir"
   mkdir -p "$out_dir"
 
   rsync -a --delete \

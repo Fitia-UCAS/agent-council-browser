@@ -1,6 +1,7 @@
 .architect
 .env
 .env.*
+!.env.example
 bootstrap.css
 bootstrap.js
 bootstrap.json

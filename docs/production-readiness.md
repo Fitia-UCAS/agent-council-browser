@@ -47,6 +47,7 @@ Recommended branch rules:
 ## 4) Security and privacy checklist
 
 - Keep secrets out of repo and artifacts (`.env*` ignored and excluded from builds).
+- Use `.env.example` as the only tracked env template; keep real values in local `.env` only.
 - Avoid logging sensitive user prompts/responses in production builds unless needed for debugging.
 - Keep dependency and permission footprint minimal.
 - Add `SECURITY.md` with disclosure instructions before public launch.
