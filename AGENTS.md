@@ -21,8 +21,9 @@ This file is the durable memory for the repo. It is the canonical reference for 
 
 1. User connects providers (creates default tabs) via **Connect** / **Connect all** in the Route Builder provider list.
 2. In the side panel composer, user selects a **Route** from the `To` pill:
-   - Add one or more **agents** from the **Providers** list (`Add agent` / `New tab`).
+   - Add one or more **agents** from the **Providers** list via **New tab** (opens a new provider tab and binds/assigns it).
    - The **Agents** list is order-only: drag to reorder and `×` to remove.
+   - Agent rows also expose per-agent **Reconnect/Focus** actions to repair the exact tab used by that agent.
    - Set **Rounds** only for Debate.
 3. User writes a message and clicks **Send**.
 4. The extension runs a debate (when Route = Debate):
@@ -49,7 +50,8 @@ This file is the durable memory for the repo. It is the canonical reference for 
 - Each **agent** in a route must resolve to a valid profile/tab; duplicate same-provider agents require multiple profiles.
 - The Route Builder is the primary UI:
   - **Agents** list is order-only (drag + remove).
-  - All connection/tab creation happens in the **Providers** section (`Connect`, `Connect all`, `Add agent`, `New tab`).
+  - Provider-level tab creation happens in the **Providers** section (`Connect`, `Connect all`, `New tab`).
+  - Agent-level repairs happen in the **Agents** section (`Reconnect`/`Focus` on each row).
 - The Settings drawer shows per-provider connection status + basic actions (no per-profile CRUD UI currently).
 
 ### Quick connect (side panel)
@@ -61,6 +63,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - claims the tab into a new Tab Profile and sets it as the **default** for that provider (Connect always creates a new default connection).
 - **New tab** creates an additional profile and assigns it to the most-recent unassigned agent for that provider (or replaces a broken pinned agent); otherwise it adds a new pinned agent.
 - Quick connect satisfies agents that use `Default`. Additional same-provider agents require extra profiles created via **New tab**.
+- Per-agent **Reconnect** (in the Agents list) reopens/rebinds the specific broken agent slot instead of adding random duplicate agents.
 - Connection “ready” is still determined by a successful `PING`/`PONG` to the content script (login/redirect pages may delay readiness). If a tab is open but the content script isn’t injected (common after extension reload), the background will attempt to inject `captureUtils.js` + `contentScript.js` and retry once.
 - Profile writes are serialized in the background to avoid lost-update races.
 

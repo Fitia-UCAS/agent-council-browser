@@ -433,6 +433,102 @@ function formatRouteAgentLabel(agent) {
     return `${providerLabel} • ${suffix}`;
 }
 
+function getRouteAgentConnectionInfo(agent) {
+    const provider = normalizeProviderId(agent?.provider);
+    if (!provider) {
+        return {
+            statusText: 'Unknown provider',
+            statusTone: 'warn',
+            canFocus: false,
+            focusTabId: null,
+            canReconnect: false,
+            reconnectLabel: 'Reconnect'
+        };
+    }
+
+    const selection = normalizeProfileSelection(agent?.profileId);
+    if (!selection) {
+        return {
+            statusText: 'No tab assigned',
+            statusTone: 'warn',
+            canFocus: false,
+            focusTabId: null,
+            canReconnect: true,
+            reconnectLabel: 'Connect tab'
+        };
+    }
+
+    const resolvedProfileId = resolveAgentProfileId(agent);
+    if (!resolvedProfileId) {
+        return {
+            statusText: selection === 'default' ? 'Default tab missing' : 'Profile missing',
+            statusTone: 'warn',
+            canFocus: false,
+            focusTabId: null,
+            canReconnect: true,
+            reconnectLabel: selection === 'default' ? 'Connect' : 'Reconnect'
+        };
+    }
+
+    const profile = getProfileById(resolvedProfileId);
+    if (!profile) {
+        return {
+            statusText: 'Profile missing',
+            statusTone: 'warn',
+            canFocus: false,
+            focusTabId: null,
+            canReconnect: true,
+            reconnectLabel: 'Reconnect'
+        };
+    }
+
+    const canFocus = Number.isFinite(profile.tabId);
+    const isConnected = isProfileConnected(provider, resolvedProfileId);
+    const ready = isConnected && isProfileRoutable(profile, provider);
+    if (ready) {
+        return {
+            statusText: 'Ready',
+            statusTone: 'ready',
+            canFocus,
+            focusTabId: profile.tabId,
+            canReconnect: false,
+            reconnectLabel: 'Reconnect'
+        };
+    }
+
+    let statusText = 'Needs reconnect';
+    let statusTone = 'warn';
+    if (profile.status === 'wrong_host') {
+        statusText = 'Wrong site';
+    } else if (profile.status === 'offline') {
+        statusText = 'Tab closed';
+    } else if (!canFocus) {
+        statusText = 'Tab missing';
+    } else if (profile.status === 'unknown') {
+        statusText = 'Checking tab…';
+        statusTone = 'muted';
+    } else {
+        const knownConnected = selection === 'default'
+            ? Boolean(state.connectionStatus?.[provider])
+            : getKnownProfileConnection(resolvedProfileId);
+        if (knownConnected === null) {
+            statusText = 'Checking tab…';
+            statusTone = 'muted';
+        } else if (knownConnected === false) {
+            statusText = 'Not responding';
+        }
+    }
+
+    return {
+        statusText,
+        statusTone,
+        canFocus,
+        focusTabId: profile.tabId,
+        canReconnect: true,
+        reconnectLabel: selection === 'default' ? 'Reconnect' : 'Reconnect tab'
+    };
+}
+
 function isProfileRoutable(profile, provider) {
     if (!profile || typeof profile !== 'object') return false;
     const normalizedProvider = normalizeProviderId(provider || profile.provider);
@@ -684,10 +780,49 @@ function renderRouteSelectedChips(route) {
         handle.setAttribute('aria-label', 'Drag to reorder');
         row.appendChild(handle);
 
+        const main = document.createElement('div');
+        main.className = 'route-agent-main';
+
         const name = document.createElement('span');
         name.className = 'route-agent-name';
         name.textContent = displayLabel;
-        row.appendChild(name);
+        main.appendChild(name);
+
+        const info = getRouteAgentConnectionInfo(agent);
+        const status = document.createElement('span');
+        status.className = 'route-agent-status';
+        status.classList.toggle('is-ready', info.statusTone === 'ready');
+        status.classList.toggle('is-warn', info.statusTone === 'warn');
+        status.classList.toggle('is-muted', info.statusTone === 'muted');
+        status.textContent = info.statusText;
+        main.appendChild(status);
+
+        row.appendChild(main);
+
+        const actions = document.createElement('div');
+        actions.className = 'route-agent-actions';
+
+        if (info.canFocus && Number.isFinite(info.focusTabId)) {
+            const focus = document.createElement('button');
+            focus.type = 'button';
+            focus.className = 'ghost-button';
+            focus.dataset.action = 'focus-route-agent';
+            focus.dataset.agentId = agent.id;
+            focus.setAttribute('aria-label', `Focus ${formatRouteAgentLabel(agent)} tab`);
+            focus.textContent = 'Focus';
+            actions.appendChild(focus);
+        }
+
+        if (info.canReconnect) {
+            const reconnect = document.createElement('button');
+            reconnect.type = 'button';
+            reconnect.className = 'ghost-button';
+            reconnect.dataset.action = 'reconnect-route-agent';
+            reconnect.dataset.agentId = agent.id;
+            reconnect.setAttribute('aria-label', `${info.reconnectLabel} for ${formatRouteAgentLabel(agent)}`);
+            reconnect.textContent = info.reconnectLabel;
+            actions.appendChild(reconnect);
+        }
 
         const remove = document.createElement('button');
         remove.type = 'button';
@@ -701,7 +836,8 @@ function renderRouteSelectedChips(route) {
         icon.textContent = 'close';
         remove.appendChild(icon);
 
-        row.appendChild(remove);
+        actions.appendChild(remove);
+        row.appendChild(actions);
         elements.routeSelected.appendChild(row);
     });
 }
@@ -758,7 +894,8 @@ function renderRouteProviderList(route) {
 
         const status = document.createElement('div');
         status.className = 'route-provider-status';
-        status.textContent = `${statusText} • ${usingText}`;
+        const inRouteLabel = selectedCount > 0 ? ` • ${selectedCount} in route` : '';
+        status.textContent = `${statusText} • ${usingText}${inRouteLabel}`;
         meta.appendChild(status);
 
 	        const actions = document.createElement('div');
@@ -770,26 +907,12 @@ function renderRouteProviderList(route) {
 	            connect.className = 'ghost-button';
 	            connect.dataset.action = 'connect-provider';
 	            connect.dataset.provider = provider;
-	            connect.textContent = connecting ? 'Connecting…' : (busy ? 'New default tab' : 'Connect');
+	            connect.textContent = connecting ? 'Connecting…' : (profile ? 'Reconnect default' : 'Connect');
 	            connect.disabled = connecting;
 	            actions.appendChild(connect);
+        }
 
-	            const newTab = document.createElement('button');
-	            newTab.type = 'button';
-	            newTab.className = 'ghost-button';
-	            newTab.dataset.provider = provider;
-	            newTab.dataset.action = 'new-tab';
-	            newTab.textContent = connecting ? 'Opening…' : 'New tab';
-	            newTab.disabled = connecting;
-	            actions.appendChild(newTab);
-	        } else {
-	            const addAgent = document.createElement('button');
-	            addAgent.type = 'button';
-	            addAgent.className = 'ghost-button';
-	            addAgent.dataset.action = 'add-agent';
-            addAgent.dataset.provider = provider;
-            addAgent.textContent = selectedCount > 0 ? `Add agent (${selectedCount})` : 'Add agent';
-
+        if (profile?.tabId) {
             const focus = document.createElement('button');
             focus.type = 'button';
             focus.className = 'ghost-button';
@@ -797,19 +920,17 @@ function renderRouteProviderList(route) {
             focus.dataset.action = 'focus-provider';
             focus.textContent = 'Focus';
             focus.disabled = connecting || !profile?.tabId;
-
-            const newTab = document.createElement('button');
-            newTab.type = 'button';
-            newTab.className = 'ghost-button';
-            newTab.dataset.provider = provider;
-            newTab.dataset.action = 'new-tab';
-            newTab.textContent = connecting ? 'Opening…' : 'New tab';
-            newTab.disabled = connecting;
-
-            actions.appendChild(addAgent);
             actions.appendChild(focus);
-            actions.appendChild(newTab);
         }
+
+        const newTab = document.createElement('button');
+        newTab.type = 'button';
+        newTab.className = 'ghost-button';
+        newTab.dataset.provider = provider;
+        newTab.dataset.action = 'new-tab';
+        newTab.textContent = connecting ? 'Opening…' : (selectedCount > 0 ? 'New tab + agent' : 'New tab');
+        newTab.disabled = connecting;
+        actions.appendChild(newTab);
 
         item.appendChild(meta);
         item.appendChild(actions);
@@ -826,28 +947,6 @@ function handleRouteProviderListClick(event) {
     const provider = normalizeProviderId(providerFromButton || target.closest('[data-provider]')?.dataset.provider);
     if (!provider) return;
 
-    const addAgent = () => {
-        const route = state.route || getDefaultRoute();
-        const agents = getRouteAgents(route);
-        const providerCount = agents.filter((agent) => agent?.provider === provider).length;
-        state.lastFocusedProvider = provider;
-        if (providerCount === 0) {
-            addRouteAgent(provider, { profileId: 'default' });
-            const profile = getDefaultProfile(provider);
-            const ready = Boolean(state.connectionStatus?.[provider]);
-            const needsDefault = !profile
-                || profile.inUseBySessionId
-                || profile.status === 'offline'
-                || profile.status === 'wrong_host'
-                || !Number.isFinite(profile.tabId)
-                || !ready;
-            if (needsDefault) connectProvider(provider);
-            return;
-        }
-        // Additional same-provider agents need their own tab/profile; `New tab` will claim + assign.
-        addRouteAgent(provider, { profileId: null });
-    };
-
 	if (action === 'focus-provider') {
 	    focusProvider(provider);
 	    return;
@@ -860,18 +959,6 @@ function handleRouteProviderListClick(event) {
         connectProvider(provider);
         return;
     }
-    if (action === 'add-agent') {
-        addAgent();
-        return;
-    }
-
-    const profile = getDefaultProfile(provider);
-    const connected = Boolean(profile?.tabId && Boolean(state.connectionStatus?.[provider]) && !profile.inUseBySessionId);
-    if (!connected) {
-        connectProvider(provider);
-        return;
-    }
-    addAgent();
 }
 
 function handleRouteSelectedClick(event) {
@@ -889,6 +976,13 @@ function handleRouteSelectedClick(event) {
         const agents = getRouteAgents(route).filter((agent) => agent?.id !== agentId);
         setRoute({ ...route, agents });
         return;
+    }
+    if (action === 'focus-route-agent') {
+        focusRouteAgent(agentId);
+        return;
+    }
+    if (action === 'reconnect-route-agent') {
+        reconnectRouteAgent(agentId);
     }
 }
 
@@ -2556,6 +2650,36 @@ function focusProvider(provider) {
         return;
     }
     connectProvider(provider);
+}
+
+function focusRouteAgent(agentId) {
+    const route = state.route || getDefaultRoute();
+    const agent = getRouteAgentById(route, agentId);
+    const provider = normalizeProviderId(agent?.provider);
+    if (!agent || !provider) return;
+
+    const resolvedProfileId = resolveAgentProfileId(agent);
+    const profile = resolvedProfileId ? getProfileById(resolvedProfileId) : null;
+    if (profile?.tabId) {
+        sendMessage({ type: 'FOCUS_TAB', tabId: profile.tabId }, handleActionResponse);
+        return;
+    }
+    focusProvider(provider);
+}
+
+function reconnectRouteAgent(agentId) {
+    const route = state.route || getDefaultRoute();
+    const agent = getRouteAgentById(route, agentId);
+    const provider = normalizeProviderId(agent?.provider);
+    if (!agent || !provider) return;
+    const selection = normalizeProfileSelection(agent?.profileId);
+
+    state.lastFocusedProvider = provider;
+    if (selection === 'default') {
+        connectProvider(provider);
+        return;
+    }
+    openNewTabAndBindAgent(provider, { targetAgentId: agentId });
 }
 
 function connectProvider(provider) {

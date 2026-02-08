@@ -1108,7 +1108,47 @@ textarea:focus {
 .route-agent-name {
   font-weight: 600;
   color: var(--text-strong);
+}
+
+.route-agent-main {
+  min-width: 0;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.route-agent-status {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.route-agent-status.is-ready {
+  color: rgba(74, 222, 128, 0.95);
+}
+
+.route-agent-status.is-warn {
+  color: rgba(251, 191, 36, 0.95);
+}
+
+.route-agent-status.is-muted {
+  color: rgba(148, 163, 184, 0.95);
+}
+
+.route-agent-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.route-agent-actions .ghost-button {
+  padding: 6px 10px;
+  font-size: 0.74rem;
 }
 
 .route-chip {

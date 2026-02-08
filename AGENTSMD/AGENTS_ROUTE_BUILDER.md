@@ -72,8 +72,11 @@ Route Builder sections (top → bottom):
 
 - Displays selected agents as draggable rows (drag handle).
 - Dragging rows reorders the `route.agents[]` array.
-- Agent rows are **order-only**: they show the provider label (with an index when duplicated, e.g. “ChatGPT 1”, “ChatGPT 2”), plus remove.
-- All connection/tab management happens in the **Providers** section below (Connect / New tab).
+- Agent rows are **order-first**: provider label (with index when duplicated, e.g. “ChatGPT 1”, “ChatGPT 2”), status, plus remove.
+- Agent rows expose per-agent actions:
+  - **Focus**: focuses the exact tab bound to this agent.
+  - **Reconnect / Connect tab**: repairs this specific agent by opening a fresh tab and rebinding this row.
+- Provider-level tab creation still happens in the **Providers** section below (Connect / New tab).
 - Clicking `×` removes that agent from the route.
 
 ### Mode
@@ -115,12 +118,12 @@ Provider row actions are **state-dependent**:
     - otherwise adds a new pinned agent.
     - does **not** require an extra Connect click afterwards.
 - If the provider is **ready**: show:
-  - **Add agent**: adds another agent row for that provider.
-    - First agent uses `Default`.
-    - Additional same-provider agents are added as unassigned slots until a **New tab** is opened for them.
   - **Focus**: focuses the bound default profile tab.
   - **New tab**: opens a fresh provider tab, claims it into a **new Tab Profile**, and assigns it to an agent (same behavior as above).
     - This does not change the provider’s default profile (unless no default exists yet); it creates a new profile and assigns it to a route agent.
+
+Important: provider rows no longer have **Add agent**.  
+New agent slots are created only by **New tab** so each added agent immediately gets its own tab/profile.
 
 Focus highlighting:
 
