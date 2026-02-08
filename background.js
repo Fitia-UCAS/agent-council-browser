@@ -57,6 +57,12 @@ try {
     console.error('[MLC Transport] Failed to import transport service module:', error);
 }
 
+try {
+    importScripts('src/background/session-runtime-service.js');
+} catch (error) {
+    console.error('[MLC Runtime] Failed to import session runtime service module:', error);
+}
+
 // Extension installation
 chrome.runtime.onInstalled.addListener(() => {
     console.log('[MLC Background] Multi-LLM Coder extension installed/updated.');
@@ -443,6 +449,42 @@ const transportService = typeof createTransportServiceFn === 'function'
 if (!transportService) {
     console.error('[MLC Transport] Transport service unavailable.');
 }
+
+const createSessionRuntimeServiceFn = globalThis.createSessionRuntimeService;
+const sessionRuntimeService = typeof createSessionRuntimeServiceFn === 'function'
+    ? createSessionRuntimeServiceFn({
+        handleStartDebateSession,
+        resumeDebateSession,
+        handleStopDebateSession,
+        enqueueDebateResponse,
+        handleGeminiResponse,
+        handleChatGPTResponse,
+        handleClaudeResponse,
+        handleGrokResponse,
+        error: (...args) => console.error(...args)
+    })
+    : null;
+
+if (!sessionRuntimeService) {
+    console.error('[MLC Runtime] Session runtime service unavailable.');
+}
+
+const SESSION_RUNTIME_MESSAGE_TYPES = new Set(
+    sessionRuntimeService?.getHandledMessageTypes?.() || [
+        'GEMINI_RESPONSE_CAPTURED',
+        'CHATGPT_RESPONSE_CAPTURED',
+        'CLAUDE_RESPONSE_CAPTURED',
+        'GROK_RESPONSE_CAPTURED',
+        'MLC_RESPONSE_CAPTURED',
+        'MULTI_AGENT_RESPONSE_CAPTURED',
+        'START_DEBATE_SESSION',
+        'START_RUN',
+        'RESUME_SESSION',
+        'STOP_SESSION',
+        'START_MULTI_AGENT_SESSION',
+        'END_MULTI_AGENT_SESSION'
+    ]
+);
 
 // Tracks whether any Chrome window is currently focused (i.e., Chrome is the active app).
 // Used to avoid stealing OS focus when auto-focusing provider tabs while the user is in another app.
@@ -1645,6 +1687,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return false;
     }
 
+    if (SESSION_RUNTIME_MESSAGE_TYPES.has(message?.type)) {
+        if (sessionRuntimeService?.handleRuntimeMessage) {
+            const keepChannelOpen = sessionRuntimeService.handleRuntimeMessage(message, sendResponse);
+            return Boolean(keepChannelOpen);
+        }
+        sendResponse({
+            ok: false,
+            error: 'Session runtime service unavailable.',
+            code: 'SERVICE_UNAVAILABLE'
+        });
+        return false;
+    }
+
     switch (message.type) {
         case 'GET_PROVIDER_CAPABILITIES':
             sendResponse({ ok: true, capabilities: PROVIDER_CAPABILITIES });
@@ -1652,34 +1707,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'SEND_PROMPT':
             handleSendPrompt(message);
             sendResponse({ status: 'received', type: message.type });
-            break;
-        case 'GEMINI_RESPONSE_CAPTURED':
-            enqueueDebateResponse(message, 'Gemini response');
-            handleGeminiResponse(message);
-            sendResponse({ status: 'gemini_response_received', type: message.type });
-            break;
-        case 'CHATGPT_RESPONSE_CAPTURED':
-            enqueueDebateResponse(message, 'ChatGPT response');
-            handleChatGPTResponse(message);
-            sendResponse({ status: 'chatgpt_response_received', type: message.type });
-            break;
-        case 'CLAUDE_RESPONSE_CAPTURED':
-            enqueueDebateResponse(message, 'Claude response');
-            handleClaudeResponse(message);
-            sendResponse({ status: 'claude_response_received', type: message.type });
-            break;
-        case 'GROK_RESPONSE_CAPTURED':
-            enqueueDebateResponse(message, 'Grok response');
-            handleGrokResponse(message);
-            sendResponse({ status: 'grok_response_received', type: message.type });
-            break;
-        case 'MLC_RESPONSE_CAPTURED':
-            enqueueDebateResponse(message, 'response');
-            sendResponse({ status: 'mlc_response_received', type: message.type });
-            break;
-        case 'MULTI_AGENT_RESPONSE_CAPTURED':
-            enqueueDebateResponse(message, 'multi-agent response');
-            sendResponse({ status: 'multi_agent_response_received', type: message.type });
             break;
         case 'LIST_LLM_TABS':
             handleListLLMTabs().catch(error => {
@@ -1698,46 +1725,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 console.error('[MLC Debate] Error getting active session:', error);
             });
             sendResponse({ status: 'active_session_sent', type: message.type });
-            break;
-        case 'START_DEBATE_SESSION':
-            handleStartDebateSession(message).catch(error => {
-                console.error('[MLC Debate] Error starting session:', error);
-            });
-            sendResponse({ status: 'debate_session_started', type: message.type });
-            break;
-        case 'START_RUN':
-            handleStartDebateSession(message).catch(error => {
-                console.error('[MLC Session] Error starting run:', error);
-            });
-            sendResponse({ status: 'run_started', type: message.type });
-            break;
-        case 'RESUME_SESSION':
-            resumeDebateSession(message.sessionId, message.chatId || null).then(sendResponse).catch(error => {
-                console.error('[MLC Debate] Error resuming session:', error);
-                sendResponse({ ok: false, error: error.message });
-            });
-            return true;
-        case 'STOP_SESSION':
-            handleStopDebateSession(message).catch(error => {
-                console.error('[MLC Debate] Error stopping session:', error);
-            });
-            sendResponse({ status: 'debate_session_stopped', type: message.type });
-            break;
-        case 'START_MULTI_AGENT_SESSION':
-            handleStartDebateSession({
-                prompt: message.prompt,
-                firstLLM: message.sourceLLM,
-                rounds: message.maxIterations
-            }).catch(error => {
-                console.error('[MLC Debate] Error starting multi-agent session:', error);
-            });
-            sendResponse({ status: 'multi_agent_session_started', type: message.type });
-            break;
-        case 'END_MULTI_AGENT_SESSION':
-            handleStopDebateSession({ reason: message.reason || 'User requested' }).catch(error => {
-                console.error('[MLC Debate] Error stopping multi-agent session:', error);
-            });
-            sendResponse({ status: 'multi_agent_session_ended', type: message.type });
             break;
         default:
             console.warn('[MLC Background] Unknown message type:', message.type);

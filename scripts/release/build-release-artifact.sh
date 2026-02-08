@@ -38,6 +38,7 @@ required_files=(
   "src/background/profile-service.js"
   "src/background/prompt-service.js"
   "src/background/transport-service.js"
+  "src/background/session-runtime-service.js"
   "src/background/session-registry.js"
   "src/sidepanel/route-utils.js"
   "src/sidepanel/rich-content.js"
