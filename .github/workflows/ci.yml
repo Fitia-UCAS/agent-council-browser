@@ -21,6 +21,7 @@ jobs:
       - name: Syntax check
         run: |
           node --check background.js
+          node --check src/background/session-helpers.js
           node --check sidepanel.js
           node --check contentScript.js
           node --check historyStore.js
