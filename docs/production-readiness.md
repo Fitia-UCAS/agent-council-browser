@@ -1,0 +1,66 @@
+# Production Readiness Guide
+
+This repo ships a Chrome extension (MV3). There is no backend service in this project today, so "production" means:
+
+1. Build a signed release zip.
+2. Publish to the Chrome Web Store.
+3. Run CI on every PR and gate merges to `main`.
+
+## 1) Release artifact
+
+Build a production zip (not a dev-variant build):
+
+```bash
+npm run build:release
+```
+
+Optional explicit version:
+
+```bash
+npm run build:release -- 0.2.0
+```
+
+Output:
+
+- `release/multi-llm-coder-v<version>.zip`
+
+## 2) CI/CD model
+
+- PRs: run `CI` workflow (syntax checks, test suite, variant build smoke test).
+- `main`: keep protected with required status checks.
+- Tags (`v*`) or manual dispatch: run `Release` workflow to build and publish release artifacts.
+
+Recommended branch rules:
+
+- Require at least 1 review for `main`.
+- Require status checks: `CI / validate`.
+- Disable direct pushes to `main`.
+
+## 3) Chrome Web Store production checklist
+
+- Ensure `manifest.json` has production branding/version (release script strips dev suffixes).
+- Provide extension privacy policy URL in your store listing.
+- Verify high-risk permissions (`debugger`, broad host access) are clearly justified in listing notes.
+- Test on a clean Chrome profile before upload.
+- Upload `release/*.zip` to Chrome Web Store dashboard.
+
+## 4) Security and privacy checklist
+
+- Keep secrets out of repo and artifacts (`.env*` ignored and excluded from builds).
+- Avoid logging sensitive user prompts/responses in production builds unless needed for debugging.
+- Keep dependency and permission footprint minimal.
+- Add `SECURITY.md` with disclosure instructions before public launch.
+
+## 5) Multi-user expectations
+
+- The extension is client-side only.
+- Each user runs their own local state (`chrome.storage`, IndexedDB, and browser tabs).
+- There is no shared multi-tenant server/database in this repo today.
+- "Multiple users" means many independent installs, not shared sessions/accounts.
+
+## 6) Open-source readiness checklist
+
+- Add `LICENSE` file (current package metadata says ISC).
+- Add `CONTRIBUTING.md` and pull request template.
+- Add `SECURITY.md`.
+- Keep README aligned with current behavior (AGENTS.md is canonical internally).

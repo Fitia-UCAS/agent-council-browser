@@ -43,6 +43,8 @@ if [[ "$mode" != "in_place" ]]; then
     --exclude '.dist' \
     --exclude 'worktrees' \
     --exclude 'node_modules' \
+    --exclude '.env' \
+    --exclude '.env.*' \
     --exclude '.DS_Store' \
     "$repo_root/" "$out_dir/"
 fi

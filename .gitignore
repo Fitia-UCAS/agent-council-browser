@@ -1,10 +1,13 @@
 .architect
+.env
+.env.*
 bootstrap.css
 bootstrap.js
 bootstrap.json
 bootstrap.jsonp
 build/
 .dist/
+/release/
 .variant-icons/
 variant-icons/
 worktrees/

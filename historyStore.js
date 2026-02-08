@@ -434,7 +434,12 @@
     async function renameThread(threadId, title) {
         const db = await openDb();
         const key = await requireUnlockedKey();
-        const thread = await ensureThread(threadId);
+        const thread = await getThreadRecord(threadId);
+        if (!thread) {
+            const err = new Error('Chat not found.');
+            err.code = 'CHAT_NOT_FOUND';
+            throw err;
+        }
         const normalized = normalizeTitle(title);
         if (!normalized) {
             const err = new Error('Title is empty.');
@@ -443,7 +448,7 @@
         }
         thread.titleEnc = await encryptString(key, normalized);
         thread.titleIsDefault = false;
-        thread.updatedAt = Math.max(Number.isFinite(thread.updatedAt) ? thread.updatedAt : 0, createdAt);
+        thread.updatedAt = Math.max(Number.isFinite(thread.updatedAt) ? thread.updatedAt : 0, nowMs());
         await upsertThread(thread);
         return decryptThreadSummary(thread);
     }
