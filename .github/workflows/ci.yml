@@ -26,11 +26,15 @@ jobs:
           node --check src/background/prompt-service.js
           node --check src/background/transport-service.js
           node --check src/background/session-runtime-service.js
+          node --check src/background/message-router.js
           node --check src/background/history-chat-service.js
           node --check src/background/session-registry.js
           node --check sidepanel.js
           node --check contentScript.js
           node --check historyStore.js
+
+      - name: Verify background mirror sync
+        run: npm run background:check-sync
 
       - name: Run tests
         run: npm test

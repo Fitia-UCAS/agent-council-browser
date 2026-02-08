@@ -4,13 +4,15 @@
   "description": "Send prompts to multiple LLM web UIs (ChatGPT, Gemini, Claude, Grok) simultaneously and compare responses side-by-side",
   "main": "background.js",
   "scripts": {
-    "test": "node tests/test-capture-heuristics.js && node tests/test-debate-prompt-utils.js && node tests/test-background-session-helpers.js && node tests/test-background-history-chat-service.js && node tests/test-background-history-routing-integration.js && node tests/test-background-profile-service.js && node tests/test-background-prompt-service.js && node tests/test-background-transport-service.js && node tests/test-background-session-runtime-service.js && node tests/test-background-session-registry.js && node tests/test-manifest.js && node tests/test-selectors.js",
+    "test": "node tests/test-capture-heuristics.js && node tests/test-debate-prompt-utils.js && node tests/test-background-session-helpers.js && node tests/test-background-history-chat-service.js && node tests/test-background-history-routing-integration.js && node tests/test-background-profile-service.js && node tests/test-background-prompt-service.js && node tests/test-background-transport-service.js && node tests/test-background-session-runtime-service.js && node tests/test-background-message-router.js && node tests/test-background-session-registry.js && node tests/test-manifest.js && node tests/test-selectors.js",
     "build:variant": "bash scripts/dev/build-extension-variant.sh",
     "build:release": "bash scripts/release/build-release-artifact.sh",
     "audit:release": "bash scripts/release/audit-release-artifact.sh release/*.zip",
     "build:variant:all-local-worktrees": "bash scripts/dev/build-all-local-worktrees-variants.sh",
     "brand:in-place": "bash scripts/dev/build-extension-variant.sh --in-place",
     "brand:all-worktrees": "bash scripts/dev/apply-worktree-branding.sh",
+    "background:check-sync": "bash scripts/dev/check-background-sync.sh",
+    "background:sync": "bash scripts/dev/sync-background-main.sh",
     "icons:ensure": "bash scripts/dev/ensure-variant-icons.sh",
     "hooks:enable": "bash scripts/dev/enable-git-hooks.sh"
   },

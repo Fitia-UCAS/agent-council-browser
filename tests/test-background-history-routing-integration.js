@@ -134,7 +134,9 @@ async function runTest(name, fn) {
   await runTest('background wiring delegates history/chat routing to service', async () => {
     const source = fs.readFileSync(path.resolve(__dirname, '../background.js'), 'utf8');
     assert.ok(source.includes("importScripts('src/background/history-chat-service.js')"));
-    assert.ok(source.includes('historyChatService?.handleHistoryAndChatMessage'));
+    assert.ok(source.includes("importScripts('src/background/message-router.js')"));
+    assert.ok(source.includes('historyMessageTypes: HISTORY_MESSAGE_TYPES'));
+    assert.ok(source.includes('historyChatService'));
     assert.ok(source.includes("code: 'SERVICE_UNAVAILABLE'"));
 
     const removedCases = [

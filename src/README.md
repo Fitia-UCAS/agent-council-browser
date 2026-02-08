@@ -14,6 +14,7 @@ Notable extractions completed so far:
 - `background/prompt-service.js`: prompt template message routing and prompt/delivery helper facade.
 - `background/transport-service.js`: provider transport/injection facade for tab resolution and prompt delivery.
 - `background/session-runtime-service.js`: runtime session message routing for start/stop/resume and captured responses.
+- `background/message-router.js`: centralized background message routing and service delegation.
 - `background/session-helpers.js`: session routing/turn helpers and delivery-state normalization.
 - `background/session-registry.js`: active-session registry/persistence/hydration and response queueing.
 - `shared/providers.js`: provider metadata/capabilities plus host/label helper utilities.

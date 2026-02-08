@@ -63,6 +63,12 @@ try {
     console.error('[MLC Runtime] Failed to import session runtime service module:', error);
 }
 
+try {
+    importScripts('src/background/message-router.js');
+} catch (error) {
+    console.error('[MLC Router] Failed to import message router module:', error);
+}
+
 // Extension installation
 chrome.runtime.onInstalled.addListener(() => {
     console.log('[MLC Background] Multi-LLM Coder extension installed/updated.');
@@ -1642,96 +1648,73 @@ const HISTORY_MESSAGE_TYPES = new Set([
     'DELETE_CHAT'
 ]);
 
+const coreMessageHandlers = {
+    GET_PROVIDER_CAPABILITIES: ({ sendResponse }) => {
+        sendResponse({ ok: true, capabilities: PROVIDER_CAPABILITIES });
+        return false;
+    },
+    SEND_PROMPT: ({ message, sendResponse }) => {
+        handleSendPrompt(message);
+        sendResponse({ status: 'received', type: message.type });
+        return false;
+    },
+    LIST_LLM_TABS: ({ message, sendResponse }) => {
+        handleListLLMTabs().catch(error => {
+            console.error('[MLC Debate] Error listing tabs:', error);
+        });
+        sendResponse({ status: 'listing_tabs', type: message.type });
+        return false;
+    },
+    SET_PREFERRED_TABS: ({ message, sendResponse }) => {
+        setPreferredTabs(message).then(() => handleListLLMTabs()).catch(error => {
+            console.error('[MLC Debate] Error saving preferred tabs:', error);
+        });
+        sendResponse({ status: 'preferred_tabs_saved', type: message.type });
+        return false;
+    },
+    GET_ACTIVE_SESSION: ({ message, sendResponse }) => {
+        handleGetActiveSession(message).catch(error => {
+            console.error('[MLC Debate] Error getting active session:', error);
+        });
+        sendResponse({ status: 'active_session_sent', type: message.type });
+        return false;
+    }
+};
+
+const createBackgroundMessageRouterFn = globalThis.createBackgroundMessageRouter;
+const messageRouter = typeof createBackgroundMessageRouterFn === 'function'
+    ? createBackgroundMessageRouterFn({
+        historyChatService,
+        historyMessageTypes: HISTORY_MESSAGE_TYPES,
+        profileService,
+        profileMessageTypes: PROFILE_SERVICE_MESSAGE_TYPES,
+        promptService,
+        promptMessageTypes: PROMPT_SERVICE_MESSAGE_TYPES,
+        sessionRuntimeService,
+        sessionRuntimeMessageTypes: SESSION_RUNTIME_MESSAGE_TYPES,
+        handlersByType: coreMessageHandlers,
+        unknownHandler: ({ message, sendResponse }) => {
+            console.warn('[MLC Background] Unknown message type:', message?.type);
+            sendResponse({ status: 'unknown_message_type' });
+            return false;
+        }
+    })
+    : null;
+
+if (!messageRouter) {
+    console.error('[MLC Router] Message router unavailable.');
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[MLC Background] Received message:', message);
-
-    if (historyChatService?.handleHistoryAndChatMessage) {
-        const handled = historyChatService.handleHistoryAndChatMessage(message, sendResponse);
-        if (handled) {
-            return true;
-        }
-    } else if (HISTORY_MESSAGE_TYPES.has(message?.type)) {
-        sendResponse({
-            ok: false,
-            error: 'History/chat service unavailable.',
-            code: 'SERVICE_UNAVAILABLE'
-        });
-        return false;
+    if (messageRouter?.handleMessage) {
+        return Boolean(messageRouter.handleMessage(message, sender, sendResponse));
     }
-
-    if (profileService?.handleProfileMessage) {
-        const handled = profileService.handleProfileMessage(message, sender, sendResponse);
-        if (handled) {
-            return true;
-        }
-    } else if (PROFILE_SERVICE_MESSAGE_TYPES.has(message?.type)) {
-        sendResponse({
-            ok: false,
-            error: 'Profile service unavailable.',
-            code: 'SERVICE_UNAVAILABLE'
-        });
-        return false;
-    }
-
-    if (promptService?.handlePromptMessage) {
-        const handled = promptService.handlePromptMessage(message, sendResponse);
-        if (handled) {
-            return true;
-        }
-    } else if (PROMPT_SERVICE_MESSAGE_TYPES.has(message?.type)) {
-        sendResponse({
-            ok: false,
-            error: 'Prompt service unavailable.',
-            code: 'SERVICE_UNAVAILABLE'
-        });
-        return false;
-    }
-
-    if (SESSION_RUNTIME_MESSAGE_TYPES.has(message?.type)) {
-        if (sessionRuntimeService?.handleRuntimeMessage) {
-            const keepChannelOpen = sessionRuntimeService.handleRuntimeMessage(message, sendResponse);
-            return Boolean(keepChannelOpen);
-        }
-        sendResponse({
-            ok: false,
-            error: 'Session runtime service unavailable.',
-            code: 'SERVICE_UNAVAILABLE'
-        });
-        return false;
-    }
-
-    switch (message.type) {
-        case 'GET_PROVIDER_CAPABILITIES':
-            sendResponse({ ok: true, capabilities: PROVIDER_CAPABILITIES });
-            break;
-        case 'SEND_PROMPT':
-            handleSendPrompt(message);
-            sendResponse({ status: 'received', type: message.type });
-            break;
-        case 'LIST_LLM_TABS':
-            handleListLLMTabs().catch(error => {
-                console.error('[MLC Debate] Error listing tabs:', error);
-            });
-            sendResponse({ status: 'listing_tabs', type: message.type });
-            break;
-        case 'SET_PREFERRED_TABS':
-            setPreferredTabs(message).then(() => handleListLLMTabs()).catch(error => {
-                console.error('[MLC Debate] Error saving preferred tabs:', error);
-            });
-            sendResponse({ status: 'preferred_tabs_saved', type: message.type });
-            break;
-        case 'GET_ACTIVE_SESSION':
-            handleGetActiveSession(message).catch(error => {
-                console.error('[MLC Debate] Error getting active session:', error);
-            });
-            sendResponse({ status: 'active_session_sent', type: message.type });
-            break;
-        default:
-            console.warn('[MLC Background] Unknown message type:', message.type);
-            sendResponse({ status: 'unknown_message_type' });
-            break;
-    }
-
+    sendResponse({
+        ok: false,
+        error: 'Message router unavailable.',
+        code: 'SERVICE_UNAVAILABLE'
+    });
     return false;
 });
 
