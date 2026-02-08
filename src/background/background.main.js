@@ -15,46 +15,6 @@ try {
     console.error('[MLC Debate] Failed to import debate prompt utils:', error);
 }
 
-try {
-    importScripts('src/shared/storage-keys.js', 'src/shared/providers.js');
-} catch (error) {
-    console.error('[MLC Shared] Failed to import shared constants:', error);
-}
-
-try {
-    importScripts('src/background/session-helpers.js');
-} catch (error) {
-    console.error('[MLC Background] Failed to import session helpers:', error);
-}
-
-try {
-    importScripts('src/background/history-chat-service.js');
-} catch (error) {
-    console.error('[MLC Background] Failed to import history chat service:', error);
-}
-
-const sessionHelpers = globalThis.mlcBackgroundSessionHelpers || {};
-const initProviderFlagMap = sessionHelpers.initProviderFlagMap;
-const listSessionProviders = sessionHelpers.listSessionProviders;
-const getSessionProviders = sessionHelpers.getSessionProviders;
-const sanitizeSessionPromptOverrides = sessionHelpers.sanitizeSessionPromptOverrides;
-const sanitizeUiRoute = sessionHelpers.sanitizeUiRoute;
-const buildRouteFromRun = sessionHelpers.buildRouteFromRun;
-const getRoundIndex = sessionHelpers.getRoundIndex;
-const getSessionParticipants = sessionHelpers.getSessionParticipants;
-const getTurnParticipant = sessionHelpers.getTurnParticipant;
-const getTurnLLM = sessionHelpers.getTurnLLM;
-const getProviderAttachmentMode = sessionHelpers.getProviderAttachmentMode;
-const getParallelProviders = sessionHelpers.getParallelProviders;
-const buildParallelPromptId = sessionHelpers.buildParallelPromptId;
-const formatProvidersForUi = sessionHelpers.formatProvidersForUi;
-const getChatDeliveryStateKey = sessionHelpers.getChatDeliveryStateKey;
-const createEmptyDeliveryState = sessionHelpers.createEmptyDeliveryState;
-const normalizeDeliveryProviderState = sessionHelpers.normalizeDeliveryProviderState;
-const normalizeChatDeliveryState = sessionHelpers.normalizeChatDeliveryState;
-const getProviderContextKey = sessionHelpers.getProviderContextKey;
-const getEffectiveDeliveredUpTo = sessionHelpers.getEffectiveDeliveredUpTo;
-
 // Extension installation
 chrome.runtime.onInstalled.addListener(() => {
     console.log('[MLC Background] Multi-LLM Coder extension installed/updated.');
@@ -186,6 +146,12 @@ function generatePromptId() {
 }
 
 // DEBATE SESSION STATE MANAGEMENT
+const ACTIVE_SESSION_KEY = 'mlc_active_session_v2';
+const SESSIONS_KEY = 'mlc_sessions_v1';
+const PREFERRED_TABS_KEY = 'mlc_preferred_tabs';
+const TAB_PROFILES_KEY = 'mlc_tab_profiles_v1';
+const CHATS_KEY = 'mlc_chats_v1';
+
 let tabProfilesOpChain = Promise.resolve();
 
 function withTabProfilesLock(operation) {
@@ -196,62 +162,323 @@ function withTabProfilesLock(operation) {
 }
 
 const HISTORY_PAGE_SIZE = 60;
-const deliveryStateCache = new Map();
-const createHistoryChatServiceFn = globalThis.createHistoryChatService;
-const historyChatService = typeof createHistoryChatServiceFn === 'function'
-    ? createHistoryChatServiceFn({
+
+function generateChatId() {
+    return 'chat_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+function toChatSummary(chat) {
+    if (!chat || typeof chat !== 'object') return null;
+    const chatId = chat.chatId || chat.threadId;
+    if (!chatId) return null;
+    return {
+        chatId,
+        title: chat.title || 'New chat',
+        createdAt: Number.isFinite(chat.createdAt) ? chat.createdAt : null,
+        updatedAt: Number.isFinite(chat.updatedAt) ? chat.updatedAt : null,
+        messageCount: Number.isFinite(chat.messageCount)
+            ? chat.messageCount
+            : (Array.isArray(chat.messages) ? chat.messages.length : 0),
+        lastPreview: typeof chat.lastPreview === 'string' ? chat.lastPreview : undefined
+    };
+}
+
+async function ensureHistoryStoreReady() {
+    if (!self.mlcHistoryStore) {
+        const err = new Error('History store is unavailable.');
+        err.code = 'HISTORY_STORE_UNAVAILABLE';
+        throw err;
+    }
+    await self.mlcHistoryStore.openDb();
+    return self.mlcHistoryStore;
+}
+
+async function getHistoryStatus() {
+    const store = await ensureHistoryStoreReady();
+    return store.getStatus();
+}
+
+async function requireHistoryUnlocked() {
+    const store = await ensureHistoryStoreReady();
+    return store;
+}
+
+let historyMigrationChecked = false;
+let historyMigrationPromise = null;
+
+async function ensureLegacyChatsMigrated(store) {
+    if (historyMigrationChecked) return;
+    if (historyMigrationPromise) return historyMigrationPromise;
+
+    historyMigrationPromise = (async () => {
+        try {
+            const status = await store.getStatus().catch(() => null);
+            if (status?.configured && status?.lockNewChatsByDefault && !status?.unlocked) {
+                // New threads would be protected and require unlock; wait until unlock before migration.
+                return;
+            }
+
+            const version = await store.getMeta('migrationVersion');
+            if (Number(version) >= 1) {
+                historyMigrationChecked = true;
+                return;
+            }
+
+            const stored = await chrome.storage.local.get(CHATS_KEY);
+            const raw = stored?.[CHATS_KEY];
+            const chats = raw && typeof raw === 'object' && Array.isArray(raw.chats) ? raw.chats : [];
+            const legacyActiveChatId = raw && typeof raw === 'object' && typeof raw.activeChatId === 'string'
+                ? raw.activeChatId
+                : null;
+
+            if (!chats.length) {
+                await store.setMeta('migrationVersion', 1);
+                historyMigrationChecked = true;
+                return;
+            }
+
+            let importedChats = 0;
+            let importedMessages = 0;
+
+            let lockedFailure = false;
+
+            for (const legacyChat of chats) {
+                const chatId = typeof legacyChat?.chatId === 'string' && legacyChat.chatId
+                    ? legacyChat.chatId
+                    : generateChatId();
+
+                const existing = await store.getThreadSummary(chatId);
+                if (existing) continue;
+
+                const createdAt = Number.isFinite(legacyChat?.createdAt) ? legacyChat.createdAt : Date.now();
+                const updatedAt = Number.isFinite(legacyChat?.updatedAt) ? legacyChat.updatedAt : createdAt;
+                const titleRaw = typeof legacyChat?.title === 'string' ? legacyChat.title : 'New chat';
+                const title = titleRaw.trim() ? titleRaw : 'New chat';
+                const titleIsDefault = title === 'New chat';
+
+                try {
+                    await store.createThread({
+                        threadId: chatId,
+                        title,
+                        createdAt,
+                        updatedAt,
+                        titleIsDefault
+                    });
+                    importedChats += 1;
+                } catch (error) {
+                    if (error?.code === 'HISTORY_LOCKED') {
+                        lockedFailure = true;
+                        break;
+                    }
+                    console.warn('[MLC History] Failed to create thread during migration:', error);
+                    continue;
+                }
+
+                const messages = Array.isArray(legacyChat?.messages) ? legacyChat.messages : [];
+                for (const legacyMessage of messages) {
+                    const content = String(legacyMessage?.content || '');
+                    if (!content.trim()) continue;
+                    const role = legacyMessage?.role || 'assistant';
+                    const timestamp = Number.isFinite(legacyMessage?.timestamp) ? legacyMessage.timestamp : Date.now();
+                    const contentHtml = typeof legacyMessage?.contentHtml === 'string' ? legacyMessage.contentHtml : undefined;
+                    try {
+                        await store.appendMessage(chatId, {
+                            role,
+                            content,
+                            contentHtml,
+                            timestamp,
+                            sessionId: legacyMessage?.sessionId || undefined,
+                            turnIndex: Number.isFinite(legacyMessage?.turnIndex) ? legacyMessage.turnIndex : undefined,
+                            roundIndex: Number.isFinite(legacyMessage?.roundIndex) ? legacyMessage.roundIndex : undefined
+                        });
+                        importedMessages += 1;
+                    } catch (error) {
+                        if (error?.code === 'HISTORY_LOCKED') {
+                            lockedFailure = true;
+                            break;
+                        }
+                        console.warn('[MLC History] Failed to migrate message:', error);
+                    }
+                }
+                if (lockedFailure) break;
+            }
+
+            if (lockedFailure) {
+                return;
+            }
+
+            const currentActive = await store.getActiveThreadId();
+            if (!currentActive && legacyActiveChatId) {
+                const migratedActive = await store.getThreadSummary(legacyActiveChatId);
+                if (migratedActive) {
+                    await store.setActiveThreadId(legacyActiveChatId);
+                }
+            }
+
+            await store.setMeta('migrationVersion', 1);
+            historyMigrationChecked = true;
+            await new Promise((resolve) => chrome.storage.local.remove(CHATS_KEY, resolve));
+            console.log('[MLC History] Migration complete.', { importedChats, importedMessages });
+        } catch (error) {
+            console.error('[MLC History] Migration failed:', error);
+        }
+    })().finally(() => {
+        historyMigrationPromise = null;
+    });
+
+    return historyMigrationPromise;
+}
+
+async function loadChatsState({ ensureActive = true } = {}) {
+    const store = await requireHistoryUnlocked();
+    await ensureLegacyChatsMigrated(store);
+    const { threads } = await store.listThreads({ limit: 250 });
+    let activeChatId = await store.getActiveThreadId();
+    const hasActive = activeChatId && threads.some(thread => thread.chatId === activeChatId);
+
+    if (!ensureActive) {
+        return { activeChatId: hasActive ? activeChatId : null, chats: threads };
+    }
+
+    if (!threads.length) {
+        const chatId = generateChatId();
+        await store.createThread({ threadId: chatId, title: 'New chat', titleIsDefault: true });
+        await store.setActiveThreadId(chatId);
+        const refreshed = await store.listThreads({ limit: 250 });
+        return { activeChatId: chatId, chats: refreshed.threads };
+    }
+
+    if (!hasActive) {
+        activeChatId = threads[0].chatId;
+        await store.setActiveThreadId(activeChatId);
+    }
+
+    return { activeChatId, chats: threads };
+}
+
+async function notifyChatsState(stateOverride = null) {
+    try {
+        const state = stateOverride || await loadChatsState();
+        sendMessageToPopup({
+            type: 'CHATS_STATE',
+            activeChatId: state.activeChatId,
+            chats: state.chats
+        });
+    } catch (error) {
+        const status = await getHistoryStatus().catch(() => ({ configured: false, unlocked: false }));
+        sendMessageToPopup({ type: 'HISTORY_STATUS', status, error: error?.message });
+    }
+}
+
+async function createChat({ makeActive = true } = {}) {
+    const store = await requireHistoryUnlocked();
+    const chatId = generateChatId();
+    await store.createThread({ threadId: chatId, title: 'New chat', titleIsDefault: true });
+    if (makeActive) {
+        await store.setActiveThreadId(chatId);
+    }
+    const chat = await store.getThreadSummary(chatId);
+    const state = await loadChatsState({ ensureActive: false });
+    await notifyChatsState(state);
+    return {
+        ok: true,
+        chat: { ...chat, messages: [] },
+        state: { ...state, activeChatId: makeActive ? chatId : state.activeChatId }
+    };
+}
+
+async function setActiveChat(chatId) {
+    const store = await requireHistoryUnlocked();
+    const chat = await store.getThreadSummary(chatId);
+    if (!chat) {
+        return { ok: false, error: 'Chat not found.', code: 'CHAT_NOT_FOUND' };
+    }
+    await store.setActiveThreadId(chatId);
+    const state = await loadChatsState({ ensureActive: false });
+    await notifyChatsState(state);
+    return { ok: true, chat: { ...chat, messages: [] }, state };
+}
+
+async function renameChat(chatId, title) {
+    const store = await requireHistoryUnlocked();
+    try {
+        const updated = await store.renameThread(chatId, title);
+        await notifyChatsState();
+        return { ok: true, chat: updated };
+    } catch (error) {
+        return { ok: false, error: error.message, code: error.code || 'RENAME_FAILED' };
+    }
+}
+
+async function deleteChat(chatId) {
+    const store = await requireHistoryUnlocked();
+    const chat = await store.getThreadSummary(chatId);
+    if (!chat) return { ok: false, error: 'Chat not found.', code: 'CHAT_NOT_FOUND' };
+
+    await store.deleteThread(chatId);
+    try {
+        await store.deleteMeta(getChatDeliveryStateKey(chatId));
+    } catch (error) {
+        // ignore
+    }
+    deliveryStateCache.delete(chatId);
+    const activeChatId = await store.getActiveThreadId();
+    if (activeChatId === chatId) {
+        const { threads } = await store.listThreads({ limit: 1 });
+        await store.setActiveThreadId(threads[0]?.chatId || null);
+    }
+    const state = await loadChatsState({ ensureActive: true });
+    await notifyChatsState(state);
+    return { ok: true, state };
+}
+
+async function appendChatMessage(chatId, message) {
+    if (!chatId || !message) return { ok: false, error: 'Missing chatId or message.' };
+    try {
+        const store = await requireHistoryUnlocked();
+        const provider = isSupportedProviderKey(message.role) ? message.role : null;
+        const saved = await store.appendMessage(chatId, { ...message, provider });
+        await notifyChatsState();
+        return { ok: true, message: saved };
+    } catch (error) {
+        console.warn('[MLC Chats] Failed to persist message:', error);
+        return { ok: false, error: error.message, code: error.code || 'APPEND_MESSAGE_FAILED' };
+    }
+}
+
+const createSessionRegistryFn = globalThis.createSessionRegistry;
+const sessionRegistry = typeof createSessionRegistryFn === 'function'
+    ? createSessionRegistryFn({
         chrome,
-        sendMessageToPopup,
-        CHATS_KEY,
-        HISTORY_PAGE_SIZE,
-        clearDeliveryStateForChat: (chatId) => {
-            deliveryStateCache.delete(chatId);
-        },
-        clearAllDeliveryState: () => {
-            deliveryStateCache.clear();
-        },
-        getChatDeliveryStateKey,
-        isSupportedProviderKey
+        SESSIONS_KEY,
+        ACTIVE_SESSION_KEY,
+        getHistoryStatus,
+        ensureHistoryStoreReady,
+        buildConversationContext,
+        listSessionProviders,
+        formatLLMLabel,
+        getSupportedProviderKeys,
+        normalizeProviderKey,
+        isSupportedProviderKey,
+        warn: (...args) => console.warn(...args),
+        error: (...args) => console.error(...args)
     })
     : null;
 
-if (!historyChatService) {
-    console.error('[MLC History] History chat service unavailable.');
+if (!sessionRegistry) {
+    console.error('[MLC Session] Session registry unavailable.');
 }
 
-const ensureHistoryStoreReady = historyChatService?.ensureHistoryStoreReady
-    || (async () => { throw new Error('History chat service unavailable.'); });
-const getHistoryStatus = historyChatService?.getHistoryStatus
-    || (async () => ({ configured: false, unlocked: false }));
-const requireHistoryUnlocked = historyChatService?.requireHistoryUnlocked
-    || (async () => { throw new Error('History chat service unavailable.'); });
-const loadChatsState = historyChatService?.loadChatsState
-    || (async () => ({ activeChatId: null, chats: [] }));
-const notifyChatsState = historyChatService?.notifyChatsState
-    || (async () => {});
-const createChat = historyChatService?.createChat
-    || (async () => ({ ok: false, error: 'History chat service unavailable.' }));
-const setActiveChat = historyChatService?.setActiveChat
-    || (async () => ({ ok: false, error: 'History chat service unavailable.' }));
-const renameChat = historyChatService?.renameChat
-    || (async () => ({ ok: false, error: 'History chat service unavailable.' }));
-const deleteChat = historyChatService?.deleteChat
-    || (async () => ({ ok: false, error: 'History chat service unavailable.' }));
-const appendChatMessage = historyChatService?.appendChatMessage
-    || (async () => ({ ok: false, error: 'History chat service unavailable.' }));
-const handleHistoryAndChatMessage = historyChatService?.handleHistoryAndChatMessage
-    || (() => false);
-
-const defaultDebateState = {
+const createDefaultSessionState = sessionRegistry?.createDefaultSessionState || (() => ({
     isActive: false,
-	isPaused: false,
-	pausedReason: null,
-	pausedProvider: null,
+    isPaused: false,
+    pausedReason: null,
+    pausedProvider: null,
     pausedAgentId: null,
     pausedProfileId: null,
-	pausedAt: 0,
-	autoResume: null,
-	mode: 'debate',
+    pausedAt: 0,
+    autoResume: null,
+    mode: 'debate',
     route: null,
     chatId: null,
     sessionId: null,
@@ -277,294 +504,13 @@ const defaultDebateState = {
     lastPromptTimestamp: 0,
     startedAt: 0,
     endedAt: 0
-};
-
-let sessionsById = new Map();
-let sessionsByChatId = new Map();
-let sessionsLoaded = false;
-let sessionsLoadPromise = null;
-const responseChainsBySessionId = new Map();
-
-function normalizeSessionState(session) {
-    if (!session || typeof session !== 'object') return null;
-    const sessionId = typeof session.sessionId === 'string' ? session.sessionId : null;
-    if (!sessionId) return null;
-    const normalized = { ...defaultDebateState, ...session, sessionId };
-    normalized.isActive = Boolean(normalized.isActive);
-    normalized.isPaused = Boolean(normalized.isPaused);
-    normalized.pausedAgentId = typeof normalized.pausedAgentId === 'string' ? normalized.pausedAgentId : null;
-    normalized.pausedProfileId = typeof normalized.pausedProfileId === 'string' ? normalized.pausedProfileId : null;
-    normalized.messages = Array.isArray(normalized.messages) ? normalized.messages : [];
-    normalized.profileIds = normalized.profileIds && typeof normalized.profileIds === 'object' ? normalized.profileIds : {};
-    normalized.tabIds = normalized.tabIds && typeof normalized.tabIds === 'object' ? normalized.tabIds : {};
-    normalized.participants = Array.isArray(normalized.participants) ? normalized.participants : [];
-    normalized.agentProfileIds = normalized.agentProfileIds && typeof normalized.agentProfileIds === 'object' ? normalized.agentProfileIds : {};
-    normalized.agentTabIds = normalized.agentTabIds && typeof normalized.agentTabIds === 'object' ? normalized.agentTabIds : {};
-    if (!['debate', 'single', 'direct', 'parallel'].includes(normalized.mode)) {
-        normalized.mode = 'debate';
-    }
-    const providers = getSupportedProviderKeys();
-    for (const provider of providers) {
-        if (!Object.prototype.hasOwnProperty.call(normalized.profileIds, provider)) {
-            normalized.profileIds[provider] = null;
-        }
-        if (!Object.prototype.hasOwnProperty.call(normalized.tabIds, provider)) {
-            normalized.tabIds[provider] = null;
-        }
-    }
-    if (!Object.prototype.hasOwnProperty.call(normalized.profileIds, 'chatgpt')) {
-        normalized.profileIds.chatgpt = null;
-    }
-    if (!Object.prototype.hasOwnProperty.call(normalized.profileIds, 'gemini')) {
-        normalized.profileIds.gemini = null;
-    }
-    if (!Object.prototype.hasOwnProperty.call(normalized.tabIds, 'chatgpt')) {
-        normalized.tabIds.chatgpt = null;
-    }
-    if (!Object.prototype.hasOwnProperty.call(normalized.tabIds, 'gemini')) {
-        normalized.tabIds.gemini = null;
-    }
-
-    // Backward compatibility: derive participants if missing.
-    if (!Array.isArray(normalized.participants) || normalized.participants.length === 0) {
-        const routeAgents = Array.isArray(normalized.route?.agents) ? normalized.route.agents : null;
-        if (routeAgents && routeAgents.length > 0) {
-            normalized.participants = routeAgents.map((agent, idx) => {
-                const provider = normalizeProviderKey(agent?.provider || '');
-                if (!provider || !isSupportedProviderKey(provider)) return null;
-                const agentId = typeof agent?.id === 'string' && agent.id.trim()
-                    ? agent.id.trim()
-                    : `agent_${provider}_${idx + 1}`;
-                const rawProfileSelection = typeof agent?.profileId === 'string' ? agent.profileId.trim() : '';
-                const profileId = normalized.agentProfileIds?.[agentId]
-                    || (rawProfileSelection && rawProfileSelection !== 'default' ? rawProfileSelection : (normalized.profileIds?.[provider] || null));
-                const tabId = Number.isFinite(normalized.agentTabIds?.[agentId])
-                    ? normalized.agentTabIds[agentId]
-                    : (Number.isFinite(agent?.tabId)
-                        ? agent.tabId
-                        : (normalized.tabIds?.[provider] || null));
-                const label = typeof agent?.label === 'string' ? agent.label : '';
-                return { agentId, provider, profileId, tabId, label };
-            }).filter(Boolean);
-        } else {
-            const providers = Array.isArray(normalized.route?.providers) && normalized.route.providers.length > 0
-                ? normalized.route.providers.map(normalizeProviderKey).filter((p) => p && isSupportedProviderKey(p))
-                : listSessionProviders(normalized);
-            normalized.participants = providers.map((provider, idx) => ({
-                agentId: provider,
-                provider,
-                profileId: normalized.profileIds?.[provider] || null,
-                tabId: normalized.tabIds?.[provider] || null,
-                label: formatLLMLabel(provider)
-            })).filter(Boolean);
-        }
-    }
-
-    // Ensure agent maps contain entries for participants.
-    if (Array.isArray(normalized.participants)) {
-        normalized.participants = normalized.participants.map((participant, idx) => {
-            if (!participant || typeof participant !== 'object') return null;
-            const provider = normalizeProviderKey(participant.provider);
-            if (!provider || !isSupportedProviderKey(provider)) return null;
-            const agentId = typeof participant.agentId === 'string' && participant.agentId.trim()
-                ? participant.agentId.trim()
-                : `agent_${provider}_${idx + 1}`;
-            const profileId = typeof participant.profileId === 'string' ? participant.profileId : null;
-            const tabId = Number.isFinite(participant.tabId) ? participant.tabId : null;
-            const label = typeof participant.label === 'string' ? participant.label : '';
-            normalized.agentProfileIds[agentId] = normalized.agentProfileIds[agentId] || profileId;
-            if (tabId) normalized.agentTabIds[agentId] = normalized.agentTabIds[agentId] || tabId;
-            return { agentId, provider, profileId, tabId, label };
-        }).filter(Boolean);
-    }
-    return normalized;
-}
-
-function redactSessionForStorage(session) {
-    if (!session || typeof session !== 'object') return session;
-    return {
-        ...session,
-        userQuery: '',
-        conversationContext: '',
-        messages: []
-    };
-}
-
-function mapHistoryMessageToSessionMessage(message) {
-    if (!message || typeof message !== 'object') return null;
-    const content = typeof message.content === 'string' ? message.content : '';
-    const trimmed = content.trim();
-    if (!trimmed) return null;
-    const out = {
-        role: message.role,
-        content: content,
-        timestamp: Number.isFinite(message.timestamp) ? message.timestamp : Date.now()
-    };
-    if (typeof message.contentHtml === 'string' && message.contentHtml.trim()) {
-        out.contentHtml = message.contentHtml;
-    }
-    if (typeof message.agentId === 'string' && message.agentId.trim()) {
-        out.agentId = message.agentId.trim();
-    }
-    if (typeof message.agentLabel === 'string' && message.agentLabel.trim()) {
-        out.agentLabel = message.agentLabel.trim();
-    }
-    if (Number.isFinite(message.turnIndex)) out.turnIndex = message.turnIndex;
-    if (Number.isFinite(message.roundIndex)) out.roundIndex = message.roundIndex;
-    return out;
-}
-
-async function persistSessionsState() {
-    let historyStatus = null;
-    try {
-        historyStatus = await getHistoryStatus();
-    } catch {
-        historyStatus = null;
-    }
-    const shouldRedact = Boolean(historyStatus?.historyEnabled);
-
-    const payload = {};
-    for (const [sessionId, session] of sessionsById.entries()) {
-        const canRedactSession = shouldRedact
-            && session?.chatId
-            && Number.isFinite(session?.userMessageSequence)
-            && session.userMessageSequence > 0;
-        payload[sessionId] = canRedactSession ? redactSessionForStorage(session) : session;
-    }
-    await chrome.storage.local.set({ [SESSIONS_KEY]: payload });
-}
-
-async function loadSessionsState() {
-    if (sessionsLoaded) return sessionsById;
-    if (sessionsLoadPromise) return sessionsLoadPromise;
-    sessionsLoadPromise = (async () => {
-        const stored = await chrome.storage.local.get([SESSIONS_KEY, ACTIVE_SESSION_KEY]);
-        const rawSessions = stored?.[SESSIONS_KEY];
-        sessionsById = new Map();
-        sessionsByChatId = new Map();
-
-        const ingest = (raw) => {
-            const normalized = normalizeSessionState(raw);
-            if (!normalized || (!normalized.isActive && !normalized.isPaused)) return;
-            sessionsById.set(normalized.sessionId, normalized);
-            if (normalized.chatId) {
-                sessionsByChatId.set(normalized.chatId, normalized.sessionId);
-            }
-        };
-
-        if (rawSessions && typeof rawSessions === 'object') {
-            for (const session of Object.values(rawSessions)) {
-                ingest(session);
-            }
-        }
-
-        const legacy = stored?.[ACTIVE_SESSION_KEY];
-        if (legacy && (!rawSessions || Object.keys(rawSessions).length === 0)) {
-            ingest(legacy);
-        }
-
-        sessionsLoaded = true;
-        sessionsLoadPromise = null;
-
-        try {
-            const store = await ensureHistoryStoreReady();
-            const historyStatus = await store.getStatus();
-            if (historyStatus?.historyEnabled) {
-                for (const session of sessionsById.values()) {
-                    if (!session || !session.chatId || !session.sessionId) continue;
-                    const needsHydrate = !Array.isArray(session.messages) || session.messages.length === 0 || !String(session.userQuery || '').trim();
-                    if (!needsHydrate) continue;
-                    try {
-                        const page = await store.listMessages(session.chatId, { limit: 240 });
-                        const messages = Array.isArray(page?.messages) ? page.messages : [];
-                        const sessionMessages = messages.filter((msg) => msg?.sessionId === session.sessionId);
-                        if (sessionMessages.length > 0) {
-                            const mapped = sessionMessages.map(mapHistoryMessageToSessionMessage).filter(Boolean);
-                            if (mapped.length > 0) {
-                                session.messages = mapped;
-                            }
-                            const userMsg = sessionMessages.find((msg) => msg?.role === 'user' && typeof msg?.content === 'string' && msg.content.trim());
-                            if (userMsg) {
-                                session.userQuery = userMsg.content;
-                                if (!Number.isFinite(session.userMessageSequence) && Number.isFinite(userMsg.sequence)) {
-                                    session.userMessageSequence = userMsg.sequence;
-                                }
-                            }
-                        }
-                        if (session.isFollowUp && Number.isFinite(session.userMessageSequence)) {
-                            try {
-                                const prior = await store.listMessages(session.chatId, { limit: 12, beforeSequence: session.userMessageSequence });
-                                session.conversationContext = buildConversationContext(prior?.messages, { maxChars: 4000, maxMessages: 10 });
-                            } catch {
-                                // ignore
-                            }
-                        }
-                    } catch (error) {
-                        // ignore hydration failures (locked chat, DB errors, etc.)
-                    }
-                }
-            }
-        } catch {
-            // ignore history hydration failures
-        }
-
-        if (legacy) {
-            await chrome.storage.local.remove(ACTIVE_SESSION_KEY);
-            await persistSessionsState();
-        }
-
-        return sessionsById;
-    })();
-    return sessionsLoadPromise;
-}
-
-async function getSessionById(sessionId) {
-    if (!sessionId) return null;
-    await loadSessionsState();
-    return sessionsById.get(sessionId) || null;
-}
-
-async function getSessionForChat(chatId) {
-    if (!chatId) return null;
-    await loadSessionsState();
-    const sessionId = sessionsByChatId.get(chatId);
-    if (!sessionId) return null;
-    return sessionsById.get(sessionId) || null;
-}
-
-function pickMostRecentSession() {
-    let best = null;
-    for (const session of sessionsById.values()) {
-        if (!session.isActive && !session.isPaused) continue;
-        if (!best || (session.startedAt || 0) > (best.startedAt || 0)) {
-            best = session;
-        }
-    }
-    return best;
-}
-
-async function saveSession(session) {
-    if (!session?.sessionId) return null;
-    await loadSessionsState();
-    sessionsById.set(session.sessionId, session);
-    if (session.chatId) {
-        sessionsByChatId.set(session.chatId, session.sessionId);
-    }
-    await persistSessionsState();
-    return session;
-}
-
-async function removeSession(sessionId) {
-    if (!sessionId) return;
-    await loadSessionsState();
-    const existing = sessionsById.get(sessionId);
-    if (existing?.chatId && sessionsByChatId.get(existing.chatId) === sessionId) {
-        sessionsByChatId.delete(existing.chatId);
-    }
-    sessionsById.delete(sessionId);
-    responseChainsBySessionId.delete(sessionId);
-    await persistSessionsState();
-}
+}));
+const loadSessionsState = sessionRegistry?.loadSessionsState || (async () => new Map());
+const getSessionById = sessionRegistry?.getSessionById || (async () => null);
+const getSessionForChat = sessionRegistry?.getSessionForChat || (async () => null);
+const saveSession = sessionRegistry?.saveSession || (async (session) => session);
+const removeSession = sessionRegistry?.removeSession || (async () => {});
+const pickMostRecentSession = sessionRegistry?.pickMostRecentSession || (() => null);
 
 // Tracks whether any Chrome window is currently focused (i.e., Chrome is the active app).
 // Used to avoid stealing OS focus when auto-focusing provider tabs while the user is in another app.
@@ -603,13 +549,15 @@ let autoFocusState = { ...AUTO_FOCUS_DEFAULT_STATE };
 function enqueueDebateResponse(message, label) {
     const sessionId = message?.sessionId;
     if (!sessionId) return;
-    const chain = responseChainsBySessionId.get(sessionId) || Promise.resolve();
-    const next = chain
-        .then(() => handleDebateResponse(message))
-        .catch((error) => {
+    if (!sessionRegistry?.enqueueResponse) {
+        handleDebateResponse(message).catch((error) => {
             console.error(`[MLC Debate] Error handling ${label || 'response'}:`, error);
         });
-    responseChainsBySessionId.set(sessionId, next);
+        return;
+    }
+    sessionRegistry.enqueueResponse(sessionId, () => handleDebateResponse(message)).catch((error) => {
+        console.error(`[MLC Debate] Error handling ${label || 'response'}:`, error);
+    });
 }
 
 // Attachment payloads are intentionally kept out of chrome.storage.local (quota + privacy).
@@ -617,6 +565,62 @@ function enqueueDebateResponse(message, label) {
 // sentTo: attachments have been accounted for that provider (uploaded+sent, or intentionally skipped).
 // preparedTo: attachments have been pre-attached to the provider UI but not necessarily sent yet.
 const sessionAttachmentsById = new Map(); // sessionId -> { sessionId, attachments, sentTo, preparedTo }
+
+function normalizeProviderKey(provider) {
+    return String(provider || '').trim().toLowerCase();
+}
+
+function getSupportedProviderKeys() {
+    const capabilities = PROVIDER_CAPABILITIES && typeof PROVIDER_CAPABILITIES === 'object'
+        ? Object.keys(PROVIDER_CAPABILITIES)
+        : [];
+    const normalized = capabilities.map(normalizeProviderKey).filter(Boolean);
+    return [...new Set(normalized)];
+}
+
+function isSupportedProviderKey(provider) {
+    const key = normalizeProviderKey(provider);
+    if (!key) return false;
+    return getSupportedProviderKeys().includes(key);
+}
+
+function initProviderFlagMap(providers, initialValue) {
+    const map = {};
+    if (!Array.isArray(providers)) return map;
+    for (const provider of providers) {
+        const key = normalizeProviderKey(provider);
+        if (!key || Object.prototype.hasOwnProperty.call(map, key)) continue;
+        map[key] = Boolean(initialValue);
+    }
+    return map;
+}
+
+function listSessionProviders(session, fallbackProvider) {
+    const ordered = [];
+    const push = (provider) => {
+        const key = normalizeProviderKey(provider);
+        if (!key || !isSupportedProviderKey(key)) return;
+        if (!ordered.includes(key)) ordered.push(key);
+    };
+    push(session?.firstLLM);
+    push(session?.secondLLM);
+    push(fallbackProvider);
+    return ordered;
+}
+
+function getSessionProviders(session, fallbackProvider) {
+    const ordered = [];
+    const push = (provider) => {
+        const key = normalizeProviderKey(provider);
+        if (!key || !isSupportedProviderKey(key)) return;
+        if (!ordered.includes(key)) ordered.push(key);
+    };
+
+    const routeProviders = Array.isArray(session?.route?.providers) ? session.route.providers : [];
+    routeProviders.forEach(push);
+    listSessionProviders(session, fallbackProvider).forEach(push);
+    return ordered;
+}
 
 function stripDataUrlPrefix(value) {
     const raw = typeof value === 'string' ? value.trim() : '';
@@ -796,6 +800,13 @@ async function setPreferredTabs(payload = {}) {
     return next;
 }
 
+function normalizeProvider(provider) {
+    const key = normalizeProviderKey(provider);
+    if (key && isSupportedProviderKey(key)) return key;
+    // Preserve legacy behavior: unknown providers map to ChatGPT.
+    return 'chatgpt';
+}
+
 function getTabUrlCandidate(tab) {
     if (!tab) return '';
     if (typeof tab.url === 'string' && tab.url) return tab.url;
@@ -875,6 +886,24 @@ function sanitizeProfilesState(state) {
     });
     const nextState = changed ? { ...state, profiles: nextProfiles } : state;
     return { state: nextState, changed };
+}
+
+function getExpectedHosts(provider) {
+    const normalized = normalizeProvider(provider);
+    const hosts = PROVIDER_METADATA?.[normalized]?.expectedHosts;
+    if (Array.isArray(hosts) && hosts.length > 0) return hosts;
+    return PROVIDER_METADATA.chatgpt.expectedHosts;
+}
+
+function isExpectedHost(provider, url) {
+    if (!url) return false;
+    try {
+        const { hostname } = new URL(url);
+        const expected = getExpectedHosts(provider);
+        return expected.some(host => hostname === host || hostname.endsWith(`.${host}`));
+    } catch (error) {
+        return false;
+    }
 }
 
 async function loadTabProfiles() {
@@ -1452,7 +1481,7 @@ async function runParallelAutoFocusCycle() {
 
 async function openProviderTab(provider, options = {}) {
     const normalizedProvider = normalizeProvider(provider);
-    const url = getProviderOpenUrl(normalizedProvider);
+    const url = PROVIDER_METADATA?.[normalizedProvider]?.openUrl || PROVIDER_METADATA.chatgpt.openUrl;
     const focus = options.focus !== false;
     const tab = await chrome.tabs.create({
         url,
@@ -1619,10 +1648,6 @@ async function releaseProfilesForSession(sessionId) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[MLC Background] Received message:', message);
 
-    if (handleHistoryAndChatMessage(message, sendResponse)) {
-        return true;
-    }
-
     switch (message.type) {
         case 'GET_PROVIDER_CAPABILITIES':
             sendResponse({ ok: true, capabilities: PROVIDER_CAPABILITIES });
@@ -1783,6 +1808,240 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
             sendResponse({ status: 'active_session_sent', type: message.type });
             break;
+        case 'HISTORY_STATUS':
+            getHistoryStatus().then((status) => {
+                sendResponse({ ok: true, status });
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_STATUS_FAILED' });
+            });
+            return true;
+        case 'HISTORY_CONFIGURE':
+            ensureHistoryStoreReady().then((store) => store.configureEncryption(message.passphrase, { mode: message.protectionMode })).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_CONFIGURE_FAILED' });
+            });
+            return true;
+        case 'HISTORY_SET_ENABLED':
+            ensureHistoryStoreReady().then((store) => store.setHistoryEnabled(Boolean(message.enabled))).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_SET_ENABLED_FAILED' });
+            });
+            return true;
+        case 'HISTORY_SET_PROTECTION_MODE':
+            ensureHistoryStoreReady().then((store) => store.setProtectionMode(message.protectionMode)).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_SET_PROTECTION_MODE_FAILED' });
+            });
+            return true;
+        case 'HISTORY_SET_LOCK_NEW_CHATS':
+            ensureHistoryStoreReady().then((store) => store.setLockNewChatsByDefault(Boolean(message.enabled))).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_SET_LOCK_NEW_CHATS_FAILED' });
+            });
+            return true;
+        case 'HISTORY_UNLOCK':
+            ensureHistoryStoreReady().then((store) => store.unlock(message.passphrase)).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_UNLOCK_FAILED' });
+            });
+            return true;
+        case 'HISTORY_LOCK':
+            ensureHistoryStoreReady().then((store) => store.lock()).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_LOCK_FAILED' });
+            });
+            return true;
+        case 'HISTORY_RESET_PROTECTION':
+            ensureHistoryStoreReady()
+                .then((store) => store.resetProtection())
+                .then((status) => {
+                    deliveryStateCache.clear();
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_RESET_PROTECTION_FAILED' });
+                });
+            return true;
+        case 'HISTORY_DISABLE_PROTECTION':
+            ensureHistoryStoreReady()
+                .then((store) => store.disableProtection(message.passphrase))
+                .then((status) => {
+                    deliveryStateCache.clear();
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_DISABLE_PROTECTION_FAILED' });
+                });
+            return true;
+        case 'PROTECT_CHAT':
+            ensureHistoryStoreReady()
+                .then((store) => store.protectThread(message.chatId))
+                .then((chat) => {
+                    sendResponse({ ok: true, chat });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'PROTECT_CHAT_FAILED' });
+                });
+            return true;
+        case 'UNPROTECT_CHAT':
+            ensureHistoryStoreReady()
+                .then((store) => store.unprotectThread(message.chatId))
+                .then((chat) => {
+                    sendResponse({ ok: true, chat });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'UNPROTECT_CHAT_FAILED' });
+                });
+            return true;
+        case 'HISTORY_CLEAR_ALL':
+            ensureHistoryStoreReady()
+                .then((store) => store.resetAllData())
+                .then(() => new Promise((resolve) => chrome.storage.local.remove(CHATS_KEY, resolve)))
+                .then(() => {
+                    historyMigrationChecked = false;
+                    historyMigrationPromise = null;
+                    deliveryStateCache.clear();
+                })
+                .then(() => getHistoryStatus())
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_CLEAR_ALL_FAILED' });
+                });
+            return true;
+        case 'HISTORY_RESET':
+            ensureHistoryStoreReady()
+                .then((store) => store.resetAllData())
+                .then(() => new Promise((resolve) => chrome.storage.local.remove(CHATS_KEY, resolve)))
+                .then(() => {
+                    historyMigrationChecked = false;
+                    historyMigrationPromise = null;
+                    deliveryStateCache.clear();
+                })
+                .then(() => getHistoryStatus())
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_RESET_FAILED' });
+                });
+            return true;
+        case 'GET_CHATS_STATE':
+            loadChatsState().then((state) => {
+                sendResponse({
+                    ok: true,
+                    activeChatId: state.activeChatId,
+                    chats: state.chats
+                });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error loading chats:', error);
+                getHistoryStatus().then((status) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'GET_CHATS_FAILED', status });
+                }).catch(() => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'GET_CHATS_FAILED' });
+                });
+            });
+            return true;
+        case 'GET_CHAT':
+            requireHistoryUnlocked().then((store) => {
+                const chatId = message.chatId;
+                return store.getThreadWithMessages(chatId, { limit: HISTORY_PAGE_SIZE });
+            }).then(({ thread, page }) => {
+                sendResponse({
+                    ok: true,
+                    chat: {
+                        chatId: thread.chatId,
+                        title: thread.title,
+                        createdAt: thread.createdAt,
+                        updatedAt: thread.updatedAt,
+                        messageCount: thread.messageCount,
+                        lastPreview: thread.lastPreview,
+                        messages: page.messages,
+                        nextCursorSequence: page.nextCursorSequence,
+                        hasMore: page.hasMore
+                    }
+                });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error loading chat:', error);
+                getHistoryStatus().then((status) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'GET_CHAT_FAILED', status });
+                }).catch(() => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'GET_CHAT_FAILED' });
+                });
+            });
+            return true;
+        case 'GET_MESSAGES_PAGE':
+            requireHistoryUnlocked().then((store) => {
+                const chatId = message.chatId;
+                const limit = Number.isFinite(message.limit) ? message.limit : HISTORY_PAGE_SIZE;
+                const beforeSequence = Number.isFinite(message.beforeSequence) ? message.beforeSequence : null;
+                return store.listMessages(chatId, { limit, beforeSequence });
+            }).then((page) => {
+                sendResponse({ ok: true, ...page });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error listing messages:', error);
+                sendResponse({ ok: false, error: error.message, code: error.code || 'GET_MESSAGES_FAILED' });
+            });
+            return true;
+        case 'CREATE_CHAT':
+            createChat({ makeActive: true }).then((result) => {
+                sendResponse({ ok: true, chat: result.chat, activeChatId: result.state.activeChatId });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error creating chat:', error);
+                getHistoryStatus().then((status) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'CREATE_CHAT_FAILED', status });
+                }).catch(() => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'CREATE_CHAT_FAILED' });
+                });
+            });
+            return true;
+        case 'SET_ACTIVE_CHAT':
+            setActiveChat(message.chatId).then((result) => {
+                if (!result.ok) {
+                    sendResponse(result);
+                    return;
+                }
+                sendResponse({ ok: true, chat: result.chat, activeChatId: result.state.activeChatId });
+            }).catch((error) => {
+                console.error('[MLC Chats] Error selecting chat:', error);
+                getHistoryStatus().then((status) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'SET_ACTIVE_CHAT_FAILED', status });
+                }).catch(() => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'SET_ACTIVE_CHAT_FAILED' });
+                });
+            });
+            return true;
+        case 'RENAME_CHAT':
+            renameChat(message.chatId, message.title).then(sendResponse).catch((error) => {
+                console.error('[MLC Chats] Error renaming chat:', error);
+                sendResponse({ ok: false, error: error.message, code: error.code || 'RENAME_CHAT_FAILED' });
+            });
+            return true;
+        case 'DELETE_CHAT':
+            deleteChat(message.chatId).then(sendResponse).catch((error) => {
+                console.error('[MLC Chats] Error deleting chat:', error);
+                sendResponse({ ok: false, error: error.message, code: error.code || 'DELETE_CHAT_FAILED' });
+            });
+            return true;
         case 'START_DEBATE_SESSION':
             handleStartDebateSession(message).catch(error => {
                 console.error('[MLC Debate] Error starting session:', error);
@@ -1865,6 +2124,98 @@ async function handleGetActiveSession(message = {}) {
         session = pickMostRecentSession();
     }
     sendMessageToPopup({ type: 'ACTIVE_SESSION', session: session || null });
+}
+
+function sanitizeSessionPromptOverrides(input) {
+    if (!input || typeof input !== 'object') return null;
+    const allowedKeys = new Set([
+        'header',
+        'first_turn_instruction',
+        'intermediary_message',
+        'final_message',
+        'followup_user_msg_wrapper'
+    ]);
+    const output = {};
+    for (const modeKey of ['debate', 'single']) {
+        const section = input[modeKey];
+        if (!section || typeof section !== 'object') continue;
+        const sanitized = {};
+        for (const [key, value] of Object.entries(section)) {
+            if (!allowedKeys.has(key)) continue;
+            if (typeof value !== 'string') continue;
+            sanitized[key] = value;
+        }
+        if (Object.keys(sanitized).length > 0) {
+            output[modeKey] = sanitized;
+        }
+    }
+    return Object.keys(output).length > 0 ? output : null;
+}
+
+function sanitizeUiRoute(input) {
+    if (!input || typeof input !== 'object') return null;
+    const kind = typeof input.kind === 'string' ? input.kind.toLowerCase() : '';
+    const rounds = Math.min(12, Math.max(1, parseInt(input.rounds, 10) || 1));
+
+    const agents = [];
+    const rawAgents = Array.isArray(input.agents) ? input.agents : null;
+
+    const generateRouteAgentId = () => `agent_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const normalizeProfileSelection = (value) => {
+        if (value === null || value === undefined) return null;
+        const text = String(value).trim();
+        if (!text) return null;
+        return text;
+    };
+
+    if (rawAgents) {
+        for (const item of rawAgents) {
+            if (!item || typeof item !== 'object') continue;
+            const provider = normalizeProviderKey(item.provider || item.llm);
+            if (!provider || !isSupportedProviderKey(provider)) continue;
+            const id = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : generateRouteAgentId();
+            const profileId = normalizeProfileSelection(item.profileId ?? item.profile ?? item.profile_id);
+            agents.push({ id, provider, profileId });
+        }
+    } else {
+        const rawProviders = Array.isArray(input.providers) ? input.providers : [];
+        rawProviders.forEach((item, index) => {
+            const provider = normalizeProviderKey(item);
+            if (!provider || !isSupportedProviderKey(provider)) return;
+            agents.push({
+                id: `agent_${provider}_${index}_${Math.random().toString(36).slice(2)}`,
+                provider,
+                profileId: 'default'
+            });
+        });
+    }
+
+    if (agents.length === 0) return null;
+
+    if (kind === 'debate') {
+        if (agents.length < 2) return null;
+        return { kind: 'debate', agents, providers: agents.map((agent) => agent.provider), rounds };
+    }
+
+    if (kind === 'parallel') {
+        if (agents.length < 2) return null;
+        return { kind: 'parallel', agents, providers: agents.map((agent) => agent.provider), rounds: 1 };
+    }
+
+    return { kind: 'single', agents: [agents[0]], providers: [agents[0].provider], rounds: 1 };
+}
+
+function buildRouteFromRun(mode, { firstLLM, secondLLM, directTarget, rounds }) {
+    if (mode === 'debate') {
+        const first = firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
+        const second = first === 'chatgpt' ? 'gemini' : 'chatgpt';
+        return { kind: 'debate', providers: [first, second], rounds };
+    }
+    if (mode === 'direct' && directTarget === 'both') {
+        return { kind: 'parallel', providers: ['chatgpt', 'gemini'], rounds: 1 };
+    }
+    const provider = firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
+    return { kind: 'single', providers: [provider], rounds: 1 };
 }
 
 async function handleStartDebateSession(message) {
@@ -2141,7 +2492,7 @@ async function handleStartDebateSession(message) {
                         : rounds * 2)));
         const sessionId = generateSessionId();
         const session = {
-            ...defaultDebateState,
+            ...createDefaultSessionState(),
             isActive: true,
             mode,
             route: route || null,
@@ -2252,7 +2603,176 @@ async function handleStopDebateSession(message) {
     }
 }
 
+function getRoundIndex(turnIndex, session = null) {
+    if (session?.mode === 'direct' || session?.mode === 'parallel') {
+        return 1;
+    }
+    if (session?.mode === 'single') {
+        return Math.max(1, turnIndex);
+    }
+    if (session?.mode === 'debate') {
+        const participants = getSessionParticipants(session);
+        const divisor = participants.length >= 2 ? participants.length : 2;
+        return Math.ceil(turnIndex / divisor);
+    }
+    return Math.ceil(turnIndex / 2);
+}
+
+function getSessionParticipants(session) {
+    if (Array.isArray(session?.participants) && session.participants.length > 0) {
+        return session.participants;
+    }
+    const routeAgents = Array.isArray(session?.route?.agents) ? session.route.agents : null;
+    if (routeAgents && routeAgents.length > 0) {
+        return routeAgents.map((agent, idx) => {
+            const provider = normalizeProviderKey(agent?.provider);
+            if (!provider || !isSupportedProviderKey(provider)) return null;
+            const agentId = typeof agent?.id === 'string' && agent.id.trim()
+                ? agent.id.trim()
+                : `agent_${provider}_${idx + 1}`;
+            const profileId = typeof session?.agentProfileIds?.[agentId] === 'string'
+                ? session.agentProfileIds[agentId]
+                : (session?.profileIds?.[provider] || null);
+            const tabId = Number.isFinite(session?.agentTabIds?.[agentId])
+                ? session.agentTabIds[agentId]
+                : (session?.tabIds?.[provider] || null);
+            const label = typeof agent?.label === 'string' ? agent.label : (formatLLMLabel(provider));
+            return { agentId, provider, profileId, tabId, label };
+        }).filter(Boolean);
+    }
+    const providers = Array.isArray(session?.route?.providers) && session.route.providers.length > 0
+        ? session.route.providers.map(normalizeProviderKey).filter((p) => p && isSupportedProviderKey(p))
+        : listSessionProviders(session);
+    return providers.map((provider) => ({
+        agentId: provider,
+        provider,
+        profileId: session?.profileIds?.[provider] || null,
+        tabId: session?.tabIds?.[provider] || null,
+        label: formatLLMLabel(provider)
+    })).filter(Boolean);
+}
+
+function getTurnParticipant(session, turnIndex) {
+    const participants = getSessionParticipants(session);
+    if (participants.length === 0) return null;
+
+    if (session?.mode === 'parallel') {
+        return participants[0] || null;
+    }
+    if (session?.mode === 'direct') {
+        if (participants.length >= 2) {
+            return turnIndex === 1 ? participants[0] : participants[1];
+        }
+        return participants[0] || null;
+    }
+    if (session?.mode === 'single') {
+        return participants[0] || null;
+    }
+    if (session?.mode === 'debate') {
+        const idx = Math.max(0, (turnIndex - 1) % participants.length);
+        return participants[idx] || null;
+    }
+    return participants[0] || null;
+}
+
+function getTurnLLM(session, turnIndex) {
+    if (session?.mode === 'parallel') {
+        return session.firstLLM || 'chatgpt';
+    }
+    if (session?.mode === 'direct') {
+        if (turnIndex === 1) return session.firstLLM || 'chatgpt';
+        return session.secondLLM || session.firstLLM || 'chatgpt';
+    }
+    if (session?.mode === 'single') {
+        return session.firstLLM || 'chatgpt';
+    }
+    if (session?.mode === 'debate') {
+        const participant = getTurnParticipant(session, turnIndex);
+        if (participant?.provider) return participant.provider;
+    }
+    return turnIndex % 2 === 1 ? session.firstLLM : session.secondLLM;
+}
+
+function formatLLMLabel(llmType) {
+    const normalized = normalizeProviderKey(llmType);
+    const label = PROVIDER_METADATA?.[normalized]?.label;
+    if (label) return label;
+    if (normalized === 'gemini') return 'Gemini';
+    if (normalized === 'claude') return 'Claude';
+    if (normalized === 'grok') return 'Grok';
+    return 'ChatGPT';
+}
+
+const PROVIDER_METADATA = {
+    chatgpt: {
+        label: 'ChatGPT',
+        openUrl: 'https://chatgpt.com/',
+        expectedHosts: ['chatgpt.com', 'chat.openai.com', 'openai.com', 'platform.openai.com'],
+        urlPatterns: [
+            '*://chat.openai.com/*',
+            '*://chatgpt.com/*',
+            '*://openai.com/chatgpt*',
+            '*://platform.openai.com/*'
+        ]
+    },
+    gemini: {
+        label: 'Gemini',
+        openUrl: 'https://gemini.google.com/',
+        expectedHosts: ['gemini.google.com'],
+        urlPatterns: ['*://gemini.google.com/*']
+    },
+    claude: {
+        label: 'Claude',
+        openUrl: 'https://claude.ai/new',
+        expectedHosts: ['claude.ai'],
+        urlPatterns: ['*://claude.ai/*', '*://*.claude.ai/*']
+    },
+    grok: {
+        label: 'Grok',
+        openUrl: 'https://grok.com/',
+        expectedHosts: ['grok.com'],
+        urlPatterns: ['*://grok.com/*', '*://*.grok.com/*']
+    }
+};
+
+const PROVIDER_CAPABILITIES = {
+    chatgpt: {
+        attachments: {
+            mode: 'auto'
+        }
+    },
+    gemini: {
+        // Gemini currently blocks reliable programmatic uploads from extension content scripts:
+        // - No discoverable <input type="file"> in light DOM / open shadow roots
+        // - Synthetic drag/drop events are ignored (event.isTrusted === false)
+        // Fall back to sending text-only (no programmatic upload).
+        attachments: {
+            mode: 'manual'
+        }
+    },
+    claude: {
+        // Claude (claude.ai) exposes a real <input type="file"> in the composer.
+        // We attempt programmatic upload via DataTransfer -> input.files + change/input events.
+        attachments: {
+            mode: 'auto'
+        }
+    },
+    grok: {
+        // Grok (grok.com) attachment automation is best-effort. If UI automation fails, we fall back to text-only.
+        attachments: {
+            mode: 'auto'
+        }
+    }
+};
+
+function getProviderAttachmentMode(provider) {
+    const mode = PROVIDER_CAPABILITIES?.[provider]?.attachments?.mode;
+    if (mode === 'manual' || mode === 'none') return mode;
+    return 'auto';
+}
+
 const DEBATE_PROMPTS_PATH = 'debate_prompts.json';
+const PROMPT_TEMPLATES_OVERRIDE_KEY = 'mlc_debate_prompts_override_v1';
 let cachedDebatePromptConfig = null;
 let cachedDebatePromptSource = null;
 let debatePromptConfigLoadPromise = null;
@@ -2636,6 +3156,62 @@ function formatTranscriptForPrompt(messages, { maxChars = 48000 } = {}) {
     return text;
 }
 
+const CHAT_DELIVERY_STATE_META_PREFIX = 'mlc_chat_delivery_state_v1:';
+const CHAT_DELIVERY_STATE_SCHEMA_VERSION = 2;
+
+function getChatDeliveryStateKey(chatId) {
+    return `${CHAT_DELIVERY_STATE_META_PREFIX}${chatId}`;
+}
+
+function createEmptyDeliveryState() {
+    const providers = {};
+    for (const provider of getSupportedProviderKeys()) {
+        providers[provider] = { deliveredUpTo: 0, contextKey: null };
+    }
+    // Backward compatibility (older code assumes these keys exist).
+    if (!Object.prototype.hasOwnProperty.call(providers, 'chatgpt')) providers.chatgpt = { deliveredUpTo: 0, contextKey: null };
+    if (!Object.prototype.hasOwnProperty.call(providers, 'gemini')) providers.gemini = { deliveredUpTo: 0, contextKey: null };
+    return {
+        schemaVersion: CHAT_DELIVERY_STATE_SCHEMA_VERSION,
+        updatedAt: 0,
+        providers
+    };
+}
+
+function normalizeDeliveryProviderState(value) {
+    const out = { deliveredUpTo: 0, contextKey: null };
+    if (!value || typeof value !== 'object') return out;
+    if (Number.isFinite(value.deliveredUpTo) && value.deliveredUpTo > 0) {
+        out.deliveredUpTo = Math.floor(value.deliveredUpTo);
+    }
+    if (typeof value.contextKey === 'string' && value.contextKey.trim()) {
+        out.contextKey = value.contextKey.trim();
+    }
+    return out;
+}
+
+function normalizeChatDeliveryState(value) {
+    const base = createEmptyDeliveryState();
+    if (!value || typeof value !== 'object') return base;
+
+    if ((value.schemaVersion === 1 || value.schemaVersion === 2) && value.providers && typeof value.providers === 'object') {
+        const out = createEmptyDeliveryState();
+        out.updatedAt = Number.isFinite(value.updatedAt) ? Math.floor(value.updatedAt) : 0;
+        for (const provider of Object.keys(out.providers)) {
+            out.providers[provider] = normalizeDeliveryProviderState(value.providers[provider]);
+        }
+        return out;
+    }
+
+    // Legacy shape: { chatgpt: number, gemini: number }
+    const out = createEmptyDeliveryState();
+    if (Number.isFinite(value.chatgpt) && value.chatgpt > 0) out.providers.chatgpt.deliveredUpTo = Math.floor(value.chatgpt);
+    if (Number.isFinite(value.gemini) && value.gemini > 0) out.providers.gemini.deliveredUpTo = Math.floor(value.gemini);
+    return out;
+}
+
+const deliveryStateCache = new Map();
+
 async function getChatDeliveryState(store, chatId) {
     if (!store || !chatId) return createEmptyDeliveryState();
     const cached = deliveryStateCache.get(chatId);
@@ -2663,6 +3239,35 @@ async function saveChatDeliveryState(store, chatId, state) {
     } catch (error) {
         return { ok: false, error: error?.message || 'Failed to save delivery state.' };
     }
+}
+
+function getProviderContextKey(session, provider) {
+    const profileId = session?.profileIds?.[provider];
+    if (typeof profileId === 'string' && profileId.trim()) {
+        return `profile:${profileId.trim()}`;
+    }
+    const tabId = session?.tabIds?.[provider];
+    if (Number.isFinite(tabId)) {
+        return `tab:${Math.floor(tabId)}`;
+    }
+    return null;
+}
+
+function getEffectiveDeliveredUpTo(state, provider, contextKey) {
+    if (!state || typeof state !== 'object') return 0;
+    const providers = state.providers && typeof state.providers === 'object' ? state.providers : null;
+    const normalizedProvider = normalizeProviderKey(provider);
+    const entry = normalizedProvider && providers?.[normalizedProvider] && typeof providers[normalizedProvider] === 'object'
+        ? providers[normalizedProvider]
+        : null;
+    const deliveredUpTo = Number.isFinite(entry?.deliveredUpTo) ? Math.max(0, Math.floor(entry.deliveredUpTo)) : 0;
+    const storedContextKey = typeof entry?.contextKey === 'string' && entry.contextKey.trim()
+        ? entry.contextKey.trim()
+        : null;
+    if (contextKey && storedContextKey && contextKey !== storedContextKey) {
+        return 0;
+    }
+    return deliveredUpTo;
 }
 
 async function bumpProviderDeliveredUpTo(store, chatId, provider, sequence, contextKey) {
@@ -3143,8 +3748,8 @@ async function resolveSessionTab(session, target, { requirePing = false } = {}) 
 
 async function isTabInUse(tabId, { excludeSessionId } = {}) {
     if (!Number.isFinite(tabId)) return false;
-    await loadSessionsState();
-    for (const session of sessionsById.values()) {
+    const sessions = await loadSessionsState();
+    for (const session of sessions.values()) {
         if (!session || (!session.isActive && !session.isPaused)) continue;
         if (excludeSessionId && session.sessionId === excludeSessionId) continue;
         const seenTabIds = new Set();
@@ -3386,8 +3991,8 @@ async function handleWindowFocusChanged(windowId) {
         }
 
         try {
-            await loadSessionsState();
-            for (const session of sessionsById.values()) {
+            const sessions = await loadSessionsState();
+            for (const session of sessions.values()) {
                 if (!session.isPaused || session.autoResume?.trigger !== 'chrome_focus') continue;
                 console.log('[MLC Debate] Auto-resuming paused session on Chrome focus.', session.autoResume);
                 await resumeDebateSession(session.sessionId);
@@ -3467,6 +4072,28 @@ async function prefetchSessionAttachments(session, excludeAgentId) {
     } catch (error) {
         console.warn('[MLC Attachments] Prefetch threw unexpectedly:', error);
     }
+}
+
+function getParallelProviders(session) {
+    const providers = [];
+    const candidates = Array.isArray(session?.route?.providers) && session.route.providers.length > 0
+        ? session.route.providers
+        : listSessionProviders(session);
+    for (const candidate of candidates) {
+        const key = normalizeProviderKey(candidate);
+        if (!isSupportedProviderKey(key)) continue;
+        if (!providers.includes(key)) providers.push(key);
+    }
+    return providers;
+}
+
+function buildParallelPromptId(sessionId, agentId) {
+    return `${sessionId}:parallel:${String(agentId || '').trim()}`;
+}
+
+function formatProvidersForUi(providers) {
+    if (!Array.isArray(providers) || providers.length === 0) return '';
+    return providers.map(formatLLMLabel).join(' + ');
 }
 
 async function sendParallelTurn(session, { providers: providersOverride } = {}) {
@@ -3805,8 +4432,20 @@ async function handleParallelResponse(session, message) {
     const provider = normalizeProviderKey(participant?.provider || message.sourceLLM || message.provider || '');
     if (!provider || !isSupportedProviderKey(provider)) return;
 
-    const content = (message.content || '').trim();
-    if (!content) return;
+    const rawContent = typeof message.content === 'string' ? message.content : '';
+    const content = rawContent.trim();
+    if (!content) {
+        console.warn('[MLC Parallel] Dropping captured response: empty content.', {
+            reason: 'empty_content_after_capture',
+            sessionId,
+            promptId: message.promptId || null,
+            turnIndex: Number.isFinite(message.turnIndex) ? message.turnIndex : null,
+            agentId,
+            sourceLLM: message.sourceLLM || message.provider || null,
+            contentHtmlLength: typeof message.contentHtml === 'string' ? message.contentHtml.length : 0
+        });
+        return;
+    }
     const rawHtml = typeof message.contentHtml === 'string' ? message.contentHtml : '';
     const trimmedHtml = rawHtml.trim();
     const MAX_HTML_CHARS = 120000;
@@ -3927,8 +4566,20 @@ async function handleDebateResponse(message) {
         return;
     }
 
-    const content = (message.content || '').trim();
-    if (!content) return;
+    const rawContent = typeof message.content === 'string' ? message.content : '';
+    const content = rawContent.trim();
+    if (!content) {
+        console.warn('[MLC Debate] Dropping captured response: empty content.', {
+            reason: 'empty_content_after_capture',
+            sessionId: message.sessionId,
+            promptId: message.promptId || null,
+            turnIndex: hasTurnIndex ? messageTurnIndex : null,
+            agentId: messageAgentId || expectedAgentId || null,
+            sourceLLM: message.sourceLLM || null,
+            contentHtmlLength: typeof message.contentHtml === 'string' ? message.contentHtml.length : 0
+        });
+        return;
+    }
     const rawHtml = typeof message.contentHtml === 'string' ? message.contentHtml : '';
     const trimmedHtml = rawHtml.trim();
     const MAX_HTML_CHARS = 120000;
@@ -4178,7 +4829,7 @@ async function processLLM(llmType, prompt, context = {}) {
 
 async function listLLMTabs(llmType) {
     const normalized = normalizeProviderKey(llmType);
-    const patterns = getProviderUrlPatterns(normalized);
+    const patterns = PROVIDER_METADATA?.[normalized]?.urlPatterns;
     if (!patterns) {
         throw new Error(`[MLC Background] Unknown LLM type for listLLMTabs: ${llmType}`);
     }
@@ -5385,8 +6036,9 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
     const promptText = typeof prompt === 'string' ? prompt : String(prompt || '');
     const LARGE_PROMPT_THRESHOLD = 8000;
     const isLargePrompt = promptText.length >= LARGE_PROMPT_THRESHOLD;
+    const SIMPLE_INTERACTION_BUILD = 'grok-fix-r3-2026-02-08';
 
-    console.log(`[SimpleInteraction INJECTED] Attempting on ${llmType} (mode=${prepareAttachmentsOnly ? 'prepare_attachments' : 'send'}) with prompt: "${promptText.substring(0, 50)}..."`);
+    console.log(`[SimpleInteraction INJECTED] Attempting on ${llmType} (mode=${prepareAttachmentsOnly ? 'prepare_attachments' : 'send'}, build=${SIMPLE_INTERACTION_BUILD}) with prompt: "${promptText.substring(0, 50)}..."`);
 
     try {
         let inputElement = null;
@@ -5800,16 +6452,69 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             }
         };
 
+        const normalizePromptForCompare = (value) => String(value || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        const selectContentEditable = (el, { collapseToEnd = false } = {}) => {
+            if (!el) return false;
+            try {
+                const selection = window.getSelection();
+                if (!selection) return false;
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                if (collapseToEnd) range.collapse(false);
+                selection.removeAllRanges();
+                selection.addRange(range);
+                return true;
+            } catch (error) {
+                return false;
+            }
+        };
+
+        const commitGrokEditorState = (el) => {
+            if (llmType !== 'grok') return;
+            if (!el || !(el.isContentEditable || el.contentEditable === 'true')) return;
+            const originalText = String(el.textContent || '');
+            try {
+                el.focus();
+                selectContentEditable(el, { collapseToEnd: true });
+                document.execCommand('insertText', false, ' ');
+                el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                document.execCommand('delete', false, null);
+                el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                // Ensure no accidental text drift.
+                if (String(el.textContent || '') !== originalText) {
+                    el.textContent = originalText;
+                    dispatchInputEvents(el, originalText);
+                }
+            } catch (error) {
+                // best effort
+            }
+        };
+
         const setContentEditableValue = (el, value, { fast = false } = {}) => {
             if (!el) return false;
             if (fast) {
                 el.textContent = value;
                 dispatchInputEvents(el, value);
+                if (llmType === 'grok') commitGrokEditorState(el);
                 return true;
             }
-            document.execCommand('selectAll', false, null);
+            el.focus();
+            selectContentEditable(el);
             const insertSuccess = document.execCommand('insertText', false, value);
             el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            if (llmType === 'grok') {
+                try {
+                    const data = String(value || '').slice(-1);
+                    el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, composed: true, inputType: 'insertFromPaste', data }));
+                } catch (error) {
+                    // fallback ignored
+                }
+                dispatchInputEvents(el, value);
+                commitGrokEditorState(el);
+            }
             return insertSuccess;
         };
 
@@ -5844,15 +6549,24 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
         await new Promise(resolve => setTimeout(resolve, 50));
         const expectedPrefix = promptText.substring(0, Math.min(promptText.length, 50));
         let currentText = isContentEditable ? inputElement.textContent : inputElement.value;
-        if (usedFastContentEditable && expectedPrefix && !String(currentText || '').includes(expectedPrefix)) {
+        const evaluatePrefixMatch = (candidateText) => {
+            if (!expectedPrefix) return true;
+            if (llmType !== 'grok') return String(candidateText || '').includes(expectedPrefix);
+            const currentNormalized = normalizePromptForCompare(candidateText);
+            const expectedNormalized = normalizePromptForCompare(expectedPrefix);
+            return Boolean(expectedNormalized && currentNormalized.includes(expectedNormalized));
+        };
+        let prefixMatches = evaluatePrefixMatch(currentText);
+        if (usedFastContentEditable && expectedPrefix && !prefixMatches) {
             console.warn(`[SimpleInteraction INJECTED] Fast contentEditable set may have failed for ${llmType}; retrying with execCommand.`);
             const retrySuccess = setContentEditableValue(inputElement, promptText, { fast: false });
             console.log(`[SimpleInteraction INJECTED] Retry with execCommand success: ${retrySuccess}.`);
             await new Promise(resolve => setTimeout(resolve, 50));
             currentText = isContentEditable ? inputElement.textContent : inputElement.value;
+            prefixMatches = evaluatePrefixMatch(currentText);
         }
         console.log(`[SimpleInteraction INJECTED] Text in input field for ${llmType} after setting: "${currentText.substring(0,100)}..."`);
-        if (expectedPrefix && !currentText.includes(expectedPrefix)) {
+        if (expectedPrefix && !prefixMatches) {
             console.warn(`[SimpleInteraction INJECTED] WARNING: Prompt may not have been set correctly for ${llmType}. Expected start: "${promptText.substring(0,50)}...", Got: "${currentText.substring(0,50)}..."`);
         }
 
@@ -5894,19 +6608,36 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             grok: {
                 sendSelectors: [
                     'button[aria-label="Send message" i]',
+                    'button[aria-label*="soumettre" i]',
+                    'button[aria-label*="submit" i]',
                     'button[data-testid*="send" i]',
+                    'button[title*="soumettre" i]',
+                    'button[title*="submit" i]',
                     'button[title*="send" i]',
                     'button[type="submit"]'
                 ],
                 sendFallbackSelectors: [
+                    'button[aria-label*="soumettre" i]',
+                    'button[aria-label*="submit" i]',
                     'button[aria-label*="send" i]',
                     'button[type="submit"]'
                 ],
                 stopSelectors: [
                     'button[aria-label*="stop" i]',
                     'button[aria-label*="cancel" i]',
+                    'button[aria-label*="arrêter" i]',
+                    'button[aria-label*="annuler" i]',
                     'button[title*="stop" i]',
+                    'button[title*="arrêter" i]',
+                    'button[title*="annuler" i]',
                     'button[data-testid*="stop" i]'
+                ],
+                voiceSelectors: [
+                    'button[aria-label*="passer en mode vocal" i]',
+                    'button[aria-label*="mode vocal" i]',
+                    'button[aria-label*="voice mode" i]',
+                    'button[title*="mode vocal" i]',
+                    'button[title*="voice mode" i]'
                 ]
             },
             generic: {
@@ -5921,7 +6652,8 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                 stopSelectors: [
                     'button[aria-label*="stop" i]',
                     'button[data-testid*="stop" i]'
-                ]
+                ],
+                voiceSelectors: []
             }
         };
 
@@ -5967,6 +6699,55 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             return false;
         };
 
+        const normalizeControlLabel = (value) => String(value || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+
+        const getButtonControlLabel = (button) => {
+            if (!button) return '';
+            const attrs = [
+                button.getAttribute?.('aria-label') || '',
+                button.getAttribute?.('title') || '',
+                button.textContent || '',
+                button.getAttribute?.('data-testid') || ''
+            ];
+            return normalizeControlLabel(attrs.filter(Boolean).join(' '));
+        };
+
+        const classifyGrokControlButton = (button) => {
+            if (!button) return 'unknown';
+            const label = getButtonControlLabel(button);
+            const stopPatterns = [
+                /\bstop\b/i,
+                /\bcancel\b/i,
+                /\bannuler\b/i,
+                /\barreter\b/i,
+                /\barreter la reponse du modele\b/i
+            ];
+            if (stopPatterns.some((re) => re.test(label))) return 'stop';
+
+            const voicePatterns = [
+                /\bpasser en mode vocal\b/i,
+                /\bmode vocal\b/i,
+                /\bvoice mode\b/i
+            ];
+            if (voicePatterns.some((re) => re.test(label))) return 'voice';
+
+            const sendPatterns = [
+                /\bsend\b/i,
+                /\bsubmit\b/i,
+                /\bsoumettre\b/i,
+                /\benvoyer\b/i
+            ];
+            const typeAttr = normalizeControlLabel(button.getAttribute?.('type') || '');
+            if (sendPatterns.some((re) => re.test(label)) || typeAttr === 'submit') return 'send';
+
+            return 'unknown';
+        };
+
         const resolveComposerRoot = () => {
             const inputEl = resolveInputElement();
             const root = inputEl?.closest?.('form')
@@ -5977,8 +6758,10 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             return root && root.isConnected ? root : document.body;
         };
 
-        const findFirstButton = (selectors, { allowDisabled = false } = {}) => {
+        const findButtons = (selectors, { allowDisabled = false } = {}) => {
             const list = Array.isArray(selectors) ? selectors : [];
+            const matched = [];
+            const seen = new Set();
             for (const selector of list) {
                 const roots = (() => {
                     const root = resolveComposerRoot();
@@ -5993,10 +6776,44 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                     }
                     for (const node of nodes) {
                         if (!(node instanceof HTMLElement)) continue;
+                        if (seen.has(node)) continue;
                         if (!isVisible(node)) continue;
                         if (!allowDisabled && isDisabledButton(node)) continue;
-                        return node;
+                        seen.add(node);
+                        matched.push(node);
                     }
+                }
+            }
+            return matched;
+        };
+
+        const findFirstButton = (selectors, { allowDisabled = false } = {}) => {
+            const matches = findButtons(selectors, { allowDisabled });
+            return matches[0] || null;
+        };
+
+        const findGrokControlButton = (targetRole, { allowDisabled = true } = {}) => {
+            if (llmType !== 'grok') return null;
+            const roots = (() => {
+                const root = resolveComposerRoot();
+                return root === document.body ? [document.body] : [root, document.body];
+            })();
+            const seen = new Set();
+            for (const root of roots) {
+                let buttons = [];
+                try {
+                    buttons = Array.from(root.querySelectorAll('button'));
+                } catch (error) {
+                    buttons = [];
+                }
+                for (const button of buttons) {
+                    if (!(button instanceof HTMLElement)) continue;
+                    if (seen.has(button)) continue;
+                    seen.add(button);
+                    if (!isVisible(button)) continue;
+                    if (!allowDisabled && isDisabledButton(button)) continue;
+                    const role = classifyGrokControlButton(button);
+                    if (role === targetRole) return button;
                 }
             }
             return null;
@@ -6006,41 +6823,235 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             const selectors = includeFallback
                 ? [...ui.sendSelectors, ...ui.sendFallbackSelectors]
                 : ui.sendSelectors;
-            return findFirstButton(selectors, { allowDisabled });
+            const direct = findFirstButton(selectors, { allowDisabled });
+            if (llmType !== 'grok') return direct;
+            if (direct) {
+                const role = classifyGrokControlButton(direct);
+                if (role === 'send' || role === 'unknown') return direct;
+            }
+            return findGrokControlButton('send', { allowDisabled });
         };
 
-        const findStopButton = () => findFirstButton(ui.stopSelectors, { allowDisabled: true });
+        const findStopButton = () => {
+            if (llmType === 'grok') return findGrokControlButton('stop', { allowDisabled: true });
+            return findFirstButton(ui.stopSelectors, { allowDisabled: true });
+        };
 
+        const findVoiceButton = () => {
+            if (llmType === 'grok') return findGrokControlButton('voice', { allowDisabled: true });
+            return findFirstButton(ui.voiceSelectors, { allowDisabled: true });
+        };
+
+        const findNearestSubmitButton = ({ allowDisabled = false } = {}) => {
+            const root = resolveComposerRoot();
+            const selectors = [
+                'button[type="submit"]',
+                'button[aria-label*="soumettre" i]',
+                'button[aria-label*="submit" i]',
+                'button[aria-label*="send" i]',
+                'button[title*="soumettre" i]',
+                'button[title*="submit" i]',
+                'button[title*="send" i]'
+            ];
+            const candidates = [];
+            const seen = new Set();
+            for (const sel of selectors) {
+                let nodes = [];
+                try {
+                    nodes = Array.from(root.querySelectorAll(sel));
+                } catch (error) {
+                    nodes = [];
+                }
+                for (const node of nodes) {
+                    if (!(node instanceof HTMLElement)) continue;
+                    if (seen.has(node)) continue;
+                    seen.add(node);
+                    if (!isVisible(node)) continue;
+                    if (!allowDisabled && isDisabledButton(node)) continue;
+                    candidates.push(node);
+                }
+            }
+            if (!candidates.length) return null;
+            let best = candidates[0];
+            let bestBottom = -Infinity;
+            for (const node of candidates) {
+                const rect = node.getBoundingClientRect();
+                const bottom = Number.isFinite(rect.bottom) ? rect.bottom : 0;
+                if (bottom >= bestBottom) {
+                    best = node;
+                    bestBottom = bottom;
+                }
+            }
+            return best;
+        };
+
+        const describeVisibleComposerButtons = () => {
+            const root = resolveComposerRoot();
+            let buttons = [];
+            try {
+                buttons = Array.from(root.querySelectorAll('button'));
+            } catch (error) {
+                buttons = [];
+            }
+            return buttons
+                .filter((btn) => btn instanceof HTMLElement && isVisible(btn))
+                .slice(0, 12)
+                .map((btn) => {
+                    const role = llmType === 'grok' ? classifyGrokControlButton(btn) : 'unknown';
+                    const rect = btn.getBoundingClientRect();
+                    return {
+                        role,
+                        disabled: isDisabledButton(btn),
+                        label: getButtonControlLabel(btn).slice(0, 80),
+                        bottom: Math.round(Number.isFinite(rect.bottom) ? rect.bottom : 0),
+                        type: String(btn.getAttribute('type') || '')
+                    };
+                });
+        };
+
+        const submitViaComposerForm = () => {
+            const inputEl = resolveInputElement();
+            const form = inputEl?.closest?.('form');
+            if (!form || typeof form.requestSubmit !== 'function') return false;
+            try {
+                form.requestSubmit();
+                return true;
+            } catch (error) {
+                return false;
+            }
+        };
+
+        const captureSendAckBaseline = () => {
+            const draftText = getInputText().trim();
+            const sendButton = findSendButton({ allowDisabled: true, includeFallback: true });
+            const stopButton = findStopButton();
+            const voiceButton = findVoiceButton();
+            return {
+                draftLen: draftText.length,
+                sendVisible: Boolean(sendButton && isVisible(sendButton)),
+                sendEnabled: Boolean(sendButton && isVisible(sendButton) && !isDisabledButton(sendButton)),
+                stopVisible: Boolean(stopButton && isVisible(stopButton)),
+                voiceVisible: Boolean(voiceButton && isVisible(voiceButton)),
+                sendRole: sendButton ? classifyGrokControlButton(sendButton) : null,
+                sendLabel: sendButton ? getButtonControlLabel(sendButton) : ''
+            };
+        };
+
+        let lastGrokNudgeAt = 0;
         const waitForSendReady = async ({ timeoutMs, stableMs = 350, pollMs = 200 } = {}) => {
             const startedAt = Date.now();
             let stableSince = 0;
             while (Date.now() - startedAt < timeoutMs) {
-                const btn = findSendButton({ allowDisabled: false, includeFallback: false });
+                let btn = findSendButton({ allowDisabled: false, includeFallback: false });
+                if (!btn && llmType === 'grok') {
+                    btn = findNearestSubmitButton({ allowDisabled: false });
+                }
                 if (btn) {
                     if (!stableSince) stableSince = Date.now();
                     if (Date.now() - stableSince >= stableMs) return btn;
                 } else {
                     stableSince = 0;
+                    if (llmType === 'grok') {
+                        const inputValue = getInputText().trim();
+                        const now = Date.now();
+                        if (inputValue && now - lastGrokNudgeAt >= 600) {
+                            const inputEl = resolveInputElement();
+                            commitGrokEditorState(inputEl);
+                            lastGrokNudgeAt = now;
+                        }
+                    }
                 }
                 await sleep(pollMs);
             }
-            const disabledCandidate = findSendButton({ allowDisabled: true, includeFallback: true });
+            const disabledCandidate = findSendButton({ allowDisabled: true, includeFallback: true })
+                || (llmType === 'grok' ? findNearestSubmitButton({ allowDisabled: true }) : null);
+            const candidateRole = llmType === 'grok' && disabledCandidate
+                ? classifyGrokControlButton(disabledCandidate)
+                : null;
             const hint = disabledCandidate
-                ? `found disabled send button (${disabledCandidate.tagName.toLowerCase()})`
+                ? `found disabled send button (${disabledCandidate.tagName.toLowerCase()}${candidateRole ? ` role=${candidateRole}` : ''})`
                 : 'send button not found';
+            if (llmType === 'grok') {
+                console.warn('[SimpleInteraction INJECTED] Grok button snapshot at send-ready timeout:', describeVisibleComposerButtons());
+            }
             throw new Error(`Timed out waiting for Send to become ready (${hint}).`);
         };
 
-        const waitForSendAcknowledged = async ({ timeoutMs = 10000, pollMs = 150 } = {}) => {
+        const waitForSendAcknowledged = async ({ timeoutMs = 10000, pollMs = 150, baseline = null } = {}) => {
             const startedAt = Date.now();
+
+            if (llmType !== 'grok') {
+                while (Date.now() - startedAt < timeoutMs) {
+                    const current = getInputText().trim();
+                    if (!current) return { ok: true, reason: 'input_cleared' };
+                    const stopBtn = findStopButton();
+                    if (stopBtn && isVisible(stopBtn) && !isDisabledButton(stopBtn)) {
+                        return { ok: true, reason: 'stop_visible' };
+                    }
+                    await sleep(pollMs);
+                }
+                return { ok: false, reason: 'timeout_no_signal' };
+            }
+
+            const before = baseline || captureSendAckBaseline();
+            let sawStop = Boolean(before.stopVisible);
+            const strongSignals = new Set();
+            const secondarySignals = new Set();
+
             while (Date.now() - startedAt < timeoutMs) {
                 const current = getInputText().trim();
-                if (!current) return true;
+                const currentLen = current.length;
                 const stopBtn = findStopButton();
-                if (stopBtn && isVisible(stopBtn) && !isDisabledButton(stopBtn)) return true;
+                const voiceBtn = findVoiceButton();
+                const sendBtn = findSendButton({ allowDisabled: true, includeFallback: true })
+                    || findNearestSubmitButton({ allowDisabled: true });
+                const sendVisible = Boolean(sendBtn && isVisible(sendBtn));
+                const sendDisabled = Boolean(sendBtn && isDisabledButton(sendBtn));
+
+                if (stopBtn && isVisible(stopBtn) && !isDisabledButton(stopBtn)) {
+                    sawStop = true;
+                    strongSignals.add('stop_visible');
+                }
+
+                if (sawStop && voiceBtn && isVisible(voiceBtn)) {
+                    strongSignals.add('voice_after_stop');
+                }
+
+                if (before.draftLen > 0 && currentLen === 0) {
+                    secondarySignals.add('draft_cleared');
+                } else if (before.draftLen >= 10 && currentLen <= Math.max(2, Math.floor(before.draftLen * 0.3))) {
+                    secondarySignals.add('draft_shrunk');
+                }
+
+                if (before.sendVisible && !sendVisible) {
+                    secondarySignals.add('submit_hidden');
+                } else if (before.sendEnabled && sendVisible && sendDisabled) {
+                    secondarySignals.add('submit_disabled');
+                }
+
+                if (strongSignals.size >= 1 || secondarySignals.size >= 2) {
+                    const reason = strongSignals.size >= 1
+                        ? [...strongSignals].join('+')
+                        : [...secondarySignals].join('+');
+                    console.log(`[SimpleInteraction INJECTED] Grok send acknowledged (reason=${reason}; strong=${[...strongSignals].join(',') || 'none'}; secondary=${[...secondarySignals].join(',') || 'none'}).`);
+                    return {
+                        ok: true,
+                        reason,
+                        strongSignals: [...strongSignals],
+                        secondarySignals: [...secondarySignals]
+                    };
+                }
+
                 await sleep(pollMs);
             }
-            return false;
+
+            const timeoutReason = `timeout strong=${[...strongSignals].join(',') || 'none'} secondary=${[...secondarySignals].join(',') || 'none'}`;
+            return {
+                ok: false,
+                reason: timeoutReason,
+                strongSignals: [...strongSignals],
+                secondarySignals: [...secondarySignals]
+            };
         };
 
         const clickSendButton = (btn) => {
@@ -6057,15 +7068,34 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, composed: true }));
         };
 
+        const pressModifierEnterToSend = (modifier) => {
+            const el = resolveInputElement();
+            if (!el) return;
+            const eventInit = {
+                key: 'Enter',
+                code: 'Enter',
+                keyCode: 13,
+                which: 13,
+                bubbles: true,
+                composed: true,
+                ctrlKey: modifier === 'ctrl',
+                metaKey: modifier === 'meta'
+            };
+            el.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+            el.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+        };
+
         const hasAttachments = attachmentPayloads.length > 0;
         const readyTimeoutMs = hasAttachments ? 120000 : (isLargePrompt ? 20000 : 6000);
         const maxAttempts = hasAttachments ? 3 : (isLargePrompt ? 3 : 2);
         const disabledCandidate = (() => {
-            const candidate = findSendButton({ allowDisabled: true, includeFallback: true });
+            const candidate = findSendButton({ allowDisabled: true, includeFallback: true })
+                || (llmType === 'grok' ? findNearestSubmitButton({ allowDisabled: true }) : null);
             return Boolean(candidate && isVisible(candidate) && isDisabledButton(candidate));
         })();
         const shouldWaitForReadyFirst = hasAttachments || isLargePrompt || disabledCandidate;
         const initialWaitMs = isLargePrompt ? 150 : 75;
+        let lastAckReason = '';
 
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
             if (shouldWaitForReadyFirst || attempt > 1) {
@@ -6076,29 +7106,63 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                 await sleep(initialWaitMs);
             }
 
-            const button = findSendButton({ allowDisabled: false, includeFallback: true });
-            if (button) {
-                console.log(`[SimpleInteraction INJECTED] Clicking Send for ${llmType} (attempt ${attempt}).`, button);
-                clickSendButton(button);
-            } else {
-                console.warn(`[SimpleInteraction INJECTED] Send button not found for ${llmType}; attempting Enter (attempt ${attempt}).`);
-                pressEnterToSend();
+            const ackBaseline = llmType === 'grok' ? captureSendAckBaseline() : null;
+            if (llmType === 'grok' && ackBaseline) {
+                console.log(`[SimpleInteraction INJECTED] Grok controls before send (attempt ${attempt}): sendRole=${ackBaseline.sendRole || 'none'}, sendVisible=${ackBaseline.sendVisible}, sendEnabled=${ackBaseline.sendEnabled}, stopVisible=${ackBaseline.stopVisible}, voiceVisible=${ackBaseline.voiceVisible}.`);
             }
 
-            const acknowledged = await waitForSendAcknowledged({ timeoutMs: isLargePrompt ? 12000 : 10000 });
-            if (acknowledged) {
+            let button = findSendButton({ allowDisabled: false, includeFallback: true });
+            if (!button && llmType === 'grok') {
+                button = findNearestSubmitButton({ allowDisabled: false });
+            }
+            if (button) {
+                const controlType = llmType === 'grok' ? classifyGrokControlButton(button) : 'send';
+                console.log(`[SimpleInteraction INJECTED] Clicking Send for ${llmType} (attempt ${attempt}, control=${controlType}).`, button);
+                clickSendButton(button);
+            } else {
+                const submitted = submitViaComposerForm();
+                if (submitted) {
+                    console.warn(`[SimpleInteraction INJECTED] Send button not found for ${llmType}; submitted nearest form (attempt ${attempt}).`);
+                } else {
+                    console.warn(`[SimpleInteraction INJECTED] Send button not found for ${llmType}; attempting Enter/modifier fallbacks (attempt ${attempt}).`);
+                }
+                pressEnterToSend();
+                pressModifierEnterToSend('meta');
+                pressModifierEnterToSend('ctrl');
+                if (llmType === 'grok') {
+                    console.warn('[SimpleInteraction INJECTED] Grok button snapshot before ack wait:', describeVisibleComposerButtons());
+                }
+            }
+
+            const acknowledged = await waitForSendAcknowledged({
+                timeoutMs: isLargePrompt ? 12000 : 10000,
+                baseline: ackBaseline
+            });
+            if (acknowledged.ok) {
                 return {
                     success: true,
                     method: button ? `button_click_for_${llmType}` : `enter_key_for_${llmType}`,
-                    details: { stage: 'send', attempts: attempt }
+                    details: {
+                        stage: 'send',
+                        attempts: attempt,
+                        ackReason: acknowledged.reason
+                    }
                 };
             }
-            console.warn(`[SimpleInteraction INJECTED] Send not acknowledged for ${llmType} (attempt ${attempt}).`);
+            lastAckReason = acknowledged.reason || '';
+            console.warn(`[SimpleInteraction INJECTED] Send not acknowledged for ${llmType} (attempt ${attempt}, reason=${lastAckReason || 'none'}).`);
         }
 
         const errMsg = `[SimpleInteraction INJECTED] Failed to send message for ${llmType}: no acknowledgement after ${maxAttempts} attempt(s).`;
         console.error(errMsg);
-        return { success: false, error: errMsg, details: { stage: 'send_not_acknowledged' } };
+        return {
+            success: false,
+            error: errMsg,
+            details: {
+                stage: 'send_not_acknowledged',
+                ackReason: lastAckReason || null
+            }
+        };
         
     } catch (error) {
         const errMsg = `[SimpleInteraction INJECTED] Error during interaction with ${llmType}: ${error.message} (Stack: ${error.stack})`;
