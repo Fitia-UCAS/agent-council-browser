@@ -1,6 +1,9 @@
 /* global chrome */
 
-const DEFAULT_PROVIDER_IDS = ['chatgpt', 'gemini', 'claude', 'grok'];
+const routeUtils = globalThis.mlcRouteUtils || {};
+const DEFAULT_PROVIDER_IDS = Array.isArray(routeUtils.DEFAULT_PROVIDER_IDS) && routeUtils.DEFAULT_PROVIDER_IDS.length
+    ? [...routeUtils.DEFAULT_PROVIDER_IDS]
+    : ['chatgpt', 'gemini', 'claude', 'grok'];
 
 function initProviderMap(value) {
     const out = {};
@@ -148,91 +151,59 @@ function isMessageForActiveChat(message) {
 }
 
 function normalizeProviderId(provider) {
+    if (typeof routeUtils.normalizeProviderId === 'function') {
+        return routeUtils.normalizeProviderId(provider, {
+            defaultProviders: DEFAULT_PROVIDER_IDS,
+            providerCapabilities: state.providerCapabilities
+        });
+    }
     const value = String(provider || '').trim().toLowerCase();
-    if (!value) return null;
-    if (DEFAULT_PROVIDER_IDS.includes(value)) return value;
-    const capabilities = state.providerCapabilities && typeof state.providerCapabilities === 'object'
-        ? state.providerCapabilities
-        : null;
-    if (capabilities && Object.prototype.hasOwnProperty.call(capabilities, value)) return value;
-    return null;
+    return DEFAULT_PROVIDER_IDS.includes(value) ? value : null;
 }
 
 function generateRouteAgentId() {
+    if (typeof routeUtils.generateRouteAgentId === 'function') {
+        return routeUtils.generateRouteAgentId();
+    }
     if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
     return `agent_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
 
 function normalizeProfileSelection(value) {
-    if (value === null || value === undefined) return null;
-    const text = String(value).trim();
-    if (!text) return null;
-    if (text === 'default') return 'default';
-    if (text.startsWith('profile_')) return text;
-    return text;
+    if (typeof routeUtils.normalizeProfileSelection === 'function') {
+        return routeUtils.normalizeProfileSelection(value);
+    }
+    return value == null ? null : String(value).trim() || null;
 }
 
 function normalizeRouteAgent(input) {
-    const raw = input && typeof input === 'object' ? input : {};
+    if (typeof routeUtils.normalizeRouteAgent === 'function') {
+        return routeUtils.normalizeRouteAgent(input, {
+            defaultProviders: DEFAULT_PROVIDER_IDS,
+            providerCapabilities: state.providerCapabilities
+        });
+    }
+    const raw = input && typeof input === 'object' ? input : null;
+    if (!raw) return null;
     const provider = normalizeProviderId(raw.provider || raw.llm);
     if (!provider) return null;
-    const profileId = normalizeProfileSelection(raw.profileId ?? raw.profile ?? raw.profile_id);
-    const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : generateRouteAgentId();
-    return { id, provider, profileId: profileId || null };
+    return {
+        id: typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : generateRouteAgentId(),
+        provider,
+        profileId: normalizeProfileSelection(raw.profileId ?? raw.profile ?? raw.profile_id) || null
+    };
 }
 
 function sanitizeRoute(input) {
-    const route = input && typeof input === 'object' ? input : {};
-    const agents = [];
-    const rawAgents = Array.isArray(route.agents) ? route.agents : null;
-    if (rawAgents) {
-        rawAgents.forEach((item) => {
-            if (typeof item === 'string') {
-                const provider = normalizeProviderId(item);
-                if (provider) agents.push({ id: generateRouteAgentId(), provider, profileId: 'default' });
-                return;
-            }
-            const normalized = normalizeRouteAgent(item);
-            if (normalized) agents.push(normalized);
-        });
-    } else {
-        const rawProviders = Array.isArray(route.providers) ? route.providers : [];
-        rawProviders.forEach((item) => {
-            const provider = normalizeProviderId(item);
-            if (provider) agents.push({ id: generateRouteAgentId(), provider, profileId: 'default' });
+    if (typeof routeUtils.sanitizeRoute === 'function') {
+        return routeUtils.sanitizeRoute(input, {
+            defaultProviders: DEFAULT_PROVIDER_IDS,
+            providerCapabilities: state.providerCapabilities,
+            roundsMin: 1,
+            roundsMax: 12
         });
     }
-
-    // Back-compat: older routes used `profileId: null` while effectively meaning "Default".
-    // We only auto-upgrade to Default when there's a single agent for that provider, so
-    // multi-agent same-provider routes can still represent "unassigned" slots.
-    const agentCountsByProvider = {};
-    agents.forEach((agent) => {
-        if (!agent?.provider) return;
-        agentCountsByProvider[agent.provider] = (agentCountsByProvider[agent.provider] || 0) + 1;
-    });
-    agents.forEach((agent) => {
-        if (!agent?.provider) return;
-        if (normalizeProfileSelection(agent.profileId)) return;
-        if (agentCountsByProvider[agent.provider] !== 1) return;
-        agent.profileId = 'default';
-    });
-
-    const requestedKind = String(route.kind || '').trim().toLowerCase();
-    const roundsValue = route.rounds == null ? 3 : route.rounds;
-    const rounds = clampInt(roundsValue, 1, 12);
-
-    let kind = 'single';
-    if (agents.length >= 2) {
-        if (requestedKind === 'debate') kind = 'debate';
-        else kind = 'parallel';
-    }
-
-    return {
-        kind,
-        agents,
-        rounds
-    };
+    return getDefaultRoute();
 }
 
 function getDefaultRoute() {
@@ -240,28 +211,13 @@ function getDefaultRoute() {
 }
 
 function routeFromRunConfig(runConfig) {
-    if (!runConfig || typeof runConfig !== 'object') return null;
-    if (runConfig.route && typeof runConfig.route === 'object') {
-        return sanitizeRoute(runConfig.route);
-    }
-    const runType = runConfig.runType || runConfig.mode || null;
-    if (runType === 'debate') {
-        const first = normalizeProviderId(runConfig.firstLLM) || 'chatgpt';
-        const second = first === 'chatgpt' ? 'gemini' : 'chatgpt';
-        return sanitizeRoute({ kind: 'debate', providers: [first, second], rounds: runConfig.rounds });
-    }
-    if (runType === 'direct') {
-        const target = normalizeProviderId(runConfig.target);
-        if (runConfig.target === 'both') {
-            const supported = getSupportedProviders();
-            const providers = supported.length >= 2 ? supported : ['chatgpt', 'gemini'];
-            return sanitizeRoute({ kind: 'parallel', providers });
-        }
-        return sanitizeRoute({ kind: 'single', providers: [target || 'chatgpt'] });
-    }
-    if (runType === 'single') {
-        const llm = normalizeProviderId(runConfig.llm) || 'chatgpt';
-        return sanitizeRoute({ kind: 'single', providers: [llm] });
+    if (typeof routeUtils.routeFromRunConfig === 'function') {
+        return routeUtils.routeFromRunConfig(runConfig, {
+            defaultProviders: DEFAULT_PROVIDER_IDS,
+            providerCapabilities: state.providerCapabilities,
+            roundsMin: 1,
+            roundsMax: 12
+        });
     }
     return null;
 }
@@ -339,12 +295,12 @@ function toggleRoutePopover() {
 }
 
 function getSupportedProviders() {
-    const capabilities = state.providerCapabilities && typeof state.providerCapabilities === 'object'
-        ? Object.keys(state.providerCapabilities)
-        : [];
-    const normalized = capabilities.map(normalizeProviderId).filter(Boolean);
-    const unique = [...new Set(normalized)];
-    if (unique.length > 0) return unique;
+    if (typeof routeUtils.getSupportedProviders === 'function') {
+        return routeUtils.getSupportedProviders({
+            defaultProviders: DEFAULT_PROVIDER_IDS,
+            providerCapabilities: state.providerCapabilities
+        });
+    }
     return [...DEFAULT_PROVIDER_IDS];
 }
 

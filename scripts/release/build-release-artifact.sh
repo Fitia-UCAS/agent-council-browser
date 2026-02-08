@@ -33,6 +33,7 @@ required_files=(
   "sidepanel.html"
   "sidepanel.js"
   "styles.css"
+  "src/sidepanel/route-utils.js"
   "src/sidepanel/rich-content.js"
   "src/shared/providers.js"
   "src/shared/storage-keys.js"
