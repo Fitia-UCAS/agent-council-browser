@@ -33,6 +33,7 @@ required_files=(
   "sidepanel.html"
   "sidepanel.js"
   "styles.css"
+  "src/background/history-chat-service.js"
   "src/background/session-helpers.js"
   "src/sidepanel/route-utils.js"
   "src/sidepanel/rich-content.js"
