@@ -28,8 +28,13 @@ const state = {
     pausedAgentLabel: null,
     pausedReason: null,
     autoScroll: true,
-    historyStatus: { configured: false, unlocked: false },
-    historyUnlockPrompted: false,
+    historyStatus: {
+        historyEnabled: true,
+        configured: false,
+        unlocked: false,
+        protectionMode: 'off',
+        lockNewChatsByDefault: false
+    },
     connectionStatus: initProviderMap(false),
     profileConnectionStatus: {},
     connecting: initProviderMap(false),
@@ -1087,6 +1092,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     elements.chatsButton = document.getElementById('chats-button');
     elements.newChatButton = document.getElementById('new-chat-button');
+    elements.chatLockButton = document.getElementById('chat-lock-button');
+    elements.chatLockIcon = document.getElementById('chat-lock-icon');
     elements.settingsButton = document.getElementById('settings-button');
 
     elements.chatsDrawer = document.getElementById('chats-drawer');
@@ -1113,21 +1120,27 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     elements.historyConfigureButton = document.getElementById('history-configure');
     elements.historyUnlockButton = document.getElementById('history-unlock');
-	    elements.historyLockButton = document.getElementById('history-lock');
-	    elements.historyResetButton = document.getElementById('history-reset');
-	    elements.historyStatus = document.getElementById('history-status');
+    elements.historyLockButton = document.getElementById('history-lock');
+    elements.historyBadge = document.getElementById('history-badge');
+    elements.historyOverviewText = document.getElementById('history-overview-text');
+    elements.historyAdvanced = document.getElementById('history-advanced');
+    elements.historyLockNewRow = document.getElementById('history-lock-new-row');
+    elements.historyLockNew = document.getElementById('history-lock-new');
+    elements.historyResetProtection = document.getElementById('history-reset-protection');
+    elements.historyClearAll = document.getElementById('history-clear-all');
+    elements.historyStatus = document.getElementById('history-status');
 
-	    elements.passphraseBackdrop = document.getElementById('passphrase-backdrop');
-	    elements.passphraseModal = document.getElementById('passphrase-modal');
-	    elements.passphraseTitle = document.getElementById('passphrase-title');
-	    elements.passphraseNote = document.getElementById('passphrase-note');
+    elements.passphraseBackdrop = document.getElementById('passphrase-backdrop');
+    elements.passphraseModal = document.getElementById('passphrase-modal');
+    elements.passphraseTitle = document.getElementById('passphrase-title');
+    elements.passphraseNote = document.getElementById('passphrase-note');
     elements.passphraseInput = document.getElementById('passphrase-input');
     elements.passphraseConfirmField = document.getElementById('passphrase-confirm-field');
     elements.passphraseConfirm = document.getElementById('passphrase-confirm');
     elements.passphraseError = document.getElementById('passphrase-error');
-	    elements.passphraseCancel = document.getElementById('passphrase-cancel');
-	    elements.passphraseClose = document.getElementById('passphrase-close');
-	    elements.passphraseSubmit = document.getElementById('passphrase-submit');
+    elements.passphraseCancel = document.getElementById('passphrase-cancel');
+    elements.passphraseClose = document.getElementById('passphrase-close');
+    elements.passphraseSubmit = document.getElementById('passphrase-submit');
 
 	    elements.modalBackdrop = document.getElementById('modal-backdrop');
 	    elements.attachmentsModal = document.getElementById('attachments-modal');
@@ -1150,7 +1163,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     requestProfiles();
     requestConnectionStatus();
-    requestHistoryStatus({ hydrateChats: true, promptUnlock: true });
+    requestHistoryStatus({ hydrateChats: true });
     requestActiveSession();
     requestProviderCapabilities();
     loadPromptTemplates();
@@ -1380,6 +1393,14 @@ function bindEvents() {
         elements.promptResetButton.addEventListener('click', resetPromptTemplates);
     }
 
+    if (elements.promptJsonSaveButton) {
+        elements.promptJsonSaveButton.addEventListener('click', savePromptTemplatesJson);
+    }
+
+    if (elements.chatLockButton) {
+        elements.chatLockButton.addEventListener('click', toggleActiveChatProtection);
+    }
+
     if (elements.historyConfigureButton) {
         elements.historyConfigureButton.addEventListener('click', configureHistoryEncryption);
     }
@@ -1392,8 +1413,18 @@ function bindEvents() {
         elements.historyLockButton.addEventListener('click', lockHistory);
     }
 
-    if (elements.historyResetButton) {
-        elements.historyResetButton.addEventListener('click', resetHistory);
+    if (elements.historyLockNew) {
+        elements.historyLockNew.addEventListener('change', (event) => {
+            setLockNewChatsByDefault(Boolean(event?.target?.checked));
+        });
+    }
+
+    if (elements.historyResetProtection) {
+        elements.historyResetProtection.addEventListener('click', resetProtection);
+    }
+
+    if (elements.historyClearAll) {
+        elements.historyClearAll.addEventListener('click', clearAllChats);
     }
 
     if (elements.passphraseClose) {
@@ -1517,17 +1548,52 @@ function handleActionResponse(response) {
 }
 
 function normalizeHistoryStatus(status) {
-    const configured = Boolean(status?.configured);
-    const unlocked = Boolean(status?.unlocked);
-    return { configured, unlocked };
+    const raw = status && typeof status === 'object' ? status : {};
+    const configured = Boolean(raw.configured);
+    const hasLockNewFlag = typeof raw.lockNewChatsByDefault === 'boolean';
+    return {
+        historyEnabled: true,
+        configured,
+        unlocked: Boolean(raw.unlocked),
+        protectionMode: configured ? 'per_chat' : 'off',
+        lockNewChatsByDefault: hasLockNewFlag
+            ? Boolean(raw.lockNewChatsByDefault)
+            : configured
+    };
 }
 
-function isHistoryReady() {
-    return Boolean(state.historyStatus?.configured && state.historyStatus?.unlocked);
+function getActiveChatSummary() {
+    const chatId = state.activeChatId;
+    if (!chatId) return null;
+    const fromList = Array.isArray(state.chats) ? state.chats.find((chat) => chat?.chatId === chatId) : null;
+    if (fromList) return fromList;
+    if (state.activeChat && state.activeChat.chatId === chatId) return state.activeChat;
+    return null;
+}
+
+function isHistoryAppLocked() {
+    // Passphrase protection is per-chat only; there is no global app lock state.
+    return false;
+}
+
+function isActiveChatLocked() {
+    const summary = getActiveChatSummary();
+    return Boolean(summary?.locked);
 }
 
 function isHistoryBlocked() {
-    return Boolean(state.historyStatus?.configured && !state.historyStatus?.unlocked);
+    return Boolean(isActiveChatLocked());
+}
+
+function getHistoryBlockedHint() {
+    if (isActiveChatLocked()) return 'Unlock this chat to continue.';
+    return '';
+}
+
+function updateChatLockButton() {
+    if (!elements.chatLockButton || !elements.chatLockIcon) return;
+    // Keep chat-level protection controls hidden to preserve a simpler global passphrase UX.
+    elements.chatLockButton.hidden = true;
 }
 
 function setHistoryStatus(text, isError = false) {
@@ -1537,8 +1603,23 @@ function setHistoryStatus(text, isError = false) {
 }
 
 function updateHistoryStatus(nextStatus) {
+    const prev = state.historyStatus;
     state.historyStatus = normalizeHistoryStatus(nextStatus);
+    const didLock = Boolean(prev?.unlocked && !state.historyStatus.unlocked);
     updateHistoryUi();
+    updateChatLockButton();
+
+    if (didLock) {
+        const summary = getActiveChatSummary();
+        const shouldClearActive = isHistoryAppLocked() || Boolean(summary?.isProtected);
+        if (shouldClearActive) {
+            state.activeChat = null;
+            state.activeChatHasMore = false;
+            state.activeChatNextCursorSequence = null;
+            clearTranscript();
+        }
+    }
+
     renderChatList();
     updateSendState();
 }
@@ -1546,33 +1627,78 @@ function updateHistoryStatus(nextStatus) {
 function updateHistoryUi() {
     const configured = Boolean(state.historyStatus?.configured);
     const unlocked = Boolean(state.historyStatus?.unlocked);
+    const protectNewChats = Boolean(configured && state.historyStatus?.lockNewChatsByDefault);
+    const uiLocked = Boolean(state.running || state.paused);
 
     if (!configured) {
-        setHistoryStatus('History: off (optional).');
+        setHistoryStatus('Passphrase: off. New chats are saved without encryption.');
+    } else if (protectNewChats && !unlocked) {
+        setHistoryStatus('Passphrase: on. New chats are protected. Unlock to open protected chats.');
+    } else if (protectNewChats) {
+        setHistoryStatus('Passphrase: on and unlocked. New chats are protected.');
     } else if (!unlocked) {
-        setHistoryStatus('History: locked.');
+        setHistoryStatus('Passphrase: off for new chats. Protected chats stay locked until unlocked.');
     } else {
-        setHistoryStatus('History: unlocked.');
+        setHistoryStatus('Passphrase: off for new chats. Protected chats are currently unlocked.');
+    }
+
+    if (elements.historyBadge) {
+        if (!configured) {
+            elements.historyBadge.textContent = 'Off';
+        } else if (protectNewChats) {
+            elements.historyBadge.textContent = unlocked ? 'On (unlocked)' : 'On (locked)';
+        } else {
+            elements.historyBadge.textContent = 'Paused';
+        }
+        elements.historyBadge.classList.toggle('is-off', !configured);
+        elements.historyBadge.classList.toggle('is-locked', configured && protectNewChats && !unlocked);
+        elements.historyBadge.classList.toggle('is-unlocked', configured && protectNewChats && unlocked);
+        elements.historyBadge.classList.toggle('is-paused', configured && !protectNewChats);
+    }
+    if (elements.historyOverviewText) {
+        if (!configured) {
+            elements.historyOverviewText.textContent = 'History is always saved on this device. Set a passphrase to protect new chats.';
+        } else if (protectNewChats) {
+            elements.historyOverviewText.textContent = 'Passphrase protection is active for new chats. Protected chats require unlock to open.';
+        } else {
+            elements.historyOverviewText.textContent = 'Passphrase is paused for new chats. Existing protected chats remain protected and require unlock.';
+        }
     }
 
     if (elements.historyConfigureButton) {
+        elements.historyConfigureButton.textContent = 'Set passphrase…';
         elements.historyConfigureButton.hidden = configured;
+        elements.historyConfigureButton.disabled = uiLocked || configured;
     }
     if (elements.historyUnlockButton) {
+        elements.historyUnlockButton.textContent = 'Unlock protected chats';
         elements.historyUnlockButton.hidden = !configured || unlocked;
+        elements.historyUnlockButton.disabled = uiLocked || !configured || unlocked;
     }
     if (elements.historyLockButton) {
+        elements.historyLockButton.textContent = 'Lock protected chats';
         elements.historyLockButton.hidden = !configured || !unlocked;
-    }
-    if (elements.historyResetButton) {
-        elements.historyResetButton.hidden = !configured;
+        elements.historyLockButton.disabled = uiLocked || !configured || !unlocked;
     }
 
-    if (elements.historyConfigureButton) {
-        elements.historyConfigureButton.disabled = configured;
+    if (elements.historyAdvanced) {
+        elements.historyAdvanced.hidden = false;
     }
-    if (elements.historyUnlockButton) {
-        elements.historyUnlockButton.disabled = !configured || unlocked;
+
+    if (elements.historyLockNewRow) {
+        elements.historyLockNewRow.hidden = !configured;
+    }
+    if (elements.historyLockNew) {
+        elements.historyLockNew.checked = protectNewChats;
+        elements.historyLockNew.disabled = uiLocked || !configured;
+    }
+    if (elements.historyResetProtection) {
+        elements.historyResetProtection.hidden = !configured;
+        elements.historyResetProtection.disabled = uiLocked || !configured;
+    }
+    if (elements.historyClearAll) {
+        elements.historyClearAll.hidden = false;
+        elements.historyClearAll.disabled = uiLocked;
     }
 }
 
@@ -1599,18 +1725,20 @@ function openPassphrasePrompt({ mode, errorText = null } = {}) {
 
     const configuring = mode === 'configure';
     if (elements.passphraseTitle) {
-        elements.passphraseTitle.textContent = configuring ? 'Enable encryption' : 'Unlock history';
+        elements.passphraseTitle.textContent = configuring
+            ? 'Set passphrase'
+            : 'Unlock protected chats';
     }
     if (elements.passphraseNote) {
         elements.passphraseNote.textContent = configuring
-            ? 'Set a passphrase to enable encrypted history.'
-            : 'Enter your passphrase to unlock encrypted history.';
+            ? 'Set a passphrase to protect your new chats.'
+            : 'Enter your passphrase to unlock protected chats.';
     }
     if (elements.passphraseConfirmField) {
         elements.passphraseConfirmField.hidden = !configuring;
     }
     if (elements.passphraseSubmit) {
-        elements.passphraseSubmit.textContent = configuring ? 'Enable' : 'Unlock';
+        elements.passphraseSubmit.textContent = configuring ? 'Save' : 'Unlock';
     }
 
     elements.passphraseBackdrop.hidden = false;
@@ -1666,62 +1794,177 @@ function submitPassphrasePrompt() {
         return;
     }
 
+    if (mode === 'configure') {
+        closePassphrasePrompt(passphrase);
+        return;
+    }
+
     closePassphrasePrompt(passphrase);
 }
 
 async function promptForPassphrase({ mode, errorText = null } = {}) {
     if (!elements.passphraseBackdrop || !elements.passphraseModal || !elements.passphraseInput) {
-        const label = mode === 'configure' ? 'Set a passphrase' : 'Enter your passphrase';
-        const first = window.prompt(label);
+        const first = window.prompt('Enter your passphrase');
         if (first === null) return null;
         const passphrase = String(first || '');
         if (!passphrase.trim()) return null;
-        if (mode === 'configure') {
-            const confirmValue = window.prompt('Confirm passphrase');
-            if (confirmValue === null) return null;
-            if (passphrase !== String(confirmValue || '')) {
-                window.alert('Passphrases do not match.');
-                return null;
-            }
-        }
         return passphrase;
     }
     return openPassphrasePrompt({ mode, errorText });
 }
 
+async function promptForPassphraseSetup({ errorText = null } = {}) {
+    if (!elements.passphraseBackdrop || !elements.passphraseModal || !elements.passphraseInput) {
+        const first = window.prompt('Set a passphrase');
+        if (first === null) return null;
+        const passphrase = String(first || '');
+        if (!passphrase.trim()) return null;
+        const confirmValue = window.prompt('Confirm passphrase');
+        if (confirmValue === null) return null;
+        if (passphrase !== String(confirmValue || '')) {
+            window.alert('Passphrases do not match.');
+            return null;
+        }
+        return passphrase;
+    }
+
+    const result = await openPassphrasePrompt({ mode: 'configure', errorText });
+    const passphrase = String(result || '');
+    if (!passphrase.trim()) return null;
+    return passphrase;
+}
+
 async function configureHistoryEncryption() {
     if (state.historyStatus?.configured) return;
 
-    const passphrase = await promptForPassphrase({ mode: 'configure' });
+    const passphrase = await promptForPassphraseSetup();
     if (passphrase === null) return;
 
-    setHistoryStatus('Configuring encryption…');
-    const response = await sendMessageAsync({ type: 'HISTORY_CONFIGURE', passphrase });
+    setHistoryStatus('Setting passphrase…');
+    const response = await sendMessageAsync({ type: 'HISTORY_CONFIGURE', passphrase, protectionMode: 'per_chat' });
     if (!response || response.ok === false) {
         const code = response?.code || '';
         if (code === 'ENCRYPTION_ALREADY_CONFIGURED') {
-            setHistoryStatus('Encryption already enabled. Use Unlock instead.', true);
-            requestHistoryStatus({ hydrateChats: true, promptUnlock: false });
+            setHistoryStatus('Passphrase already set. Use Unlock protected chats.', true);
+            requestHistoryStatus({ hydrateChats: true });
             return;
         }
-        setHistoryStatus(`Error: ${response?.error || 'Failed to configure encryption.'}`, true);
+        setHistoryStatus(`Error: ${response?.error || 'Failed to set passphrase.'}`, true);
         return;
     }
     updateHistoryStatus(response.status);
     requestChatsState();
 }
 
-async function unlockHistory({ auto = false } = {}) {
-    if (!state.historyStatus?.configured) {
-        if (!auto) setHistoryStatus('Encryption is not configured yet. Enable encryption first.', true);
+async function setLockNewChatsByDefault(enabled) {
+    if (!state.historyStatus?.configured) return;
+    const nextEnabled = Boolean(enabled);
+    const wasUnlocked = Boolean(state.historyStatus?.unlocked);
+    const response = await sendMessageAsync({ type: 'HISTORY_SET_LOCK_NEW_CHATS', enabled: nextEnabled });
+    if (!response || response.ok === false) {
+        setHistoryStatus(`Error: ${response?.error || 'Failed to update settings.'}`, true);
+        requestHistoryStatus({ hydrateChats: false });
         return;
     }
-    if (state.historyStatus?.unlocked) return;
+    updateHistoryStatus(response.status);
+    if (!nextEnabled && wasUnlocked) {
+        await lockHistory({
+            statusText: 'Pausing passphrase for new chats…',
+            finalStatus: 'New chats no longer require passphrase. Protected chats are locked.'
+        });
+        return;
+    }
+    requestChatsState();
+}
+
+async function resetProtection() {
+    if (!state.historyStatus?.configured) return;
+    const confirmed = window.confirm('Reset passphrase? Protected chats will be deleted. Unprotected chats will remain.');
+    if (!confirmed) return;
+
+    setHistoryStatus('Resetting passphrase…');
+    const response = await sendMessageAsync({ type: 'HISTORY_RESET_PROTECTION' });
+    if (!response || response.ok === false) {
+        setHistoryStatus(`Error: ${response?.error || 'Failed to reset passphrase.'}`, true);
+        return;
+    }
+    updateHistoryStatus(response.status);
+    requestChatsState();
+}
+
+async function clearAllChats() {
+    const confirmed = window.confirm('Delete all chats on this device? This removes both protected and unprotected chats and cannot be undone.');
+    if (!confirmed) return;
+
+    setHistoryStatus('Deleting chats…');
+    const response = await sendMessageAsync({ type: 'HISTORY_CLEAR_ALL' });
+    if (!response || response.ok === false) {
+        setHistoryStatus(`Error: ${response?.error || 'Failed to delete chats.'}`, true);
+        return;
+    }
+
+    updateHistoryStatus(response.status);
+    state.chats = [];
+    state.activeChat = null;
+    state.activeChatId = null;
+    state.activeChatHasMore = false;
+    state.activeChatNextCursorSequence = null;
+    clearTranscript();
+    updateChatLockButton();
+    renderChatList();
+    updateSendState();
+    requestChatsState();
+}
+
+async function toggleActiveChatProtection() {
+    const chatId = state.activeChatId;
+    if (!chatId) return;
+    if (!state.historyStatus?.configured) {
+        openSettingsDrawer();
+        configureHistoryEncryption().catch(() => {});
+        return;
+    }
+
+    const unlocked = await unlockHistory({ auto: false });
+    if (!unlocked) return;
+
+    const summary = getActiveChatSummary();
+    const isProtected = Boolean(summary?.isProtected);
+    if (isProtected) {
+        const confirmed = window.confirm('Unprotect this chat? It will be stored unencrypted on this device.');
+        if (!confirmed) return;
+        setSessionStatus('Unprotecting chat…');
+        const response = await sendMessageAsync({ type: 'UNPROTECT_CHAT', chatId });
+        if (!response || response.ok === false) {
+            setSessionStatus(`Error: ${response?.error || 'Failed to unprotect chat.'}`);
+            return;
+        }
+        requestChatsState();
+        loadChat(chatId);
+        return;
+    }
+
+    setSessionStatus('Protecting chat…');
+    const response = await sendMessageAsync({ type: 'PROTECT_CHAT', chatId });
+    if (!response || response.ok === false) {
+        setSessionStatus(`Error: ${response?.error || 'Failed to protect chat.'}`);
+        return;
+    }
+    requestChatsState();
+    updateChatLockButton();
+}
+
+async function unlockHistory({ auto = false } = {}) {
+    if (!state.historyStatus?.configured) {
+        if (!auto) setHistoryStatus('Passphrase is not set yet.', true);
+        return false;
+    }
+    if (state.historyStatus?.unlocked) return true;
 
     let errorText = null;
     while (true) {
         const passphrase = await promptForPassphrase({ mode: 'unlock', errorText });
-        if (passphrase === null) return;
+        if (passphrase === null) return false;
 
         setHistoryStatus('Unlocking…');
         const response = await sendMessageAsync({ type: 'HISTORY_UNLOCK', passphrase });
@@ -1732,34 +1975,36 @@ async function unlockHistory({ auto = false } = {}) {
                 continue;
             }
             if (code === 'ENCRYPTION_NOT_CONFIGURED') {
-                setHistoryStatus('Encryption is not configured yet. Enable encryption first.', true);
-                requestHistoryStatus({ hydrateChats: false, promptUnlock: false });
-                return;
+                setHistoryStatus('Passphrase is not set yet.', true);
+                requestHistoryStatus({ hydrateChats: false });
+                return false;
             }
             setHistoryStatus(`Error: ${response?.error || 'Failed to unlock history.'}`, true);
-            return;
+            return false;
         }
         updateHistoryStatus(response.status);
         requestChatsState();
-        return;
+        return true;
     }
 }
 
-function lockHistory() {
-    setHistoryStatus('Locking…');
-    sendMessage({ type: 'HISTORY_LOCK' }, (response) => {
-        if (!response || response.ok === false) {
-            setHistoryStatus(`Error: ${response?.error || 'Failed to lock history.'}`, true);
-            return;
-        }
-        updateHistoryStatus(response.status);
-        state.chats = [];
-        state.activeChat = null;
-        state.activeChatId = null;
-        state.activeChatHasMore = false;
-        state.activeChatNextCursorSequence = null;
-        clearTranscript();
-    });
+async function lockHistory({ statusText = 'Locking…', finalStatus = '' } = {}) {
+    setHistoryStatus(statusText);
+    const response = await sendMessageAsync({ type: 'HISTORY_LOCK' });
+    if (!response || response.ok === false) {
+        setHistoryStatus(`Error: ${response?.error || 'Failed to lock history.'}`, true);
+        return false;
+    }
+    if (Array.isArray(state.chats)) {
+        state.chats = state.chats.map((chat) => {
+            if (!chat || !chat.isProtected) return chat;
+            return { ...chat, title: 'Locked chat', lastPreview: '', locked: true };
+        });
+    }
+    updateHistoryStatus(response.status);
+    requestChatsState();
+    if (finalStatus) setHistoryStatus(finalStatus);
+    return true;
 }
 
 function resetHistory() {
@@ -2357,27 +2602,17 @@ function requestProviderCapabilities() {
     });
 }
 
-function requestHistoryStatus({ hydrateChats = false, promptUnlock = false } = {}) {
+function requestHistoryStatus({ hydrateChats = false } = {}) {
     sendMessage({ type: 'HISTORY_STATUS' }, (response) => {
         if (!response || response.ok === false) {
-            updateHistoryStatus(response?.status || { configured: false, unlocked: false });
+            updateHistoryStatus(response?.status || {});
             return;
         }
 
         updateHistoryStatus(response.status);
 
-        const configured = Boolean(response.status?.configured);
-        const unlocked = Boolean(response.status?.unlocked);
-
-        if (hydrateChats && configured && unlocked) {
+        if (hydrateChats) {
             requestChatsState();
-        }
-
-        if (promptUnlock && configured && !unlocked && !state.historyUnlockPrompted) {
-            state.historyUnlockPrompted = true;
-            unlockHistory({ auto: true }).catch((error) => {
-                console.warn('Auto-unlock failed:', error);
-            });
         }
     });
 }
@@ -2419,12 +2654,11 @@ function requestChatsState() {
             const code = response.code || '';
             if (code === 'HISTORY_LOCKED') {
                 setSessionStatus('Unlock history to continue.');
-                unlockHistory({ auto: true }).catch((error) => {
+                unlockHistory({ auto: true }).then((unlocked) => {
+                    if (unlocked) requestChatsState();
+                }).catch((error) => {
                     console.warn('Unlock failed:', error);
                 });
-            } else if (code === 'HISTORY_NOT_CONFIGURED') {
-                setSessionStatus('History is off. Enable encryption in Settings → Security to save chats.');
-                openSettingsDrawer();
             } else {
                 setSessionStatus(`Error: ${response.error || 'Failed to load chats.'}`);
             }
@@ -2448,6 +2682,7 @@ function handleChatsState(payload) {
     const nextActiveId = typeof payload.activeChatId === 'string' ? payload.activeChatId : state.activeChatId;
     const shouldLoad = nextActiveId && (!state.activeChat || state.activeChat.chatId !== nextActiveId);
     state.activeChatId = nextActiveId;
+    updateChatLockButton();
     renderChatList();
     if (shouldLoad) {
         loadChat(nextActiveId);
@@ -2458,20 +2693,25 @@ function handleChatsState(payload) {
 }
 
 function createNewChat() {
-    if (!isHistoryReady()) {
-        if (isHistoryBlocked()) {
-            setSessionStatus('Unlock history to continue.');
-            unlockHistory({ auto: true }).catch((error) => {
-                console.warn('Unlock failed:', error);
-            });
-        } else {
-            setSessionStatus('History is off. Enable encryption in Settings → Security to save chats.');
-            openSettingsDrawer();
-        }
+    if (isHistoryAppLocked()) {
+        setSessionStatus('Unlock history to continue.');
+        unlockHistory({ auto: true }).catch((error) => {
+            console.warn('Unlock failed:', error);
+        });
         return;
     }
     sendMessage({ type: 'CREATE_CHAT' }, (response) => {
         if (!response || response.ok === false) {
+            const code = response?.code || '';
+            if (code === 'HISTORY_LOCKED') {
+                setSessionStatus('Unlock history to continue.');
+                unlockHistory({ auto: true }).then((unlocked) => {
+                    if (unlocked) createNewChat();
+                }).catch((error) => {
+                    console.warn('Unlock failed:', error);
+                });
+                return;
+            }
             handleActionResponse(response || { ok: false, error: 'Failed to create chat.' });
             return;
         }
@@ -2497,14 +2737,11 @@ function loadChat(chatId) {
             const code = response.code || '';
             if (code === 'HISTORY_LOCKED') {
                 setSessionStatus('Unlock history to continue.');
-                unlockHistory({ auto: true }).catch((error) => {
+                unlockHistory({ auto: true }).then((unlocked) => {
+                    if (unlocked) loadChat(chatId);
+                }).catch((error) => {
                     console.warn('Unlock failed:', error);
                 });
-                return;
-            }
-            if (code === 'HISTORY_NOT_CONFIGURED') {
-                setSessionStatus('History is off. Enable encryption in Settings → Security to save chats.');
-                openSettingsDrawer();
                 return;
             }
             handleActionResponse(response || { ok: false, error: 'Failed to load chat.' });
@@ -2523,6 +2760,7 @@ function loadChat(chatId) {
             updateEmptyState();
         }
         updateLoadOlderUi();
+        updateChatLockButton();
         renderChatList();
         applyRunDefaultsFromActiveChat();
         updateSendState();
@@ -2532,16 +2770,11 @@ function loadChat(chatId) {
 }
 
 function handleChatListClick(event) {
-    if (!isHistoryReady()) {
-        if (isHistoryBlocked()) {
-            setSessionStatus('Unlock history to continue.');
-            unlockHistory({ auto: true }).catch((error) => {
-                console.warn('Unlock failed:', error);
-            });
-        } else {
-            setSessionStatus('History is off. Enable encryption in Settings → Security to save chats.');
-            openSettingsDrawer();
-        }
+    if (isHistoryAppLocked()) {
+        setSessionStatus('Unlock history to continue.');
+        unlockHistory({ auto: true }).catch((error) => {
+            console.warn('Unlock failed:', error);
+        });
         return;
     }
     const item = event.target.closest('.chat-item');
@@ -2565,19 +2798,12 @@ function handleChatListClick(event) {
 function renderChatList() {
     if (!elements.chatList) return;
     elements.chatList.innerHTML = '';
-    if (!isHistoryReady()) {
-        const empty = document.createElement('div');
-        empty.className = 'profile-empty';
-        empty.textContent = state.historyStatus?.configured
-            ? 'History is locked. Unlock it to access chats.'
-            : 'History is off. Enable encryption in Settings → Security to save chats.';
-        elements.chatList.appendChild(empty);
-        return;
-    }
     if (!state.chats.length) {
         const empty = document.createElement('div');
         empty.className = 'profile-empty';
-        empty.textContent = 'No chats yet.';
+        empty.textContent = isHistoryAppLocked()
+            ? 'History is locked. Unlock it to access chats.'
+            : 'No chats yet.';
         elements.chatList.appendChild(empty);
         return;
     }
@@ -2586,9 +2812,22 @@ function renderChatList() {
         item.className = `chat-item${chat.chatId === state.activeChatId ? ' is-active' : ''}`;
         item.dataset.chatId = chat.chatId;
 
+        const header = document.createElement('div');
+        header.className = 'chat-item-header';
+
         const title = document.createElement('div');
         title.className = 'chat-item-title';
         title.textContent = chat.title || 'New chat';
+
+        header.appendChild(title);
+
+        if (chat.isProtected) {
+            const lock = document.createElement('span');
+            lock.className = `chat-item-lock material-symbols-rounded${chat.locked ? ' is-locked' : ''}`;
+            lock.textContent = 'lock';
+            lock.setAttribute('aria-hidden', 'true');
+            header.appendChild(lock);
+        }
 
         const meta = document.createElement('div');
         meta.className = 'chat-item-meta';
@@ -2599,7 +2838,7 @@ function renderChatList() {
         if (updatedAt) parts.push(formatRelativeTime(updatedAt));
         meta.textContent = parts.join(' • ');
 
-        item.appendChild(title);
+        item.appendChild(header);
         if (meta.textContent) item.appendChild(meta);
         elements.chatList.appendChild(item);
     });
@@ -3126,7 +3365,7 @@ function updateComposerHint() {
             hint = `Connect ${requiredLabel} to start.`;
         }
     } else if (historyBlocked) {
-        hint = 'Unlock history to continue.';
+        hint = getHistoryBlockedHint() || 'Unlock to continue.';
     } else if (!hasPrompt) {
         hint = '';
     }
@@ -3155,7 +3394,7 @@ function updateComposerHint() {
                 ? 'Fix the route to start…'
                 : (!connected
                     ? `Connect ${requiredLabel} to start...`
-                    : (historyBlocked ? 'Unlock history to continue...' : 'Send a message...'))));
+                    : (historyBlocked ? 'Unlock to continue...' : 'Send a message...'))));
 }
 
 function updateEmptyState() {
@@ -3181,8 +3420,12 @@ function updateEmptyState() {
     const actionButton = elements.emptyState.querySelector('#empty-open-route');
 
     if (ready && historyBlocked) {
-        if (titleEl) titleEl.textContent = 'Unlock history';
-        if (subtitleEl) subtitleEl.textContent = 'Enter your passphrase to unlock encrypted history.';
+        if (titleEl) titleEl.textContent = isActiveChatLocked() ? 'Unlock chat' : 'Unlock history';
+        if (subtitleEl) {
+            subtitleEl.textContent = isActiveChatLocked()
+                ? 'This chat is protected. Enter your passphrase to continue.'
+                : 'Enter your passphrase to unlock encrypted history.';
+        }
         if (actionsEl) {
             actionsEl.hidden = true;
         }
@@ -3256,7 +3499,7 @@ async function startSession() {
     if (!elements.promptInput) return;
 
     if (isHistoryBlocked()) {
-        setSessionStatus('Unlock history to continue.');
+        setSessionStatus(getHistoryBlockedHint() || 'Unlock to continue.');
         unlockHistory({ auto: true }).catch((error) => {
             console.warn('Unlock failed:', error);
         });
