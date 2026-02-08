@@ -42,6 +42,49 @@ Grok is integrated as a first‑class provider (`grok`) alongside `chatgpt`, `ge
 - **Fail-open** for attachments: never block the run just because upload automation fails.
 - **Scalable provider plumbing**: Grok’s connect URLs, host validation, and tab discovery are centralized in `PROVIDER_METADATA` in `background.js` so the next provider is easier.
 
+### 0.1 Incident report (Feb 2026): send OK, capture missing/dirty
+
+We hit a production issue where Grok prompts were sent successfully, but answers were not reliably visible in the side panel transcript.
+
+Observed symptoms:
+
+- Send acknowledged in injected logs (submit clicked and ack signals observed).
+- Capture logs showed repeated `composer_overlap` rejections for Grok candidates.
+- Content script logged `Response captured for prompt ...` but side panel still showed no new assistant message.
+- Some captured answers included Grok UI footer artifacts (for example `773ms` and `Are you satisfied with Grok's answer?`).
+
+Root causes:
+
+1. Runtime bundle mismatch during debugging:
+   - Chrome was loading an older built bundle while source files were already patched.
+2. Capture emission mismatch:
+   - Capture decision used one extraction object, but emission re-ran extraction and could produce empty payloads.
+3. Over-aggressive composer filtering:
+   - Candidate roots that merely contained composer subtree were rejected too broadly.
+4. Grok UI footer leakage:
+   - Footer controls/latency lines were appended near answer text and leaked into captured output.
+
+What we changed to fix it:
+
+- Synced the actual loaded extension bundle(s) with patched source.
+- Emission now sends the already-resolved extraction (`emitCaptureFromResolvedExtraction(...)`) instead of re-extracting at emit time.
+- Grok candidate filtering now:
+  - rejects nodes inside composer,
+  - uses composer-zone geometry filtering,
+  - does not blanket-reject wrappers only because they contain composer.
+- Transcript-tail fallback was hardened (scaffold/control filtering and quality gates).
+- Grok footer artifacts are stripped from captured text:
+  - latency tails (`NNNms`, `Ns`),
+  - satisfaction prompts (`Are you satisfied ...` and FR variants).
+- Grok now emits plain text only for capture payloads to avoid rich-footer widget leakage.
+- Background now logs explicit empty-capture drops (`empty_content_after_capture`) instead of silently returning.
+
+Result:
+
+- Grok send remains stable on modern/french UI.
+- Captured answers reliably appear in side panel.
+- Footer artifacts no longer appear in transcript content.
+
 ---
 
 ## 1) Where Grok is wired in
