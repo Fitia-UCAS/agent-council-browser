@@ -11,11 +11,19 @@
     const STORE_SETTINGS = 'settings';
 
     const SESSION_KEY_STORAGE = 'mlc_history_key_v1';
+    const SECURITY_SETTINGS_KEY = 'security';
 
     const KEYCHECK_PLAINTEXT = 'mlc-history-keycheck-v1';
     const KDF_ITERATIONS = 250_000;
     const SALT_BYTES = 16;
     const AES_GCM_IV_BYTES = 12;
+
+    const DEFAULT_SECURITY_SETTINGS = {
+        version: 1,
+        historyEnabled: true,
+        protectionMode: 'off', // 'off' | 'per_chat'
+        lockNewChatsByDefault: false
+    };
 
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
@@ -84,6 +92,11 @@
         return String(passphrase || '').normalize('NFKC');
     }
 
+    function normalizeProtectionMode(mode, { encryptionConfigured = false } = {}) {
+        if (!encryptionConfigured) return 'off';
+        return 'per_chat';
+    }
+
     async function getSetting(db, key) {
         return new Promise((resolve, reject) => {
             const tx = db.transaction([STORE_SETTINGS], 'readonly');
@@ -119,6 +132,50 @@
     async function getCryptoConfig(db) {
         const record = await getSetting(db, 'crypto');
         return record?.value && typeof record.value === 'object' ? record.value : null;
+    }
+
+    async function getSecuritySettings(db, { encryptionConfigured = false } = {}) {
+        const record = await getSetting(db, SECURITY_SETTINGS_KEY);
+        const raw = record?.value && typeof record.value === 'object' ? record.value : null;
+
+        if (!raw) {
+            if (encryptionConfigured) {
+                return {
+                    ...DEFAULT_SECURITY_SETTINGS,
+                    historyEnabled: true,
+                    protectionMode: 'per_chat',
+                    lockNewChatsByDefault: true
+                };
+            }
+            return { ...DEFAULT_SECURITY_SETTINGS };
+        }
+
+        const merged = { ...DEFAULT_SECURITY_SETTINGS, ...raw, version: 1 };
+        const hasLockNewFlag = Object.prototype.hasOwnProperty.call(raw, 'lockNewChatsByDefault');
+        merged.historyEnabled = true;
+        merged.lockNewChatsByDefault = hasLockNewFlag ? Boolean(merged.lockNewChatsByDefault) : Boolean(encryptionConfigured);
+        merged.protectionMode = normalizeProtectionMode(merged.protectionMode, { encryptionConfigured });
+        return merged;
+    }
+
+    async function setSecuritySettings(db, settings) {
+        const raw = settings && typeof settings === 'object' ? settings : {};
+        const merged = { ...DEFAULT_SECURITY_SETTINGS, ...raw, version: 1 };
+        merged.historyEnabled = true;
+        merged.lockNewChatsByDefault = Boolean(merged.lockNewChatsByDefault);
+        const encryptionConfigured = Boolean(raw?.protectionMode && raw.protectionMode !== 'off');
+        merged.protectionMode = normalizeProtectionMode(merged.protectionMode, { encryptionConfigured });
+        await setSetting(db, SECURITY_SETTINGS_KEY, merged);
+    }
+
+    async function updateSecuritySettings(db, patch, { encryptionConfigured = false } = {}) {
+        const current = await getSecuritySettings(db, { encryptionConfigured });
+        const next = { ...current, ...(patch && typeof patch === 'object' ? patch : {}) };
+        next.historyEnabled = true;
+        next.lockNewChatsByDefault = Boolean(next.lockNewChatsByDefault);
+        next.protectionMode = normalizeProtectionMode(next.protectionMode, { encryptionConfigured });
+        await setSecuritySettings(db, next);
+        return next;
     }
 
     async function deriveKeyMaterial(passphrase, saltBytes, iterations) {
@@ -198,7 +255,7 @@
 
     async function clearSessionKey() {
         cachedCryptoKey = null;
-        await chrome.storage.session.remove(SESSION_KEY_STORAGE);
+        await chrome.storage.session.remove([SESSION_KEY_STORAGE, 'mlc_history_unlocked_at_v1']);
     }
 
     async function getUnlockedKey() {
@@ -231,7 +288,12 @@
         return Boolean(config && config.version === 1 && config.salt && config.keyCheck);
     }
 
-    async function configureEncryption(passphrase) {
+    async function requireHistoryEnabled(db, { encryptionConfigured = false } = {}) {
+        const security = await getSecuritySettings(db, { encryptionConfigured });
+        return security;
+    }
+
+    async function configureEncryption(passphrase, options = {}) {
         const db = await openDb();
         const already = await getCryptoConfig(db);
         if (already) {
@@ -256,7 +318,15 @@
         await setSetting(db, 'crypto', config);
         cachedCryptoKey = derived.key;
         await storeSessionKeyBytes(derived.keyBytes);
-        return { configured: true, unlocked: true };
+
+        const requestedMode = normalizeProtectionMode(options?.mode, { encryptionConfigured: true });
+        await updateSecuritySettings(
+            db,
+            { historyEnabled: true, protectionMode: requestedMode, lockNewChatsByDefault: true },
+            { encryptionConfigured: true }
+        );
+
+        return getStatus();
     }
 
     async function unlock(passphrase) {
@@ -288,18 +358,29 @@
 
         cachedCryptoKey = derived.key;
         await storeSessionKeyBytes(derived.keyBytes);
-        return { configured: true, unlocked: true };
+        return getStatus();
     }
 
     async function lock() {
         await clearSessionKey();
-        return { configured: await isEncryptionConfigured(), unlocked: false };
+        return getStatus();
     }
 
     async function getStatus() {
-        const configured = await isEncryptionConfigured();
-        const unlocked = Boolean(await getUnlockedKey());
-        return { configured, unlocked };
+        const db = await openDb();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        const security = await getSecuritySettings(db, { encryptionConfigured });
+        const unlocked = encryptionConfigured
+            ? Boolean(await getUnlockedKey())
+            : false;
+        return {
+            historyEnabled: Boolean(security.historyEnabled),
+            configured: encryptionConfigured,
+            unlocked,
+            protectionMode: security.protectionMode,
+            lockNewChatsByDefault: Boolean(security.lockNewChatsByDefault)
+        };
     }
 
     function normalizeTitle(title) {
@@ -312,6 +393,12 @@
         return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen).trim()}…` : cleaned;
     }
 
+    function inferThreadProtected(thread) {
+        if (!thread || typeof thread !== 'object') return false;
+        if (typeof thread.protected === 'boolean') return thread.protected;
+        return Boolean(thread.titleEnc || thread.lastPreviewEnc);
+    }
+
     async function createThread({
         threadId,
         title = 'New chat',
@@ -320,18 +407,32 @@
         titleIsDefault = true
     }) {
         const db = await openDb();
-        const key = await requireUnlockedKey();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        const security = await requireHistoryEnabled(db, { encryptionConfigured });
+        const protectionMode = normalizeProtectionMode(security.protectionMode, { encryptionConfigured });
+
         const normalizedTitle = normalizeTitle(title) || 'New chat';
-        const titleEnc = await encryptString(key, normalizedTitle);
+        const shouldProtect = encryptionConfigured
+            && protectionMode === 'per_chat'
+            && Boolean(security.lockNewChatsByDefault);
+
+        const key = shouldProtect
+            ? await requireUnlockedKey()
+            : null;
+
         const thread = {
             threadId,
             createdAt,
             updatedAt,
-            titleEnc,
+            protected: shouldProtect,
+            titleEnc: shouldProtect ? await encryptString(key, normalizedTitle) : null,
+            title: shouldProtect ? null : normalizedTitle,
             titleIsDefault: Boolean(titleIsDefault),
             messageCount: 0,
             nextSequence: 1,
-            lastPreviewEnc: null
+            lastPreviewEnc: null,
+            lastPreview: null
         };
 
         await new Promise((resolve, reject) => {
@@ -367,7 +468,14 @@
     async function getThreadSummary(threadId) {
         const thread = await getThreadRecord(threadId);
         if (!thread) return null;
-        return decryptThreadSummary(thread);
+        const db = await openDb();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        await requireHistoryEnabled(db, { encryptionConfigured });
+        const key = inferThreadProtected(thread) && encryptionConfigured
+            ? await getUnlockedKey()
+            : null;
+        return decryptThreadSummary(thread, { key });
     }
 
     async function ensureThread(threadId) {
@@ -376,23 +484,47 @@
         return createThread({ threadId, title: 'New chat', titleIsDefault: true });
     }
 
-    async function decryptThreadSummary(thread) {
-        const key = await requireUnlockedKey();
-        const title = await decryptString(key, thread.titleEnc);
-        const lastPreview = thread.lastPreviewEnc ? await decryptString(key, thread.lastPreviewEnc) : '';
+    async function decryptThreadSummary(thread, { key = null } = {}) {
+        const protectedThread = inferThreadProtected(thread);
+        if (protectedThread && !key) {
+            return {
+                chatId: thread.threadId,
+                title: 'Locked chat',
+                createdAt: thread.createdAt,
+                updatedAt: thread.updatedAt,
+                messageCount: thread.messageCount || 0,
+                lastPreview: '',
+                isProtected: true,
+                locked: true
+            };
+        }
+
+        const title = protectedThread
+            ? await decryptString(key, thread.titleEnc)
+            : normalizeTitle(thread.title) || 'New chat';
+
+        const lastPreview = protectedThread
+            ? (thread.lastPreviewEnc ? await decryptString(key, thread.lastPreviewEnc) : '')
+            : (thread.lastPreview ? String(thread.lastPreview || '') : '');
+
         return {
             chatId: thread.threadId,
             title: title || 'New chat',
             createdAt: thread.createdAt,
             updatedAt: thread.updatedAt,
             messageCount: thread.messageCount || 0,
-            lastPreview
+            lastPreview: lastPreview || '',
+            isProtected: protectedThread,
+            locked: false
         };
     }
 
     async function listThreads({ limit = 100, cursorUpdatedAt = null } = {}) {
         const db = await openDb();
-        await requireUnlockedKey();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        await requireHistoryEnabled(db, { encryptionConfigured });
+        const key = encryptionConfigured ? await getUnlockedKey() : null;
         const results = [];
 
         const range = cursorUpdatedAt
@@ -426,31 +558,42 @@
 
         const decrypted = [];
         for (const thread of results) {
-            decrypted.push(await decryptThreadSummary(thread));
+            decrypted.push(await decryptThreadSummary(thread, { key }));
         }
         return { threads: decrypted, nextCursorUpdatedAt: nextCursor };
     }
 
     async function renameThread(threadId, title) {
         const db = await openDb();
-        const key = await requireUnlockedKey();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        const security = await requireHistoryEnabled(db, { encryptionConfigured });
         const thread = await ensureThread(threadId);
+        const protectedThread = inferThreadProtected(thread);
         const normalized = normalizeTitle(title);
         if (!normalized) {
             const err = new Error('Title is empty.');
             err.code = 'TITLE_EMPTY';
             throw err;
         }
-        thread.titleEnc = await encryptString(key, normalized);
+        if (protectedThread) {
+            const key = await requireUnlockedKey();
+            thread.titleEnc = await encryptString(key, normalized);
+        } else {
+            thread.title = normalized;
+        }
         thread.titleIsDefault = false;
-        thread.updatedAt = Math.max(Number.isFinite(thread.updatedAt) ? thread.updatedAt : 0, createdAt);
+        thread.updatedAt = Math.max(Number.isFinite(thread.updatedAt) ? thread.updatedAt : 0, nowMs());
         await upsertThread(thread);
-        return decryptThreadSummary(thread);
+        const key = protectedThread ? await getUnlockedKey() : null;
+        return decryptThreadSummary(thread, { key });
     }
 
     async function deleteThread(threadId) {
         const db = await openDb();
-        await requireUnlockedKey();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        await requireHistoryEnabled(db, { encryptionConfigured });
         await new Promise((resolve, reject) => {
             const tx = db.transaction([STORE_THREADS, STORE_MESSAGES], 'readwrite');
             const threadsStore = tx.objectStore(STORE_THREADS);
@@ -478,8 +621,15 @@
 
     async function appendMessage(threadId, message) {
         const db = await openDb();
-        const key = await requireUnlockedKey();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        const security = await requireHistoryEnabled(db, { encryptionConfigured });
         const thread = await ensureThread(threadId);
+        const protectedThread = inferThreadProtected(thread);
+
+        const key = protectedThread
+            ? await requireUnlockedKey()
+            : null;
 
         const role = String(message?.role || 'assistant');
         const provider = message?.provider ? String(message.provider) : null;
@@ -488,6 +638,8 @@
         const payload = {
             content: String(message?.content || ''),
             contentHtml: typeof message?.contentHtml === 'string' ? message.contentHtml : undefined,
+            agentId: typeof message?.agentId === 'string' ? message.agentId : undefined,
+            agentLabel: typeof message?.agentLabel === 'string' ? message.agentLabel : undefined,
             sessionId: message?.sessionId || undefined,
             turnIndex: Number.isFinite(message?.turnIndex) ? message.turnIndex : undefined,
             roundIndex: Number.isFinite(message?.roundIndex) ? message.roundIndex : undefined,
@@ -504,7 +656,7 @@
 
         const sequence = Number.isFinite(thread.nextSequence) ? thread.nextSequence : (thread.messageCount || 0) + 1;
         const messageId = generateMessageId();
-        const payloadEnc = await encryptJson(key, payload);
+        const payloadEnc = protectedThread ? await encryptJson(key, payload) : null;
 
         const record = {
             messageId,
@@ -513,16 +665,21 @@
             createdAt,
             role,
             provider,
-            payloadEnc
+            payloadEnc,
+            payload: protectedThread ? null : payload
         };
 
         const preview = makePreview(payload.content);
-        const previewEnc = preview ? await encryptString(key, preview) : null;
+        const previewEnc = protectedThread && preview ? await encryptString(key, preview) : null;
 
         if (thread.titleIsDefault && role === 'user') {
             const titleCandidate = makePreview(payload.content, 48);
             if (titleCandidate) {
-                thread.titleEnc = await encryptString(key, titleCandidate);
+                if (protectedThread) {
+                    thread.titleEnc = await encryptString(key, titleCandidate);
+                } else {
+                    thread.title = titleCandidate;
+                }
                 thread.titleIsDefault = false;
             }
         }
@@ -530,7 +687,14 @@
         thread.updatedAt = nowMs();
         thread.messageCount = (thread.messageCount || 0) + 1;
         thread.nextSequence = sequence + 1;
-        if (previewEnc) thread.lastPreviewEnc = previewEnc;
+        thread.protected = protectedThread;
+        if (protectedThread) {
+            if (previewEnc) thread.lastPreviewEnc = previewEnc;
+            thread.lastPreview = null;
+        } else {
+            if (preview) thread.lastPreview = preview;
+            thread.lastPreviewEnc = null;
+        }
 
         await new Promise((resolve, reject) => {
             const tx = db.transaction([STORE_THREADS, STORE_MESSAGES], 'readwrite');
@@ -554,7 +718,19 @@
 
     async function listMessages(threadId, { limit = 50, beforeSequence = null } = {}) {
         const db = await openDb();
-        const key = await requireUnlockedKey();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        const security = await requireHistoryEnabled(db, { encryptionConfigured });
+        const thread = await getThreadRecord(threadId);
+        if (!thread) {
+            const err = new Error('Chat not found.');
+            err.code = 'CHAT_NOT_FOUND';
+            throw err;
+        }
+        const protectedThread = inferThreadProtected(thread);
+        const key = protectedThread
+            ? await requireUnlockedKey()
+            : null;
         const safeLimit = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 50;
         if (safeLimit === 0) {
             return { messages: [], nextCursorSequence: null, hasMore: false };
@@ -597,7 +773,9 @@
 
         const decoded = [];
         for (const record of messages) {
-            const payload = await decryptJson(key, record.payloadEnc) || {};
+            const payload = protectedThread
+                ? (await decryptJson(key, record.payloadEnc) || {})
+                : (record.payload && typeof record.payload === 'object' ? record.payload : {});
             decoded.push({
                 messageId: record.messageId,
                 chatId: record.threadId,
@@ -606,6 +784,8 @@
                 provider: record.provider,
                 content: payload.content || '',
                 contentHtml: payload.contentHtml,
+                agentId: payload.agentId,
+                agentLabel: payload.agentLabel,
                 timestamp: record.createdAt,
                 sessionId: payload.sessionId,
                 turnIndex: payload.turnIndex,
@@ -621,15 +801,302 @@
     }
 
     async function getThreadWithMessages(threadId, { limit = 50, beforeSequence = null } = {}) {
+        const db = await openDb();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        const security = await requireHistoryEnabled(db, { encryptionConfigured });
+
         const thread = await getThreadRecord(threadId);
         if (!thread) {
             const err = new Error('Chat not found.');
             err.code = 'CHAT_NOT_FOUND';
             throw err;
         }
-        const summary = await decryptThreadSummary(thread);
+        const protectedThread = inferThreadProtected(thread);
+        const key = protectedThread
+            ? await requireUnlockedKey()
+            : null;
+        const summary = await decryptThreadSummary(thread, { key });
         const page = await listMessages(threadId, { limit, beforeSequence });
         return { thread: summary, page };
+    }
+
+    async function setHistoryEnabled() {
+        const db = await openDb();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        await updateSecuritySettings(db, { historyEnabled: true }, { encryptionConfigured });
+        return getStatus();
+    }
+
+    async function setLockNewChatsByDefault(enabled) {
+        const db = await openDb();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        await updateSecuritySettings(db, { lockNewChatsByDefault: Boolean(enabled) }, { encryptionConfigured });
+        return getStatus();
+    }
+
+    async function loadAllThreadsRaw(db) {
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction([STORE_THREADS], 'readonly');
+            const store = tx.objectStore(STORE_THREADS);
+            const threads = [];
+            const request = store.openCursor();
+            request.onerror = () => reject(request.error || new Error('Failed to load threads'));
+            request.onsuccess = () => {
+                const cursor = request.result;
+                if (!cursor) {
+                    resolve(threads);
+                    return;
+                }
+                threads.push(cursor.value);
+                cursor.continue();
+            };
+        });
+    }
+
+    async function loadAllMessagesForThreadRaw(db, threadId) {
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction([STORE_MESSAGES], 'readonly');
+            const store = tx.objectStore(STORE_MESSAGES);
+            const index = store.index('threadId');
+            const range = IDBKeyRange.only(threadId);
+            const messages = [];
+            const request = index.openCursor(range);
+            request.onerror = () => reject(request.error || new Error('Failed to load messages'));
+            request.onsuccess = () => {
+                const cursor = request.result;
+                if (!cursor) {
+                    resolve(messages);
+                    return;
+                }
+                messages.push(cursor.value);
+                cursor.continue();
+            };
+        });
+    }
+
+    async function protectThreadRecords(db, thread, key) {
+        const threadId = thread?.threadId;
+        if (!threadId) {
+            const err = new Error('Chat not found.');
+            err.code = 'CHAT_NOT_FOUND';
+            throw err;
+        }
+        if (inferThreadProtected(thread)) return;
+
+        const normalizedTitle = normalizeTitle(thread.title) || 'New chat';
+        const preview = thread.lastPreview ? String(thread.lastPreview || '') : '';
+
+        const updatedThread = {
+            ...thread,
+            protected: true,
+            title: null,
+            lastPreview: null,
+            titleEnc: await encryptString(key, normalizedTitle),
+            lastPreviewEnc: preview ? await encryptString(key, preview) : null
+        };
+
+        const messages = await loadAllMessagesForThreadRaw(db, threadId);
+        const updatedMessages = [];
+        for (const record of messages) {
+            if (!record || typeof record !== 'object') continue;
+            if (record.payloadEnc) {
+                if (record.payload) updatedMessages.push({ ...record, payload: null });
+                continue;
+            }
+            const payload = record.payload && typeof record.payload === 'object' ? record.payload : null;
+            if (!payload) continue;
+            const payloadEnc = await encryptJson(key, payload);
+            updatedMessages.push({ ...record, payload: null, payloadEnc });
+        }
+
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction([STORE_THREADS, STORE_MESSAGES], 'readwrite');
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error || new Error('Failed to protect chat'));
+            tx.objectStore(STORE_THREADS).put(updatedThread);
+            const store = tx.objectStore(STORE_MESSAGES);
+            updatedMessages.forEach((record) => store.put(record));
+        });
+    }
+
+    async function unprotectThreadRecords(db, thread, key) {
+        const threadId = thread?.threadId;
+        if (!threadId) {
+            const err = new Error('Chat not found.');
+            err.code = 'CHAT_NOT_FOUND';
+            throw err;
+        }
+        if (!inferThreadProtected(thread)) return;
+
+        const title = await decryptString(key, thread.titleEnc);
+        const preview = thread.lastPreviewEnc ? await decryptString(key, thread.lastPreviewEnc) : '';
+
+        const updatedThread = {
+            ...thread,
+            protected: false,
+            title: normalizeTitle(title) || 'New chat',
+            lastPreview: preview ? String(preview || '') : '',
+            titleEnc: null,
+            lastPreviewEnc: null
+        };
+
+        const messages = await loadAllMessagesForThreadRaw(db, threadId);
+        const updatedMessages = [];
+        for (const record of messages) {
+            if (!record || typeof record !== 'object') continue;
+            if (!record.payloadEnc) continue;
+            const payload = await decryptJson(key, record.payloadEnc) || {};
+            updatedMessages.push({ ...record, payloadEnc: null, payload });
+        }
+
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction([STORE_THREADS, STORE_MESSAGES], 'readwrite');
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error || new Error('Failed to unprotect chat'));
+            tx.objectStore(STORE_THREADS).put(updatedThread);
+            const store = tx.objectStore(STORE_MESSAGES);
+            updatedMessages.forEach((record) => store.put(record));
+        });
+    }
+
+    async function protectThread(threadId) {
+        const db = await openDb();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        if (!encryptionConfigured) {
+            const err = new Error('Encryption is not configured.');
+            err.code = 'ENCRYPTION_NOT_CONFIGURED';
+            throw err;
+        }
+        await requireHistoryEnabled(db, { encryptionConfigured });
+        const key = await requireUnlockedKey();
+        const thread = await getThreadRecord(threadId);
+        if (!thread) {
+            const err = new Error('Chat not found.');
+            err.code = 'CHAT_NOT_FOUND';
+            throw err;
+        }
+        await protectThreadRecords(db, thread, key);
+        return getThreadSummary(threadId);
+    }
+
+    async function unprotectThread(threadId) {
+        const db = await openDb();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        if (!encryptionConfigured) {
+            const err = new Error('Encryption is not configured.');
+            err.code = 'ENCRYPTION_NOT_CONFIGURED';
+            throw err;
+        }
+        await requireHistoryEnabled(db, { encryptionConfigured });
+        const key = await requireUnlockedKey();
+        const thread = await getThreadRecord(threadId);
+        if (!thread) {
+            const err = new Error('Chat not found.');
+            err.code = 'CHAT_NOT_FOUND';
+            throw err;
+        }
+        await unprotectThreadRecords(db, thread, key);
+        return getThreadSummary(threadId);
+    }
+
+    async function setProtectionMode(mode) {
+        const db = await openDb();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        if (!encryptionConfigured) {
+            const err = new Error('Encryption is not configured.');
+            err.code = 'ENCRYPTION_NOT_CONFIGURED';
+            throw err;
+        }
+        await requireHistoryEnabled(db, { encryptionConfigured });
+        const nextMode = normalizeProtectionMode(mode, { encryptionConfigured });
+        await updateSecuritySettings(db, { historyEnabled: true, protectionMode: nextMode }, { encryptionConfigured });
+        return getStatus();
+    }
+
+    async function disableProtection(passphrase) {
+        const db = await openDb();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        if (!encryptionConfigured) {
+            const err = new Error('Encryption is not configured.');
+            err.code = 'ENCRYPTION_NOT_CONFIGURED';
+            throw err;
+        }
+        await requireHistoryEnabled(db, { encryptionConfigured });
+
+        const status = await getStatus();
+        if (!status.unlocked) {
+            await unlock(passphrase);
+        }
+        const key = await requireUnlockedKey();
+
+        const threads = await loadAllThreadsRaw(db);
+        for (const thread of threads) {
+            if (!thread) continue;
+            if (!inferThreadProtected(thread)) continue;
+            await unprotectThreadRecords(db, thread, key);
+        }
+
+        await deleteSetting(db, 'crypto');
+        await updateSecuritySettings(db, { protectionMode: 'off' }, { encryptionConfigured: false });
+        await clearSessionKey();
+        return getStatus();
+    }
+
+    async function resetProtection() {
+        const db = await openDb();
+        const cryptoConfig = await getCryptoConfig(db);
+        const encryptionConfigured = Boolean(cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck);
+        const security = await getSecuritySettings(db, { encryptionConfigured });
+
+        if (!encryptionConfigured) {
+            await updateSecuritySettings(db, { protectionMode: 'off' }, { encryptionConfigured: false });
+            await clearSessionKey();
+            return getStatus();
+        }
+
+        const threads = await loadAllThreadsRaw(db);
+        const protectedIds = threads
+            .filter((thread) => thread && inferThreadProtected(thread))
+            .map((thread) => thread.threadId)
+            .filter(Boolean);
+
+        if (protectedIds.length > 0) {
+            await new Promise((resolve, reject) => {
+                const tx = db.transaction([STORE_THREADS, STORE_MESSAGES], 'readwrite');
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error || new Error('Failed to reset protection'));
+                const threadsStore = tx.objectStore(STORE_THREADS);
+                const messagesStore = tx.objectStore(STORE_MESSAGES);
+                const index = messagesStore.index('threadId');
+
+                protectedIds.forEach((threadId) => {
+                    threadsStore.delete(threadId);
+                    const range = IDBKeyRange.only(threadId);
+                    index.openCursor(range).onsuccess = (event) => {
+                        const cursor = event.target.result;
+                        if (!cursor) return;
+                        cursor.delete();
+                        cursor.continue();
+                    };
+                });
+            });
+        }
+
+        await deleteSetting(db, 'crypto');
+        await updateSecuritySettings(
+            db,
+            { historyEnabled: true, protectionMode: 'off' },
+            { encryptionConfigured: false }
+        );
+        await clearSessionKey();
+        return getStatus();
     }
 
     async function resetAllData() {
@@ -680,9 +1147,14 @@
     self.mlcHistoryStore = {
         openDb,
         getStatus,
+        setHistoryEnabled,
+        setProtectionMode,
+        setLockNewChatsByDefault,
         configureEncryption,
         unlock,
         lock,
+        resetProtection,
+        disableProtection,
         resetAllData,
         listThreads,
         getThreadSummary,
@@ -690,6 +1162,8 @@
         createThread,
         renameThread,
         deleteThread,
+        protectThread,
+        unprotectThread,
         appendMessage,
         listMessages,
         setActiveThreadId,

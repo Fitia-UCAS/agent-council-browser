@@ -4,6 +4,9 @@ bootstrap.js
 bootstrap.json
 bootstrap.jsonp
 build/
+.dist/
+.variant-icons/
+variant-icons/
 classic.json
 classic.jsonp
 ext/

@@ -18,6 +18,9 @@
                 <button class="icon-button" id="new-chat-button" type="button" aria-label="New chat" title="New chat">
                     <span class="material-symbols-rounded">add</span>
                 </button>
+                <button class="icon-button" id="chat-lock-button" type="button" aria-label="Protect chat" title="Protect chat" hidden>
+                    <span class="material-symbols-rounded" id="chat-lock-icon">lock_open</span>
+                </button>
                 <div class="topbar-title">Multi-LLM</div>
             </div>
             <div class="topbar-right">
@@ -172,18 +175,45 @@
                 </details>
             </section>
 
-            <section class="drawer-section">
+            <section class="drawer-section security-section">
                 <div class="drawer-section-title">Security</div>
-                <div class="prompt-note">
-                    Chat history is optional. If you enable encrypted history, you'll be asked for your passphrase whenever history is locked.
+                <div class="security-overview">
+                    <div class="security-overview-head">
+                        <div class="security-overview-title">Passphrase protection</div>
+                        <div class="security-badge is-off" id="history-badge">Not set</div>
+                    </div>
+                    <div class="prompt-note security-overview-text" id="history-overview-text">
+                        History is always saved on this device. Add a passphrase to protect specific chats.
+                    </div>
                 </div>
-                <div class="settings-actions">
-                    <button class="ghost-button" id="history-configure" type="button">Enable encryption</button>
-                    <button class="ghost-button" id="history-unlock" type="button">Unlock</button>
-                    <button class="ghost-button" id="history-lock" type="button">Lock</button>
-                    <button class="ghost-button" id="history-reset" type="button">Reset history</button>
+                <div class="settings-actions security-primary-actions" id="history-primary-actions">
+                    <button class="ghost-button" id="history-configure" type="button">Set passphrase…</button>
+                    <button class="ghost-button" id="history-unlock" type="button">Unlock protected chats</button>
+                    <button class="ghost-button" id="history-lock" type="button">Lock protected chats</button>
                 </div>
-                <div class="prompt-status" id="history-status">History: checking…</div>
+                <label class="inline-toggle security-mode-toggle" id="history-lock-new-row">
+                    <input type="checkbox" id="history-lock-new">
+                    <span>Require passphrase for new chats</span>
+                </label>
+                <div class="field-help security-help" id="history-lock-new-help">
+                    When this is off, new chats are readable without a passphrase. Previously protected chats stay locked until you unlock.
+                </div>
+                <details class="drawer-details" id="history-advanced" hidden>
+                    <summary class="drawer-details-summary">
+                        <span>Danger zone</span>
+                        <span class="material-symbols-rounded">expand_more</span>
+                    </summary>
+                    <div class="drawer-details-body security-danger-body">
+                        <div class="field-help security-help">
+                            These actions are irreversible. Use only if you want to permanently remove protected data.
+                        </div>
+                        <div class="settings-actions security-danger-actions">
+                            <button class="ghost-button danger" id="history-reset-protection" type="button">Forget passphrase (delete protected chats)…</button>
+                            <button class="ghost-button danger" id="history-clear-all" type="button">Delete all chats on this device…</button>
+                        </div>
+                    </div>
+                </details>
+                <div class="prompt-status" id="history-status" aria-live="polite">Passphrase: checking…</div>
             </section>
 
             <section class="drawer-section">
@@ -263,7 +293,7 @@
                 <span class="field-label">Confirm</span>
                 <input id="passphrase-confirm" type="password" autocomplete="new-password" placeholder="Confirm passphrase">
             </label>
-            <div class="prompt-status is-error" id="passphrase-error" hidden></div>
+            <div class="prompt-status is-error" id="passphrase-error" aria-live="assertive" hidden></div>
         </div>
         <div class="modal-actions">
             <button class="ghost-button" id="passphrase-cancel" type="button">Cancel</button>

@@ -131,17 +131,6 @@ async function getHistoryStatus() {
 
 async function requireHistoryUnlocked() {
     const store = await ensureHistoryStoreReady();
-    const status = await store.getStatus();
-    if (!status.configured) {
-        const err = new Error('History encryption is not configured.');
-        err.code = 'HISTORY_NOT_CONFIGURED';
-        throw err;
-    }
-    if (!status.unlocked) {
-        const err = new Error('History is locked.');
-        err.code = 'HISTORY_LOCKED';
-        throw err;
-    }
     return store;
 }
 
@@ -154,6 +143,12 @@ async function ensureLegacyChatsMigrated(store) {
 
     historyMigrationPromise = (async () => {
         try {
+            const status = await store.getStatus().catch(() => null);
+            if (status?.configured && status?.lockNewChatsByDefault && !status?.unlocked) {
+                // New threads would be protected and require unlock; wait until unlock before migration.
+                return;
+            }
+
             const version = await store.getMeta('migrationVersion');
             if (Number(version) >= 1) {
                 historyMigrationChecked = true;
@@ -175,6 +170,8 @@ async function ensureLegacyChatsMigrated(store) {
 
             let importedChats = 0;
             let importedMessages = 0;
+
+            let lockedFailure = false;
 
             for (const legacyChat of chats) {
                 const chatId = typeof legacyChat?.chatId === 'string' && legacyChat.chatId
@@ -200,6 +197,10 @@ async function ensureLegacyChatsMigrated(store) {
                     });
                     importedChats += 1;
                 } catch (error) {
+                    if (error?.code === 'HISTORY_LOCKED') {
+                        lockedFailure = true;
+                        break;
+                    }
                     console.warn('[MLC History] Failed to create thread during migration:', error);
                     continue;
                 }
@@ -223,9 +224,18 @@ async function ensureLegacyChatsMigrated(store) {
                         });
                         importedMessages += 1;
                     } catch (error) {
+                        if (error?.code === 'HISTORY_LOCKED') {
+                            lockedFailure = true;
+                            break;
+                        }
                         console.warn('[MLC History] Failed to migrate message:', error);
                     }
                 }
+                if (lockedFailure) break;
+            }
+
+            if (lockedFailure) {
+                return;
             }
 
             const currentActive = await store.getActiveThreadId();
@@ -238,6 +248,7 @@ async function ensureLegacyChatsMigrated(store) {
 
             await store.setMeta('migrationVersion', 1);
             historyMigrationChecked = true;
+            await new Promise((resolve) => chrome.storage.local.remove(CHATS_KEY, resolve));
             console.log('[MLC History] Migration complete.', { importedChats, importedMessages });
         } catch (error) {
             console.error('[MLC History] Migration failed:', error);
@@ -504,10 +515,56 @@ function normalizeSessionState(session) {
     return normalized;
 }
 
+function redactSessionForStorage(session) {
+    if (!session || typeof session !== 'object') return session;
+    return {
+        ...session,
+        userQuery: '',
+        conversationContext: '',
+        messages: []
+    };
+}
+
+function mapHistoryMessageToSessionMessage(message) {
+    if (!message || typeof message !== 'object') return null;
+    const content = typeof message.content === 'string' ? message.content : '';
+    const trimmed = content.trim();
+    if (!trimmed) return null;
+    const out = {
+        role: message.role,
+        content: content,
+        timestamp: Number.isFinite(message.timestamp) ? message.timestamp : Date.now()
+    };
+    if (typeof message.contentHtml === 'string' && message.contentHtml.trim()) {
+        out.contentHtml = message.contentHtml;
+    }
+    if (typeof message.agentId === 'string' && message.agentId.trim()) {
+        out.agentId = message.agentId.trim();
+    }
+    if (typeof message.agentLabel === 'string' && message.agentLabel.trim()) {
+        out.agentLabel = message.agentLabel.trim();
+    }
+    if (Number.isFinite(message.turnIndex)) out.turnIndex = message.turnIndex;
+    if (Number.isFinite(message.roundIndex)) out.roundIndex = message.roundIndex;
+    return out;
+}
+
 async function persistSessionsState() {
+    let historyStatus = null;
+    try {
+        historyStatus = await getHistoryStatus();
+    } catch {
+        historyStatus = null;
+    }
+    const shouldRedact = Boolean(historyStatus?.historyEnabled);
+
     const payload = {};
     for (const [sessionId, session] of sessionsById.entries()) {
-        payload[sessionId] = session;
+        const canRedactSession = shouldRedact
+            && session?.chatId
+            && Number.isFinite(session?.userMessageSequence)
+            && session.userMessageSequence > 0;
+        payload[sessionId] = canRedactSession ? redactSessionForStorage(session) : session;
     }
     await chrome.storage.local.set({ [SESSIONS_KEY]: payload });
 }
@@ -543,6 +600,48 @@ async function loadSessionsState() {
 
         sessionsLoaded = true;
         sessionsLoadPromise = null;
+
+        try {
+            const store = await ensureHistoryStoreReady();
+            const historyStatus = await store.getStatus();
+            if (historyStatus?.historyEnabled) {
+                for (const session of sessionsById.values()) {
+                    if (!session || !session.chatId || !session.sessionId) continue;
+                    const needsHydrate = !Array.isArray(session.messages) || session.messages.length === 0 || !String(session.userQuery || '').trim();
+                    if (!needsHydrate) continue;
+                    try {
+                        const page = await store.listMessages(session.chatId, { limit: 240 });
+                        const messages = Array.isArray(page?.messages) ? page.messages : [];
+                        const sessionMessages = messages.filter((msg) => msg?.sessionId === session.sessionId);
+                        if (sessionMessages.length > 0) {
+                            const mapped = sessionMessages.map(mapHistoryMessageToSessionMessage).filter(Boolean);
+                            if (mapped.length > 0) {
+                                session.messages = mapped;
+                            }
+                            const userMsg = sessionMessages.find((msg) => msg?.role === 'user' && typeof msg?.content === 'string' && msg.content.trim());
+                            if (userMsg) {
+                                session.userQuery = userMsg.content;
+                                if (!Number.isFinite(session.userMessageSequence) && Number.isFinite(userMsg.sequence)) {
+                                    session.userMessageSequence = userMsg.sequence;
+                                }
+                            }
+                        }
+                        if (session.isFollowUp && Number.isFinite(session.userMessageSequence)) {
+                            try {
+                                const prior = await store.listMessages(session.chatId, { limit: 12, beforeSequence: session.userMessageSequence });
+                                session.conversationContext = buildConversationContext(prior?.messages, { maxChars: 4000, maxMessages: 10 });
+                            } catch {
+                                // ignore
+                            }
+                        }
+                    } catch (error) {
+                        // ignore hydration failures (locked chat, DB errors, etc.)
+                    }
+                }
+            }
+        } catch {
+            // ignore history hydration failures
+        }
 
         if (legacy) {
             await chrome.storage.local.remove(ACTIVE_SESSION_KEY);
@@ -1917,11 +2016,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
             return true;
         case 'HISTORY_CONFIGURE':
-            ensureHistoryStoreReady().then((store) => store.configureEncryption(message.passphrase)).then((status) => {
+            ensureHistoryStoreReady().then((store) => store.configureEncryption(message.passphrase, { mode: message.protectionMode })).then((status) => {
                 sendResponse({ ok: true, status });
                 notifyChatsState().catch(() => {});
             }).catch((error) => {
                 sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_CONFIGURE_FAILED' });
+            });
+            return true;
+        case 'HISTORY_SET_ENABLED':
+            ensureHistoryStoreReady().then((store) => store.setHistoryEnabled(Boolean(message.enabled))).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_SET_ENABLED_FAILED' });
+            });
+            return true;
+        case 'HISTORY_SET_PROTECTION_MODE':
+            ensureHistoryStoreReady().then((store) => store.setProtectionMode(message.protectionMode)).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_SET_PROTECTION_MODE_FAILED' });
+            });
+            return true;
+        case 'HISTORY_SET_LOCK_NEW_CHATS':
+            ensureHistoryStoreReady().then((store) => store.setLockNewChatsByDefault(Boolean(message.enabled))).then((status) => {
+                sendResponse({ ok: true, status });
+                notifyChatsState().catch(() => {});
+            }).catch((error) => {
+                sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_SET_LOCK_NEW_CHATS_FAILED' });
             });
             return true;
         case 'HISTORY_UNLOCK':
@@ -1939,6 +2062,70 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }).catch((error) => {
                 sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_LOCK_FAILED' });
             });
+            return true;
+        case 'HISTORY_RESET_PROTECTION':
+            ensureHistoryStoreReady()
+                .then((store) => store.resetProtection())
+                .then((status) => {
+                    deliveryStateCache.clear();
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_RESET_PROTECTION_FAILED' });
+                });
+            return true;
+        case 'HISTORY_DISABLE_PROTECTION':
+            ensureHistoryStoreReady()
+                .then((store) => store.disableProtection(message.passphrase))
+                .then((status) => {
+                    deliveryStateCache.clear();
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_DISABLE_PROTECTION_FAILED' });
+                });
+            return true;
+        case 'PROTECT_CHAT':
+            ensureHistoryStoreReady()
+                .then((store) => store.protectThread(message.chatId))
+                .then((chat) => {
+                    sendResponse({ ok: true, chat });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'PROTECT_CHAT_FAILED' });
+                });
+            return true;
+        case 'UNPROTECT_CHAT':
+            ensureHistoryStoreReady()
+                .then((store) => store.unprotectThread(message.chatId))
+                .then((chat) => {
+                    sendResponse({ ok: true, chat });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'UNPROTECT_CHAT_FAILED' });
+                });
+            return true;
+        case 'HISTORY_CLEAR_ALL':
+            ensureHistoryStoreReady()
+                .then((store) => store.resetAllData())
+                .then(() => new Promise((resolve) => chrome.storage.local.remove(CHATS_KEY, resolve)))
+                .then(() => {
+                    historyMigrationChecked = false;
+                    historyMigrationPromise = null;
+                    deliveryStateCache.clear();
+                })
+                .then(() => getHistoryStatus())
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({ ok: false, error: error.message, code: error.code || 'HISTORY_CLEAR_ALL_FAILED' });
+                });
             return true;
         case 'HISTORY_RESET':
             ensureHistoryStoreReady()
@@ -2298,6 +2485,18 @@ async function handleStartDebateSession(message) {
 	                await setActiveChat(chatId);
 	            }
 	        }
+
+        if (historyStore && chatId) {
+            const summary = await historyStore.getThreadSummary(chatId).catch(() => null);
+            if (summary?.locked) {
+                sendMessageToPopup({
+                    type: 'UI_SESSION_ERROR',
+                    chatId: chatId,
+                    error: 'History is locked. Unlock to continue.'
+                });
+                return;
+            }
+        }
 
         if (chatId) {
             const existingSession = await getSessionForChat(chatId);
@@ -3824,6 +4023,20 @@ async function resumeDebateSession(sessionId, chatId = null) {
         return { ok: false, error: 'No paused session to resume.' };
     }
 
+    if (session.chatId) {
+        try {
+            const store = await requireHistoryUnlocked();
+            const summary = await store.getThreadSummary(session.chatId).catch(() => null);
+            if (summary?.locked) {
+                return { ok: false, error: 'History is locked. Unlock to continue.', code: 'HISTORY_LOCKED' };
+            }
+        } catch (error) {
+            if (error?.code === 'HISTORY_DISABLED') {
+                return { ok: false, error: 'History is disabled.', code: 'HISTORY_DISABLED' };
+            }
+        }
+    }
+
     if (session.mode === 'parallel') {
         const participants = getSessionParticipants(session);
         const allAgentIds = participants.map((p) => p.agentId).filter(Boolean);
@@ -4088,6 +4301,22 @@ async function sendParallelTurn(session, { providers: providersOverride } = {}) 
     const sessionId = session.sessionId;
     if (!sessionId) return;
 
+    if (session.chatId) {
+        try {
+            const store = await requireHistoryUnlocked();
+            const summary = await store.getThreadSummary(session.chatId).catch(() => null);
+            if (summary?.locked) {
+                await pauseDebateSession(session.sessionId, 'History is locked. Unlock to continue.', null);
+                return;
+            }
+        } catch (error) {
+            if (error?.code === 'HISTORY_DISABLED') {
+                await pauseDebateSession(session.sessionId, 'History is disabled.', null);
+                return;
+            }
+        }
+    }
+
     const participants = getSessionParticipants(session);
     const allAgentIds = participants.map((p) => p.agentId).filter(Boolean);
     const waitingAgentIds = Array.isArray(session.waitingFor)
@@ -4226,6 +4455,33 @@ async function sendDebateTurn(session) {
     }
     const expectedProvider = normalizeProviderKey(expectedParticipant.provider);
     const expectedAgentId = expectedParticipant.agentId;
+
+    if (session.chatId) {
+        try {
+            const store = await requireHistoryUnlocked();
+            const summary = await store.getThreadSummary(session.chatId).catch(() => null);
+            if (summary?.locked) {
+                await pauseDebateSession(
+                    session.sessionId,
+                    'History is locked. Unlock to continue.',
+                    expectedProvider,
+                    { agentId: expectedAgentId, profileId: expectedParticipant.profileId || null }
+                );
+                return;
+            }
+        } catch (error) {
+            if (error?.code === 'HISTORY_DISABLED') {
+                await pauseDebateSession(
+                    session.sessionId,
+                    'History is disabled.',
+                    expectedProvider,
+                    { agentId: expectedAgentId, profileId: expectedParticipant.profileId || null }
+                );
+                return;
+            }
+        }
+    }
+
     const resolution = await resolveSessionTab(session, expectedParticipant);
     if (!resolution.ok) {
         await pauseDebateSession(

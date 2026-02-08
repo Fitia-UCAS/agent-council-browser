@@ -1,9 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Multi-LLM Coder",
+  "name": "Multi-LLM Coder [feat-e2ee-security]",
   "version": "0.1.0",
   "description": "Send prompts to multiple LLM providers (ChatGPT, Gemini, Claude, Grok) simultaneously and compare responses side-by-side",
-  
   "permissions": [
     "sidePanel",
     "scripting",
@@ -11,7 +10,6 @@
     "tabs",
     "debugger"
   ],
-  
   "host_permissions": [
     "https://gemini.google.com/*",
     "https://chat.openai.com/*",
@@ -20,38 +18,68 @@
     "https://grok.com/*",
     "https://*.grok.com/*"
   ],
-
   "content_scripts": [
     {
-      "matches": ["https://chat.openai.com/*", "https://chatgpt.com/*"],
-      "js": ["captureUtils.js", "contentScript.js"]
+      "matches": [
+        "https://chat.openai.com/*",
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "captureUtils.js",
+        "contentScript.js"
+      ]
     },
     {
-      "matches": ["https://gemini.google.com/*"],
-      "js": ["captureUtils.js", "contentScript.js"]
+      "matches": [
+        "https://gemini.google.com/*"
+      ],
+      "js": [
+        "captureUtils.js",
+        "contentScript.js"
+      ]
     },
     {
-      "matches": ["https://claude.ai/*"],
-      "js": ["captureUtils.js", "contentScript.js"]
+      "matches": [
+        "https://claude.ai/*"
+      ],
+      "js": [
+        "captureUtils.js",
+        "contentScript.js"
+      ]
     },
     {
-      "matches": ["https://grok.com/*", "https://*.grok.com/*"],
-      "js": ["captureUtils.js", "contentScript.js"]
+      "matches": [
+        "https://grok.com/*",
+        "https://*.grok.com/*"
+      ],
+      "js": [
+        "captureUtils.js",
+        "contentScript.js"
+      ]
     }
   ],
-  
   "background": {
     "service_worker": "background.js"
   },
-
   "side_panel": {
     "default_path": "sidepanel.html"
   },
-  
   "action": {
-    "default_title": "Click to open Multi-LLM Coder"
+    "default_title": "Click to open Multi-LLM Coder [feat-e2ee-security]",
+    "default_icon": {
+      "16": "variant-icons/variant-16.png",
+      "32": "variant-icons/variant-32.png",
+      "48": "variant-icons/variant-48.png",
+      "128": "variant-icons/variant-128.png"
+    }
   },
-  
   "author": "Multi-LLM Coder Team",
-  "homepage_url": "https://github.com/multi-llm-coder/extension"
+  "homepage_url": "https://github.com/multi-llm-coder/extension",
+  "icons": {
+    "16": "variant-icons/variant-16.png",
+    "32": "variant-icons/variant-32.png",
+    "48": "variant-icons/variant-48.png",
+    "128": "variant-icons/variant-128.png"
+  },
+  "version_name": "dev-feat-e2ee-security"
 }

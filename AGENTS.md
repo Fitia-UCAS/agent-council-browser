@@ -99,6 +99,18 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Attachments are delivered once per agent per session.
   - If a provider cannot be auto-attached, the extension sends **text-only** to that provider.
   - If any required provider needs manual upload, a small modal appears; clicking **OK** only acknowledges the notice (it does not start the run). The user uploads manually, then clicks **Send** again.
+- Chat history + passphrase protection (optional):
+  - History is **always on**; chats are always saved locally on-device.
+  - History can be saved **without a passphrase** (plaintext at rest) or protected with a **passphrase** (encrypted at rest).
+  - Passphrase protection behavior:
+    - when passphrase is set, **new chats are protected by default**.
+    - a settings toggle controls whether **new chats** require passphrase; turning it off keeps existing protected chats encrypted.
+    - when passphrase is turned off for new chats, protected chats are locked again and remain inaccessible until unlock.
+    - chat-level protect/unprotect controls are intentionally hidden in the UI for simpler UX.
+  - Unlock keys live in `chrome.storage.session` only (cleared on browser restart or when manually locked).
+  - No inactivity auto-lock timer is applied; locking is explicit (`Lock protected chats`) or by browser/session reset.
+  - “Forgot passphrase” and “Delete all chats” are grouped under a **Danger zone** in Security settings.
+  - The background avoids persisting plaintext transcripts in `chrome.storage.local` (sessions can be hydrated from history after worker restart).
 
 ### Long‑running responses
 
@@ -119,6 +131,11 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Tracks tab lifecycle (onUpdated/onRemoved/onActivated/window focus) to update profile status.
   - Enforces profile locks during sessions and pauses if tabs drift.
   - Supports open/claim profile flows and focus tab actions.
+
+- `historyStore.js`
+  - IndexedDB chat store + settings (threads/messages).
+  - Optional passphrase encryption using WebCrypto (PBKDF2-SHA256 + AES-GCM); unlock key is stored in `chrome.storage.session`.
+  - Supports mixed-mode storage: unprotected chats stored plaintext; protected chats stored encrypted.
 
 - `debate_prompts.json`
   - User-editable prompt templates for Debate, Single (legacy), and Direct runs used by `buildDebatePrompt(...)` / `buildSinglePrompt(...)` / `buildDirectPrompt(...)`.
@@ -451,6 +468,26 @@ The side panel’s primary run control is the **Route Builder** (`To` pill). See
 - `START_RUN` (primary):
   - `{ prompt, chatId, rounds, route, mode, target, firstLLM?, attachments? }`
   - `route` shape (v2): `{ kind, rounds, agents: [{ id, provider, profileId }] }` (`profileId` can be `'default'` or an explicit profile id)
+- History + chats:
+  - `HISTORY_STATUS`
+  - `HISTORY_SET_ENABLED` `{ enabled }` (legacy; history remains on)
+  - `HISTORY_CONFIGURE` `{ passphrase, protectionMode: 'per_chat' }`
+  - `HISTORY_UNLOCK` `{ passphrase }`
+  - `HISTORY_LOCK`
+  - `HISTORY_SET_PROTECTION_MODE` `{ protectionMode: 'per_chat' }` (legacy-compatible; normalized to per-chat)
+  - `HISTORY_SET_LOCK_NEW_CHATS` `{ enabled }`
+  - `HISTORY_DISABLE_PROTECTION` `{ passphrase }`
+  - `HISTORY_RESET_PROTECTION`
+  - `HISTORY_CLEAR_ALL`
+  - `GET_CHATS_STATE`
+  - `CREATE_CHAT`
+  - `SET_ACTIVE_CHAT` `{ chatId }`
+  - `GET_CHAT` `{ chatId }`
+  - `GET_MESSAGES_PAGE` `{ chatId, beforeSequence?, limit? }`
+  - `PROTECT_CHAT` `{ chatId }`
+  - `UNPROTECT_CHAT` `{ chatId }`
+  - `RENAME_CHAT` `{ chatId, title }`
+  - `DELETE_CHAT` `{ chatId }`
 - `START_DEBATE_SESSION` (legacy; still accepted by background):
   - `{ prompt, firstLLM, rounds, profileIds: { chatgpt, gemini } }` (tabIds still accepted for backward compat)
 - `STOP_SESSION`:
@@ -497,6 +534,8 @@ Responses (for profile actions):
 - `UI_SESSION_ENDED` `{ sessionId, reason }`
 - `UI_SESSION_ERROR` `{ error }`
 - `TAB_PROFILES` `{ profiles, defaults }`
+- `HISTORY_STATUS` `{ status }`
+- `CHATS_STATE` `{ activeChatId, chats }`
 - `ACTIVE_SESSION` `{ session }`
 - `PROVIDER_MODEL_INFO` `{ provider, tabId, modelLabel }`
 - `LLM_RESPONSE` `{ llm, content }` (non‑session replies)
@@ -603,6 +642,29 @@ To add a third LLM provider safely:
 - MV3 service worker can be suspended; state persistence is critical.
 - Response capture relies on UI stability signals; adjust thresholds if models change rendering.
 - Model label detection is best‑effort only; never assumes a model was auto‑selected.
+
+## 12) Worktree extension variants (name/logo differentiation)
+
+When multiple branches/worktrees are loaded in Chrome at once, build and load a per-branch variant so each extension is visually distinct.
+
+- Script: `scripts/dev/build-extension-variant.sh`
+  - Copies the current workspace into `.dist/<branch-label>/`.
+  - Supports `--in-place` to rewrite the current workspace manifest/icons directly (useful when Chrome already points to that folder).
+  - Rewrites `.dist/<branch-label>/manifest.json` with:
+    - `name: "Multi-LLM Coder [<branch-label>]"`
+    - `action.default_title: "... [<branch-label>]"`
+    - `version_name: "dev-<branch-label>"`
+    - `icons` and `action.default_icon` set to generated branch-specific PNG icons (`variant-icons/variant-16.png`, `variant-icons/variant-32.png`, `variant-icons/variant-48.png`, `variant-icons/variant-128.png`)
+  - Excludes `.git`, `.dist`, `node_modules`, and `worktrees` from the build output.
+- NPM shortcut: `npm run build:variant`
+- In-place branding for current workspace: `npm run brand:in-place`
+- Branding across attached git worktrees: `npm run brand:all-worktrees`
+- Chrome usage:
+  - Open `chrome://extensions`
+  - If loading from `.dist`: use **Load unpacked** on each generated `.dist/<branch-label>` folder
+  - If loading from raw worktree folders: run `npm run brand:all-worktrees` first, then **Reload** each extension
+  - Click **Reload** if the extension is already loaded so new name/icon metadata is applied.
+  - Keep `"key"` unset in `manifest.json` so local unpacked variants can coexist.
 
 ---
 
