@@ -47,6 +47,8 @@ const state = {
     route: null,
     routeLoaded: false,
     lastFocusedProvider: null,
+    chatDefaultProfilesByChatId: {},
+    newTabOnlyChatIds: {},
     manualUploadAckKey: null,
     attachments: [],
     attachmentsLoading: false,
@@ -363,6 +365,100 @@ function ensureProviderMaps() {
     });
 }
 
+function ensureChatDefaultMap(chatId) {
+    const key = String(chatId || '').trim();
+    if (!key) return null;
+    if (!state.chatDefaultProfilesByChatId || typeof state.chatDefaultProfilesByChatId !== 'object') {
+        state.chatDefaultProfilesByChatId = {};
+    }
+    const current = state.chatDefaultProfilesByChatId[key] && typeof state.chatDefaultProfilesByChatId[key] === 'object'
+        ? state.chatDefaultProfilesByChatId[key]
+        : {};
+    const next = { ...current };
+    getSupportedProviders().forEach((provider) => {
+        if (!Object.prototype.hasOwnProperty.call(next, provider)) {
+            next[provider] = null;
+        }
+    });
+    state.chatDefaultProfilesByChatId[key] = next;
+    return next;
+}
+
+function isChatMarkedNewTabOnly(chatId) {
+    const key = String(chatId || '').trim();
+    if (!key) return false;
+    return Boolean(state.newTabOnlyChatIds && state.newTabOnlyChatIds[key]);
+}
+
+function isActiveChatNewTabOnly() {
+    const key = String(state.activeChatId || '').trim();
+    if (!key) return true;
+    return isChatMarkedNewTabOnly(key);
+}
+
+function markActiveChatAsNewTabOnly() {
+    const key = String(state.activeChatId || '').trim();
+    if (!key) return;
+    if (!state.newTabOnlyChatIds || typeof state.newTabOnlyChatIds !== 'object') {
+        state.newTabOnlyChatIds = {};
+    }
+    state.newTabOnlyChatIds[key] = true;
+    ensureChatDefaultMap(key);
+}
+
+function getChatDefaultProfileId(chatId, provider) {
+    const normalizedProvider = normalizeProviderId(provider);
+    const key = String(chatId || '').trim();
+    if (!normalizedProvider || !key) return null;
+    const selection = normalizeProfileSelection(state.chatDefaultProfilesByChatId?.[key]?.[normalizedProvider]);
+    if (!selection || selection === 'default') return null;
+    return selection;
+}
+
+function getEffectiveDefaultProfileId(provider) {
+    const normalizedProvider = normalizeProviderId(provider);
+    if (!normalizedProvider) return null;
+    if (isActiveChatNewTabOnly()) {
+        return getChatDefaultProfileId(state.activeChatId, normalizedProvider);
+    }
+    return state.defaults?.[normalizedProvider] || null;
+}
+
+function setActiveChatDefaultProfile(provider, profileId) {
+    if (!isActiveChatNewTabOnly()) return;
+    const normalizedProvider = normalizeProviderId(provider);
+    const key = String(state.activeChatId || '').trim();
+    if (!normalizedProvider || !key) return;
+    const map = ensureChatDefaultMap(key);
+    if (!map) return;
+    const selection = normalizeProfileSelection(profileId);
+    map[normalizedProvider] = selection && selection !== 'default' ? selection : null;
+}
+
+function getActiveChatScopedProfileIds() {
+    if (!isActiveChatNewTabOnly()) return [];
+    const key = String(state.activeChatId || '').trim();
+    if (!key) return [];
+    const map = ensureChatDefaultMap(key);
+    if (!map) return [];
+    return getSupportedProviders()
+        .map((provider) => normalizeProfileSelection(map[provider]))
+        .filter((profileId) => profileId && profileId !== 'default');
+}
+
+function syncActiveChatConnectionPolicy() {
+    const key = String(state.activeChatId || '').trim();
+    if (!key) return;
+    if (isChatMarkedNewTabOnly(key)) {
+        ensureChatDefaultMap(key);
+        return;
+    }
+    const messages = Array.isArray(state.activeChat?.messages) ? state.activeChat.messages : [];
+    if (messages.length === 0) {
+        markActiveChatAsNewTabOnly();
+    }
+}
+
 function resetSessionProfiles() {
     const next = {};
     getSupportedProviders().forEach((provider) => {
@@ -400,7 +496,7 @@ function resolveAgentProfileId(agent) {
     if (!provider) return null;
     const selection = normalizeProfileSelection(agent?.profileId);
     if (!selection) return null;
-    if (selection === 'default') return state.defaults?.[provider] || null;
+    if (selection === 'default') return getEffectiveDefaultProfileId(provider);
     return selection;
 }
 
@@ -514,7 +610,7 @@ function getRouteAgentConnectionInfo(agent) {
         statusTone = 'muted';
     } else {
         const knownConnected = selection === 'default'
-            ? Boolean(state.connectionStatus?.[provider])
+            ? isProviderReady(provider)
             : getKnownProfileConnection(resolvedProfileId);
         if (knownConnected === null) {
             statusText = 'Checking tab…';
@@ -596,8 +692,10 @@ function getRouteProfileIdsForConnection(route) {
     const requiredAgents = getRouteRequiredAgents(route);
     requiredAgents.forEach((agent) => {
         const selection = normalizeProfileSelection(agent?.profileId);
-        if (!selection || selection === 'default') return;
-        if (!ids.includes(selection)) ids.push(selection);
+        const resolvedProfileId = resolveAgentProfileId(agent);
+        if (!resolvedProfileId) return;
+        if (selection === 'default' && !isActiveChatNewTabOnly()) return;
+        if (!ids.includes(resolvedProfileId)) ids.push(resolvedProfileId);
     });
     return ids;
 }
@@ -732,7 +830,7 @@ function updateRouteConnectAllUi() {
         ? !isRouteConnected(route)
         : supported.some((provider) => {
             const profile = getDefaultProfile(provider);
-            const ready = Boolean(state.connectionStatus?.[provider]);
+            const ready = isProviderReady(provider);
             if (!profile) return true;
             if (profile.inUseBySessionId) return true;
             if (!Number.isFinite(profile.tabId)) return true;
@@ -864,7 +962,7 @@ function renderRouteProviderList(route) {
     const agentCounts = countRouteAgentsByProvider(route);
 	    supported.forEach((provider) => {
 	        const selectedCount = agentCounts[provider] || 0;
-	        const ready = Boolean(state.connectionStatus?.[provider]);
+	        const ready = isProviderReady(provider);
 	        const connecting = Boolean(state.connecting?.[provider]);
 	        const profile = getDefaultProfile(provider);
             const busy = Boolean(profile?.inUseBySessionId);
@@ -2355,8 +2453,11 @@ function getRouteRequiredAgents(route) {
 function isProfileConnected(provider, profileId) {
     const normalizedProvider = normalizeProviderId(provider);
     if (!normalizedProvider || !profileId) return false;
-    const defaultProfileId = state.defaults?.[normalizedProvider] || null;
+    const defaultProfileId = getEffectiveDefaultProfileId(normalizedProvider);
     if (defaultProfileId && profileId === defaultProfileId) {
+        if (isActiveChatNewTabOnly()) {
+            return Boolean(state.profileConnectionStatus?.[profileId]);
+        }
         return Boolean(state.connectionStatus?.[normalizedProvider]);
     }
     return Boolean(state.profileConnectionStatus?.[profileId]);
@@ -2367,6 +2468,18 @@ function getKnownProfileConnection(profileId) {
     if (!map || typeof map !== 'object') return null;
     if (!Object.prototype.hasOwnProperty.call(map, profileId)) return null;
     return Boolean(map[profileId]);
+}
+
+function isProviderReady(provider) {
+    const normalizedProvider = normalizeProviderId(provider);
+    if (!normalizedProvider) return false;
+    if (!isActiveChatNewTabOnly()) {
+        return Boolean(state.connectionStatus?.[normalizedProvider]);
+    }
+    const profileId = getEffectiveDefaultProfileId(normalizedProvider);
+    if (!profileId) return false;
+    const known = getKnownProfileConnection(profileId);
+    return known === true;
 }
 
 function isRouteConfigured(route) {
@@ -2581,9 +2694,11 @@ function requestProfiles() {
 
 function requestConnectionStatus(options = {}) {
     const payload = { type: 'CHECK_CONNECTION' };
-    const profileIds = Array.isArray(options?.profileIds)
+    const requestedProfileIds = Array.isArray(options?.profileIds)
         ? options.profileIds.map((id) => String(id || '').trim()).filter(Boolean)
         : [];
+    const scopedDefaults = getActiveChatScopedProfileIds();
+    const profileIds = [...requestedProfileIds, ...scopedDefaults];
     if (profileIds.length > 0) {
         payload.profileIds = [...new Set(profileIds)];
     }
@@ -2682,11 +2797,19 @@ function handleChatsState(payload) {
     const nextActiveId = typeof payload.activeChatId === 'string' ? payload.activeChatId : state.activeChatId;
     const shouldLoad = nextActiveId && (!state.activeChat || state.activeChat.chatId !== nextActiveId);
     state.activeChatId = nextActiveId;
+    if (shouldLoad && state.activeChatId) {
+        const summary = chats.find((chat) => chat?.chatId === state.activeChatId);
+        if (Number.isFinite(summary?.messageCount) && summary.messageCount === 0) {
+            markActiveChatAsNewTabOnly();
+            requestConnectionStatus();
+        }
+    }
     updateChatLockButton();
     renderChatList();
     if (shouldLoad) {
         loadChat(nextActiveId);
     } else if (state.activeChatId) {
+        syncActiveChatConnectionPolicy();
         syncActiveSessionState();
         requestActiveSession();
     }
@@ -2717,9 +2840,13 @@ function createNewChat() {
         }
         if (response.activeChatId) {
             state.activeChatId = response.activeChatId;
+            markActiveChatAsNewTabOnly();
+            requestConnectionStatus();
             loadChat(response.activeChatId);
         } else if (response.chat?.chatId) {
             state.activeChatId = response.chat.chatId;
+            markActiveChatAsNewTabOnly();
+            requestConnectionStatus();
             loadChat(response.chat.chatId);
         }
     });
@@ -2753,6 +2880,8 @@ function loadChat(chatId) {
         state.activeChatNextCursorSequence = Number.isFinite(response.chat?.nextCursorSequence)
             ? response.chat.nextCursorSequence
             : null;
+        syncActiveChatConnectionPolicy();
+        requestConnectionStatus();
         clearTranscript();
         if (Array.isArray(response.chat?.messages) && response.chat.messages.length) {
             response.chat.messages.forEach(addMessage);
@@ -2885,7 +3014,7 @@ function closeSettingsDrawer() {
 }
 
 function getDefaultProfile(provider) {
-    const profileId = state.defaults?.[provider] || null;
+    const profileId = getEffectiveDefaultProfileId(provider);
     return profileId ? getProfileById(profileId) : null;
 }
 
@@ -2945,6 +3074,9 @@ function connectProvider(provider) {
 	            handleActionResponse(response || { ok: false, error: 'Failed to connect.' });
 	            return;
 	        }
+            if (response.profile?.profileId) {
+                setActiveChatDefaultProfile(provider, response.profile.profileId);
+            }
 	        requestProfiles();
 	        scheduleRouteConnectionStatusCheck();
 	        window.setTimeout(scheduleRouteConnectionStatusCheck, 2500);
@@ -2984,20 +3116,24 @@ async function openNewTabAndBindAgent(provider, { targetAgentId = null } = {}) {
             throw new Error(opened?.error || 'Failed to open provider tab.');
         }
 
-        const hasDefault = Boolean(state.defaults?.[normalizedProvider]);
+        const hasStoredDefault = Boolean(state.defaults?.[normalizedProvider]);
+        const hasEffectiveDefault = Boolean(getEffectiveDefaultProfileId(normalizedProvider));
         const claimed = await sendMessageAsync({
             type: 'CLAIM_TAB_AS_PROFILE',
             provider: normalizedProvider,
             tabId: opened.tabId,
-            setDefault: !hasDefault
+            setDefault: !hasStoredDefault
         });
         if (!claimed || claimed.ok === false || !claimed.profile?.profileId) {
             throw new Error(claimed?.error || 'Failed to bind provider tab.');
         }
 
         upsertProfileInState(claimed.profile);
-        if (!hasDefault) {
+        if (!hasStoredDefault) {
             state.defaults[normalizedProvider] = claimed.profile.profileId;
+        }
+        if (!hasEffectiveDefault) {
+            setActiveChatDefaultProfile(normalizedProvider, claimed.profile.profileId);
         }
 
         const route = state.route || getDefaultRoute();
@@ -3006,7 +3142,7 @@ async function openNewTabAndBindAgent(provider, { targetAgentId = null } = {}) {
             agent?.provider === normalizedProvider
             && normalizeProfileSelection(agent?.profileId) === 'default'
         ));
-        const reservedForDefault = !hasDefault && hasDefaultAgent;
+        const reservedForDefault = !hasEffectiveDefault && hasDefaultAgent;
 
         if (reservedForDefault) {
             requestProfiles();
@@ -3116,7 +3252,7 @@ function connectAllProviders() {
     supported.forEach((provider) => {
         const shouldConnect = providersToConnect.has(provider);
         const profile = getDefaultProfile(provider);
-        const ready = Boolean(state.connectionStatus?.[provider]);
+        const ready = isProviderReady(provider);
         const needsReconnect = shouldConnect
             || !profile
             || profile.inUseBySessionId
@@ -3262,7 +3398,7 @@ function updateProviderUi() {
     let connectingCount = 0;
 
     providers.forEach((provider) => {
-        const ready = Boolean(state.connectionStatus?.[provider]);
+        const ready = isProviderReady(provider);
         const connecting = Boolean(state.connecting?.[provider]);
         const profile = getDefaultProfile(provider);
         const modelHint = profile?.modelHint ? ` • ${profile.modelHint}` : '';
@@ -3693,7 +3829,7 @@ function resumeSession() {
 function isFullyConnected() {
     const providers = getSupportedProviders();
     if (providers.length === 0) return false;
-    return providers.every((provider) => Boolean(state.connectionStatus?.[provider]));
+    return providers.every((provider) => isProviderReady(provider));
 }
 
 function handleBackgroundMessage(message) {

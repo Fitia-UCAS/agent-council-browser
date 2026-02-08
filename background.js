@@ -7020,25 +7020,21 @@ async function checkConnectionStatus({ profileIds = [] } = {}) {
         try {
             const defaultProfileId = profilesState.defaults?.[provider];
             const profile = defaultProfileId ? findProfileById(profilesState, defaultProfileId) : null;
-
-            let tab = null;
-            if (profile?.tabId) {
-                tab = { id: profile.tabId };
-            } else {
-                tab = await findLLMTab(provider);
-            }
-
-            console.log(`[MLC Background] ${formatLLMLabel(provider)} tab result:`, tab ? `Found tab ${tab.id}` : 'Not found');
-
-            if (!tab) {
-                console.log(`[MLC Background] No ${formatLLMLabel(provider)} tab found`);
+            if (!profile || !Number.isFinite(profile.tabId)) {
+                console.log(`[MLC Background] No default ${formatLLMLabel(provider)} profile/tab`);
                 status[provider] = false;
                 continue;
             }
 
-            const pingOk = await pingTab(tab.id, provider);
+            const validation = await validateTabForProvider(profile.tabId, provider);
+            if (!validation.ok) {
+                status[provider] = false;
+                continue;
+            }
+
+            const pingOk = await pingTab(profile.tabId, provider);
             status[provider] = pingOk;
-            console.log(`[MLC Background] ${formatLLMLabel(provider)} tab responsive:`, pingOk ? tab.id : 'No');
+            console.log(`[MLC Background] ${formatLLMLabel(provider)} default profile responsive:`, pingOk ? profile.tabId : 'No');
         } catch (error) {
             console.warn(`[MLC Background] Error checking ${formatLLMLabel(provider)} connection:`, error?.message || error);
             status[provider] = false;
