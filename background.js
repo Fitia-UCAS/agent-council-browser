@@ -18,21 +18,111 @@ try {
 // Extension installation
 chrome.runtime.onInstalled.addListener(() => {
     console.log('[MLC Background] Multi-LLM Coder extension installed/updated.');
-    if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
-        chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((error) => {
-            console.warn('[MLC Background] Failed to set side panel behavior:', error);
-        });
-    }
+    ensureManualActionClickBehavior('onInstalled');
     migratePreferredTabsToProfiles().catch((error) => {
         console.warn('[MLC Background] Failed to migrate preferred tabs:', error);
     });
 });
 
-if (chrome.action && chrome.sidePanel && chrome.sidePanel.open) {
+chrome.runtime.onStartup.addListener(() => {
+    ensureManualActionClickBehavior('onStartup');
+});
+
+async function openExtensionUiFallback(tab) {
+    const uiUrl = chrome.runtime.getURL('sidepanel.html');
+    const createOptions = { url: uiUrl };
+    if (Number.isInteger(tab?.windowId)) {
+        createOptions.windowId = tab.windowId;
+    }
+    return chrome.tabs.create(createOptions);
+}
+
+function isLikelyArcBrowser() {
+    try {
+        const ua = String(self?.navigator?.userAgent || '');
+        if (/\bArc\/\d+/i.test(ua)) return true;
+        const brands = self?.navigator?.userAgentData?.brands;
+        if (Array.isArray(brands) && brands.some((item) => /\barc\b/i.test(String(item?.brand || '')))) {
+            return true;
+        }
+        return false;
+    } catch (_) {
+        return false;
+    }
+}
+
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function hasOpenSidePanelContext(windowId) {
+    if (!chrome.runtime || typeof chrome.runtime.getContexts !== 'function') {
+        return null;
+    }
+    try {
+        const contexts = await chrome.runtime.getContexts({ contextTypes: ['SIDE_PANEL'] });
+        if (!Array.isArray(contexts) || contexts.length === 0) return false;
+        const uiUrl = chrome.runtime.getURL('sidepanel.html');
+        const matching = contexts.filter((ctx) => String(ctx?.documentUrl || '').startsWith(uiUrl));
+        if (matching.length === 0) return false;
+        if (!Number.isInteger(windowId)) return true;
+        return matching.some((ctx) => Number.isInteger(ctx?.windowId) && ctx.windowId === windowId);
+    } catch (error) {
+        console.warn('[MLC Background] Failed to query extension contexts:', error);
+        return null;
+    }
+}
+
+async function openExtensionUiFromAction(tab) {
+    const windowId = tab?.windowId;
+    const arc = isLikelyArcBrowser();
+    console.log('[MLC Background] Action click received.', {
+        windowId: Number.isInteger(windowId) ? windowId : null,
+        arc,
+        hasSidePanelApi: Boolean(chrome.sidePanel && chrome.sidePanel.open)
+    });
+
+    if (arc) {
+        console.log('[MLC Background] Arc detected; opening extension UI in a tab.');
+        await openExtensionUiFallback(tab);
+        return;
+    }
+
+    if (chrome.sidePanel && chrome.sidePanel.open) {
+        try {
+            await chrome.sidePanel.open(windowId ? { windowId } : {});
+            await delay(250);
+            const sidePanelReady = await hasOpenSidePanelContext(windowId);
+            if (sidePanelReady === false) {
+                console.warn('[MLC Background] Side panel context not detected after open; falling back to extension UI tab.');
+                await openExtensionUiFallback(tab);
+            }
+            return;
+        } catch (error) {
+            console.warn('[MLC Background] Failed to open side panel on action click; opening extension UI in a tab:', error);
+            await openExtensionUiFallback(tab);
+            return;
+        }
+    }
+
+    await openExtensionUiFallback(tab);
+}
+
+async function ensureManualActionClickBehavior(reason) {
+    if (!chrome.sidePanel || !chrome.sidePanel.setPanelBehavior) return;
+    try {
+        await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+    } catch (error) {
+        console.warn(`[MLC Background] Failed to disable auto side panel behavior (${reason}):`, error);
+    }
+}
+
+ensureManualActionClickBehavior('workerInit');
+
+if (chrome.action && chrome.action.onClicked) {
     chrome.action.onClicked.addListener((tab) => {
-        const windowId = tab?.windowId;
-        chrome.sidePanel.open(windowId ? { windowId } : {}).catch((error) => {
-            console.warn('[MLC Background] Failed to open side panel on action click:', error);
+        openExtensionUiFromAction(tab).catch((error) => {
+            console.warn('[MLC Background] Failed to open extension UI from action click:', error);
         });
     });
 }
