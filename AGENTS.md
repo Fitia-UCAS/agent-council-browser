@@ -20,6 +20,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
 ### Main user flow (runs)
 
 1. User connects providers (creates default tabs) via **Connect** / **Connect all** in the Route Builder provider list.
+   - If the current route has no agents, **Connect all** seeds the route with one `Default` agent per supported provider before connecting tabs.
 2. In the side panel composer, user selects a **Route** from the `To` pill:
    - Add one or more **agents** from the **Providers** list (`Add agent` / `New tab`).
    - The **Agents** list is order-only: drag to reorder and `×` to remove.
@@ -55,6 +56,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
 ### Quick connect (side panel)
 
 - The Route builder shows a per‑provider **Connect** button when a required provider is not ready, plus a **Connect all** button.
+- When no agents are selected, **Connect all** acts as a bootstrap action: it adds default agents and opens/reconnects provider tabs.
 - Provider rows also expose **New tab**, which opens a fresh provider tab, claims it into a new Tab Profile, and assigns it to an agent (useful for multiple agents on the same provider).
 - These send `CONNECT_PROVIDER` to the background, which:
   - opens the provider homepage tab, then
@@ -584,6 +586,29 @@ To add another provider safely:
 - MV3 service worker can be suspended; state persistence is critical.
 - Response capture relies on UI stability signals; adjust thresholds if models change rendering.
 - Model label detection is best‑effort only; never assumes a model was auto‑selected.
+
+## 12) Worktree extension variants (name/logo differentiation)
+
+When multiple branches/worktrees are loaded in Chrome at once, build and load a per-branch variant so each extension is visually distinct.
+
+- Script: `scripts/dev/build-extension-variant.sh`
+  - Copies the current workspace into `.dist/<branch-label>/`.
+  - Supports `--in-place` to rewrite the current workspace manifest/icons directly (useful when Chrome already points to that folder).
+  - Rewrites `.dist/<branch-label>/manifest.json` with:
+    - `name: "Multi-LLM Coder [<branch-label>]"`
+    - `action.default_title: "... [<branch-label>]"`
+    - `version_name: "dev-<branch-label>"`
+    - `icons` and `action.default_icon` set to generated branch-specific PNG icons (`variant-icons/variant-16.png`, `variant-icons/variant-32.png`, `variant-icons/variant-48.png`, `variant-icons/variant-128.png`)
+  - Excludes `.git`, `.dist`, `node_modules`, and `worktrees` from the build output.
+- NPM shortcut: `npm run build:variant`
+- In-place branding for current workspace: `npm run brand:in-place`
+- Branding across attached git worktrees: `npm run brand:all-worktrees`
+- Chrome usage:
+  - Open `chrome://extensions`
+  - If loading from `.dist`: use **Load unpacked** on each generated `.dist/<branch-label>` folder
+  - If loading from raw worktree folders: run `npm run brand:all-worktrees` first, then **Reload** each extension
+  - Click **Reload** if the extension is already loaded so new name/icon metadata is applied.
+  - Keep `"key"` unset in `manifest.json` so local unpacked variants can coexist.
 
 ---
 

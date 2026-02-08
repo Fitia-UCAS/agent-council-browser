@@ -625,6 +625,7 @@ function updateRouteConnectAllUi() {
     const supported = getSupportedProviders();
     const anyConnecting = supported.some((provider) => Boolean(state.connecting?.[provider]));
     const route = getRoute();
+    const routeHasAgents = getRouteAgents(route).length > 0;
     const routeConfigured = isRouteValid(route) && isRouteSupported(route) && isRouteConfigured(route);
     const anyNeedsConnect = routeConfigured
         ? !isRouteConnected(route)
@@ -640,6 +641,15 @@ function updateRouteConnectAllUi() {
     if (anyConnecting) {
         elements.routeConnectAll.textContent = 'Connecting…';
         elements.routeConnectAll.disabled = true;
+        return;
+    }
+    if (!routeHasAgents) {
+        if (anyNeedsConnect) {
+            elements.routeConnectAll.textContent = 'Connect all';
+        } else {
+            elements.routeConnectAll.textContent = 'Add all agents';
+        }
+        elements.routeConnectAll.disabled = false;
         return;
     }
     if (!anyNeedsConnect) {
@@ -2695,7 +2705,18 @@ function connectAllProviders() {
     const supported = getSupportedProviders();
     if (supported.length === 0) return;
 
-    const route = getRoute();
+    let route = getRoute();
+    if (getRouteAgents(route).length === 0) {
+        const nextAgents = supported.map((provider) => ({
+            id: generateRouteAgentId(),
+            provider,
+            profileId: 'default'
+        }));
+        const nextKind = nextAgents.length >= 2 ? 'debate' : 'single';
+        route = sanitizeRoute({ ...route, kind: nextKind, agents: nextAgents, rounds: route.rounds || 3 });
+        setRoute(route);
+    }
+
     const routeConfigured = isRouteValid(route) && isRouteSupported(route) && isRouteConfigured(route);
     const providersToConnect = new Set();
     const agentsToRepairByProvider = new Map();
