@@ -1,0 +1,29 @@
+name: Bug report
+description: Report a reproducible defect
+labels: [bug]
+body:
+    - type: textarea
+      id: summary
+      attributes:
+          label: Summary
+          description: What is wrong?
+      validations:
+          required: true
+    - type: textarea
+      id: steps
+      attributes:
+          label: Steps to reproduce
+          description: Include exact steps and provider used.
+      validations:
+          required: true
+    - type: textarea
+      id: expected
+      attributes:
+          label: Expected behavior
+      validations:
+          required: true
+    - type: textarea
+      id: logs
+      attributes:
+          label: Logs and screenshots
+          description: Redact sensitive data before sharing.

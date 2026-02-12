@@ -17,7 +17,6 @@ async function loadManifest() {
 
     if (typeof require !== 'undefined') {
       // Node.js fallback
-      // eslint-disable-next-line global-require, import/no-dynamic-require
       manifest = require('../manifest.json');
       return manifest;
     }

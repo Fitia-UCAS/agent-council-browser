@@ -1,53 +1,62 @@
 name: Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Release version (for example: 0.2.0). Leave empty to keep manifest version."
-        required: false
-        type: string
-  push:
-    tags:
-      - "v*"
+    workflow_dispatch:
+        inputs:
+            version:
+                description: 'Release version (for example: 0.2.0). Leave empty to keep manifest version.'
+                required: false
+                type: string
+    push:
+        tags:
+            - 'v*'
 
 jobs:
-  package:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    package:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '20'
+                  cache: npm
 
-      - name: Run tests
-        run: npm test
+            - name: Install dependencies
+              run: npm ci
 
-      - name: Build release artifact
-        run: |
-          VERSION_INPUT="${{ github.event.inputs.version }}"
-          if [ -n "$VERSION_INPUT" ]; then
-            npm run build:release -- "$VERSION_INPUT"
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            TAG_VERSION="${GITHUB_REF_NAME#v}"
-            npm run build:release -- "$TAG_VERSION"
-          else
-            npm run build:release
-          fi
+            - name: Validate
+              run: |
+                  npm run build:src
+                  npm run lint
+                  npm run format:check
+                  npm run test:unit
+                  npm run test:integration
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: extension-release-zip
-          path: release/*.zip
+            - name: Build release artifact
+              run: |
+                  VERSION_INPUT="${{ github.event.inputs.version }}"
+                  if [ -n "$VERSION_INPUT" ]; then
+                    npm run build:release -- "$VERSION_INPUT"
+                  elif [ "${{ github.event_name }}" = "push" ]; then
+                    TAG_VERSION="${GITHUB_REF_NAME#v}"
+                    npm run build:release -- "$TAG_VERSION"
+                  else
+                    npm run build:release
+                  fi
 
-      - name: Attach zip to GitHub release
-        if: github.event_name == 'push'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release/*.zip
+            - name: Upload artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: extension-release-zip
+                  path: release/*.zip
+
+            - name: Attach zip to GitHub release
+              if: github.event_name == 'push'
+              uses: softprops/action-gh-release@v2
+              with:
+                  files: release/*.zip

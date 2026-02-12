@@ -3,6 +3,11 @@ set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 branch_name="$(git -C "$repo_root" rev-parse --abbrev-ref HEAD)"
+build_from_src="$repo_root/scripts/build/build-from-src.mjs"
+
+if [[ -f "$build_from_src" ]]; then
+  node "$build_from_src" --mode=dev >/dev/null
+fi
 
 mode="dist"
 icons_only="false"

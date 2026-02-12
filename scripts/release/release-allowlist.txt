@@ -1,0 +1,16 @@
+manifest.json
+background.js
+contentScript.js
+historyStore.js
+captureUtils.js
+debatePromptUtils.js
+debate_prompts.json
+sidepanel.js
+sidepanel.html
+styles.css
+runtime/
+assets/
+variant-icons/
+LICENSE
+README.md
+SECURITY.md

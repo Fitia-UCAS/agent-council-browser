@@ -1,0 +1,6 @@
+.dist/
+release/
+worktrees/
+node_modules/
+variant-icons/
+.variant-icons/

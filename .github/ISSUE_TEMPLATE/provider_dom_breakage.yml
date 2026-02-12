@@ -1,0 +1,25 @@
+name: Provider DOM breakage
+description: Report selector/capture/send breakage caused by provider UI changes
+labels: [provider-breakage]
+body:
+    - type: input
+      id: provider
+      attributes:
+          label: Provider
+          placeholder: chatgpt | gemini | claude | grok
+      validations:
+          required: true
+    - type: textarea
+      id: breakage
+      attributes:
+          label: What broke?
+          description: Sending, capture, attachment, model detection, etc.
+      validations:
+          required: true
+    - type: textarea
+      id: dom
+      attributes:
+          label: DOM evidence
+          description: Selector diffs, screenshots, relevant HTML snippets (no secrets).
+      validations:
+          required: true

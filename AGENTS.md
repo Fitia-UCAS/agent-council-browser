@@ -140,9 +140,6 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Renders responses as plain text by default; if `contentHtml` is present, renders a **sanitized allowlist** subset (no raw `innerHTML`).
   - Implements route gating (unique tabs per agent), connection checks, and paused-session actions.
 
-- `popup.html`, `popup.js`
-  - Present but **not used** by default.
-
 ## 3) Debate session state machine (background.js)
 
 ### Stored state

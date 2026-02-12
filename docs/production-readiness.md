@@ -1,66 +1,58 @@
-# Production Readiness Guide
+# Production Readiness Guide (JS-first v3)
 
-This repo ships a Chrome extension (MV3). There is no backend service in this project today, so "production" means:
+This repository ships a Chrome MV3 extension with a side panel UI.
 
-1. Build a signed release zip.
-2. Publish to the Chrome Web Store.
-3. Run CI on every PR and gate merges to `main`.
+## 1) Build from source-of-truth
 
-## 1) Release artifact
+Runtime source lives in `src/`.
 
-Build a production zip (not a dev-variant build):
+```bash
+npm ci
+npm run build:src
+```
+
+This generates root runtime outputs (`background.js`, `contentScript.js`, `sidepanel.js`, `manifest.json`, etc.).
+
+## 2) Release artifact (allowlist-verified)
 
 ```bash
 npm run build:release
 ```
 
-Optional explicit version:
+This pipeline:
 
-```bash
-npm run build:release -- 0.2.0
-```
+1. builds from `src/` in release mode,
+2. packages only `scripts/release/release-allowlist.txt` entries,
+3. verifies no extra files are included.
 
 Output:
 
 - `release/multi-llm-coder-v<version>.zip`
 
-## 2) CI/CD model
+## 3) CI gate expectations
 
-- PRs: run `CI` workflow (syntax checks, test suite, variant build smoke test).
-- `main`: keep protected with required status checks.
-- Tags (`v*`) or manual dispatch: run `Release` workflow to build and publish release artifacts.
+Required checks for `main`:
 
-Recommended branch rules:
+- lint
+- format check
+- unit tests
+- integration tests
+- e2e smoke
+- release build
+- artifact policy verification
+- Codex PR review check
 
-- Require at least 1 review for `main`.
-- Require status checks: `CI / validate`.
-- Disable direct pushes to `main`.
+## 4) Schema v3 reset-on-upgrade
 
-## 3) Chrome Web Store production checklist
+v3 architecture intentionally uses reset-on-upgrade for legacy local state.
 
-- Ensure `manifest.json` has production branding/version (release script strips dev suffixes).
-- Provide extension privacy policy URL in your store listing.
-- Verify high-risk permissions (`debugger`, broad host access) are clearly justified in listing notes.
-- Test on a clean Chrome profile before upload.
-- Upload `release/*.zip` to Chrome Web Store dashboard.
+- Side panel requests schema status on startup.
+- If legacy local schema is detected, user must run one-time reset.
+- Reset clears legacy local storage keys and old `mlc_history_v1` IndexedDB data.
 
-## 4) Security and privacy checklist
+## 5) Chrome Web Store checklist
 
-- Keep secrets out of repo and artifacts (`.env*` ignored and excluded from builds).
-- Avoid logging sensitive user prompts/responses in production builds unless needed for debugging.
-- Keep dependency and permission footprint minimal.
-- Add `SECURITY.md` with disclosure instructions before public launch.
-
-## 5) Multi-user expectations
-
-- The extension is client-side only.
-- Each user runs their own local state (`chrome.storage`, IndexedDB, and browser tabs).
-- There is no shared multi-tenant server/database in this repo today.
-- "Multiple users" means many independent installs, not shared sessions/accounts.
-
-## 6) Open-source readiness checklist
-
-- Add `LICENSE` file (current package metadata says ISC).
-- Add `CONTRIBUTING.md` and pull request template.
-- Add `SECURITY.md`.
-- Keep README aligned with current behavior (AGENTS.md is canonical internally).
+- Publish from `release/*.zip` only.
+- Keep privacy and permission justification current (especially `debugger` for Claude flow).
+- Validate on a clean Chrome profile before submission.
+- Roll out to trusted testers first, then public release.

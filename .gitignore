@@ -21,3 +21,25 @@ resources/.arch-internal-preview.css
 .arch-internal-preview.css
 
 **/.claude/settings.local.json
+
+node_modules/
+test-results/
+playwright-report/
+*.log
+
+!scripts/build/
+!scripts/build/**
+
+# Generated extension runtime artifacts (built from src/)
+manifest.json
+background.js
+contentScript.js
+historyStore.js
+captureUtils.js
+debatePromptUtils.js
+debate_prompts.json
+sidepanel.html
+sidepanel.js
+styles.css
+runtime/
+assets/

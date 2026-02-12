@@ -1,0 +1,9 @@
+name: Security report
+description: Private security disclosure instructions
+labels: [security]
+body:
+    - type: markdown
+      attributes:
+          value: |
+              Do not post vulnerabilities publicly.
+              Follow `SECURITY.md` for responsible disclosure.

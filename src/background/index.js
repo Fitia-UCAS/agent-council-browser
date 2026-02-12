@@ -1,0 +1,8962 @@
+/**
+ * Multi-LLM Coder Extension - Background Service Worker
+ * Handles communication with LLM websites and tab management
+ */
+
+try {
+    importScripts('historyStore.js');
+} catch (error) {
+    console.error('[MLC History] Failed to import history store:', error);
+}
+
+try {
+    importScripts('debatePromptUtils.js');
+} catch (error) {
+    console.error('[MLC Debate] Failed to import debate prompt utils:', error);
+}
+
+try {
+    importScripts('runtime/protocolV3.js');
+} catch (error) {
+    console.error('[MLC Runtime] Failed to import protocol v3 helpers:', error);
+}
+
+try {
+    importScripts('runtime/safeLogger.js');
+} catch (error) {
+    console.error('[MLC Runtime] Failed to import safe logger:', error);
+}
+
+try {
+    importScripts('runtime/schemaResetV3.js');
+} catch (error) {
+    console.error('[MLC Runtime] Failed to import schema reset helpers:', error);
+}
+
+try {
+    importScripts('runtime/background/messageRouter.js');
+} catch (error) {
+    console.error('[MLC Runtime] Failed to import message router helpers:', error);
+}
+
+try {
+    importScripts('runtime/background/handlers/sessionHandlers.js');
+    importScripts('runtime/background/handlers/profileHandlers.js');
+    importScripts('runtime/background/handlers/historyHandlers.js');
+    importScripts('runtime/background/handlers/schemaHandlers.js');
+    importScripts('runtime/background/handlers/providerHandlers.js');
+} catch (error) {
+    console.error('[MLC Runtime] Failed to import background handler modules:', error);
+}
+
+try {
+    importScripts('runtime/background/providerRegistry.js');
+    importScripts('runtime/background/providers/chatgptAdapter.js');
+    importScripts('runtime/background/providers/geminiAdapter.js');
+    importScripts('runtime/background/providers/claudeAdapter.js');
+    importScripts('runtime/background/providers/grokAdapter.js');
+} catch (error) {
+    console.error('[MLC Runtime] Failed to import provider registry/adapters:', error);
+}
+
+try {
+    importScripts('runtime/background/tabProfileStore.js');
+} catch (error) {
+    console.error('[MLC Runtime] Failed to import tab profile store:', error);
+}
+
+try {
+    importScripts('runtime/background/sessionEngine.js');
+    importScripts('runtime/background/sessionStateStore.js');
+} catch (error) {
+    console.error('[MLC Runtime] Failed to import session modules:', error);
+}
+
+try {
+    importScripts('runtime/background/historyBridge.js');
+} catch (error) {
+    console.error('[MLC Runtime] Failed to import history bridge:', error);
+}
+
+const mlcProtocol =
+    self.MLCProtocolV3 && typeof self.MLCProtocolV3 === 'object' ? self.MLCProtocolV3 : null;
+const mlcLogger =
+    self.MLCSafeLogger && typeof self.MLCSafeLogger === 'object'
+        ? self.MLCSafeLogger
+        : {
+              debug: () => {},
+              info: (...args) => console.info(...args),
+              warn: (...args) => console.warn(...args),
+              error: (...args) => console.error(...args),
+              isDebugEnabled: () => false,
+          };
+const mlcSchemaReset =
+    self.MLCSchemaResetV3 && typeof self.MLCSchemaResetV3 === 'object'
+        ? self.MLCSchemaResetV3
+        : null;
+const mlcMessageRouter =
+    self.MLCMessageRouter && typeof self.MLCMessageRouter === 'object'
+        ? self.MLCMessageRouter
+        : null;
+const mlcSchemaHandlersModule =
+    self.MLCSchemaHandlers && typeof self.MLCSchemaHandlers === 'object'
+        ? self.MLCSchemaHandlers
+        : null;
+const mlcProviderHandlersModule =
+    self.MLCProviderHandlers && typeof self.MLCProviderHandlers === 'object'
+        ? self.MLCProviderHandlers
+        : null;
+const mlcProviderRegistryModule =
+    self.MLCProviderRegistry && typeof self.MLCProviderRegistry === 'object'
+        ? self.MLCProviderRegistry
+        : null;
+const mlcProviderAdapters =
+    self.MLCProviderAdapters && typeof self.MLCProviderAdapters === 'object'
+        ? self.MLCProviderAdapters
+        : {};
+const mlcTabProfileStoreModule =
+    self.MLCTabProfileStore && typeof self.MLCTabProfileStore === 'object'
+        ? self.MLCTabProfileStore
+        : null;
+const mlcSessionEngineModule =
+    self.MLCSessionEngine && typeof self.MLCSessionEngine === 'object'
+        ? self.MLCSessionEngine
+        : null;
+const mlcSessionStateStoreModule =
+    self.MLCSessionStateStore && typeof self.MLCSessionStateStore === 'object'
+        ? self.MLCSessionStateStore
+        : null;
+const mlcHistoryBridgeModule =
+    self.MLCHistoryBridge && typeof self.MLCHistoryBridge === 'object'
+        ? self.MLCHistoryBridge
+        : null;
+
+function mlcDebugLog(event, meta) {
+    mlcLogger.debug(event, meta);
+}
+
+async function primeSchemaV3Status(reason) {
+    if (!mlcSchemaReset || typeof mlcSchemaReset.primeStatus !== 'function') return null;
+    try {
+        const status = await mlcSchemaReset.primeStatus();
+        mlcDebugLog('schema_v3_prime', { reason, status });
+        return status;
+    } catch (error) {
+        mlcLogger.warn('schema_v3_prime_failed', {
+            reason,
+            error: error?.message || String(error),
+        });
+        return null;
+    }
+}
+
+// Extension installation
+chrome.runtime.onInstalled.addListener(() => {
+    mlcLogger.info('background_installed_or_updated');
+    primeSchemaV3Status('onInstalled').catch(() => {});
+    ensureSidePanelActionClickBehavior('onInstalled');
+    migratePreferredTabsToProfiles().catch((error) => {
+        console.warn('[MLC Background] Failed to migrate preferred tabs:', error);
+    });
+});
+
+chrome.runtime.onStartup.addListener(() => {
+    primeSchemaV3Status('onStartup').catch(() => {});
+    ensureSidePanelActionClickBehavior('onStartup');
+});
+
+async function ensureSidePanelActionClickBehavior(reason) {
+    if (!chrome.sidePanel || !chrome.sidePanel.setPanelBehavior) return;
+    try {
+        // Clicking the extension action should open the side panel only (never a full tab).
+        await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    } catch (error) {
+        console.warn(
+            `[MLC Background] Failed to enable side panel action click behavior (${reason}):`,
+            error
+        );
+    }
+}
+
+ensureSidePanelActionClickBehavior('workerInit');
+primeSchemaV3Status('workerInit').catch(() => {});
+
+// Safe message sending function
+function sendMessageToPopup(message) {
+    try {
+        chrome.runtime.sendMessage(message, () => {
+            if (chrome.runtime.lastError) {
+                // console.log('[MLC Background] No popup to receive message:', message.type, chrome.runtime.lastError.message);
+            }
+        });
+    } catch (error) {
+        console.error('[MLC Background] Failed to send message to popup:', message.type, error);
+    }
+}
+
+// Generate a unique ID for each prompt-response cycle
+function generatePromptId() {
+    return 'prompt_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+// DEBATE SESSION STATE MANAGEMENT
+const ACTIVE_SESSION_KEY = 'mlc_active_session_v2';
+const SESSIONS_KEY = 'mlc_sessions_v1';
+const PREFERRED_TABS_KEY = 'mlc_preferred_tabs';
+const TAB_PROFILES_KEY = 'mlc_tab_profiles_v1';
+const CHATS_KEY = 'mlc_chats_v1';
+
+const providerRegistry =
+    mlcProviderRegistryModule &&
+    typeof mlcProviderRegistryModule.createProviderRegistry === 'function'
+        ? mlcProviderRegistryModule.createProviderRegistry()
+        : {
+              normalizeProviderKey: (provider) =>
+                  String(provider || '')
+                      .trim()
+                      .toLowerCase(),
+              normalizeProvider: (provider) =>
+                  String(provider || '')
+                      .trim()
+                      .toLowerCase() || 'chatgpt',
+              getSupportedProviderKeys: () => ['chatgpt', 'gemini', 'claude', 'grok'],
+              isSupportedProviderKey: (provider) =>
+                  ['chatgpt', 'gemini', 'claude', 'grok'].includes(
+                      String(provider || '')
+                          .trim()
+                          .toLowerCase()
+                  ),
+              getProviderAttachmentMode: (provider) =>
+                  String(provider || '')
+                      .trim()
+                      .toLowerCase() === 'gemini'
+                      ? 'manual'
+                      : 'auto',
+              getExpectedHosts: (provider) => {
+                  const key = String(provider || '')
+                      .trim()
+                      .toLowerCase();
+                  if (key === 'gemini') return ['gemini.google.com'];
+                  if (key === 'claude') return ['claude.ai'];
+                  if (key === 'grok') return ['grok.com'];
+                  return ['chatgpt.com', 'chat.openai.com', 'openai.com', 'platform.openai.com'];
+              },
+              isExpectedHost: (provider, url) => {
+                  if (!url) return false;
+                  try {
+                      const { hostname } = new URL(url);
+                      const expected = providerRegistry.getExpectedHosts(provider);
+                      return expected.some(
+                          (host) => hostname === host || hostname.endsWith(`.${host}`)
+                      );
+                  } catch {
+                      return false;
+                  }
+              },
+              isContentScriptInjectableUrl: (provider, url) => {
+                  if (!url) return false;
+                  try {
+                      const parsed = new URL(url);
+                      if (parsed.protocol !== 'https:') return false;
+                      const hostname = parsed.hostname;
+                      const key = String(provider || '')
+                          .trim()
+                          .toLowerCase();
+                      if (key === 'chatgpt')
+                          return hostname === 'chatgpt.com' || hostname === 'chat.openai.com';
+                      if (key === 'gemini') return hostname === 'gemini.google.com';
+                      if (key === 'claude')
+                          return hostname === 'claude.ai' || hostname.endsWith('.claude.ai');
+                      if (key === 'grok')
+                          return hostname === 'grok.com' || hostname.endsWith('.grok.com');
+                      return false;
+                  } catch {
+                      return false;
+                  }
+              },
+              formatProviderLabel: (provider) => {
+                  const key = String(provider || '')
+                      .trim()
+                      .toLowerCase();
+                  if (key === 'gemini') return 'Gemini';
+                  if (key === 'claude') return 'Claude';
+                  if (key === 'grok') return 'Grok';
+                  return 'ChatGPT';
+              },
+              listSessionProviders: (session, fallbackProvider) => {
+                  const ordered = [];
+                  const push = (provider) => {
+                      const key = String(provider || '')
+                          .trim()
+                          .toLowerCase();
+                      if (!key || !['chatgpt', 'gemini', 'claude', 'grok'].includes(key)) return;
+                      if (!ordered.includes(key)) ordered.push(key);
+                  };
+                  push(session?.firstLLM);
+                  push(session?.secondLLM);
+                  push(fallbackProvider);
+                  return ordered;
+              },
+              getSessionProviders: (session, fallbackProvider) => {
+                  const ordered = [];
+                  const push = (provider) => {
+                      const key = String(provider || '')
+                          .trim()
+                          .toLowerCase();
+                      if (!key || !['chatgpt', 'gemini', 'claude', 'grok'].includes(key)) return;
+                      if (!ordered.includes(key)) ordered.push(key);
+                  };
+                  (Array.isArray(session?.route?.providers) ? session.route.providers : []).forEach(
+                      push
+                  );
+                  providerRegistry.listSessionProviders(session, fallbackProvider).forEach(push);
+                  return ordered;
+              },
+              getMetadataMap: () => ({
+                  chatgpt: {
+                      label: 'ChatGPT',
+                      openUrl: 'https://chatgpt.com/',
+                      expectedHosts: [
+                          'chatgpt.com',
+                          'chat.openai.com',
+                          'openai.com',
+                          'platform.openai.com',
+                      ],
+                      urlPatterns: [
+                          '*://chat.openai.com/*',
+                          '*://chatgpt.com/*',
+                          '*://openai.com/chatgpt*',
+                          '*://platform.openai.com/*',
+                      ],
+                  },
+                  gemini: {
+                      label: 'Gemini',
+                      openUrl: 'https://gemini.google.com/',
+                      expectedHosts: ['gemini.google.com'],
+                      urlPatterns: ['*://gemini.google.com/*'],
+                  },
+                  claude: {
+                      label: 'Claude',
+                      openUrl: 'https://claude.ai/new',
+                      expectedHosts: ['claude.ai'],
+                      urlPatterns: ['*://claude.ai/*', '*://*.claude.ai/*'],
+                  },
+                  grok: {
+                      label: 'Grok',
+                      openUrl: 'https://grok.com/',
+                      expectedHosts: ['grok.com'],
+                      urlPatterns: ['*://grok.com/*', '*://*.grok.com/*'],
+                  },
+              }),
+              getCapabilitiesMap: () => ({
+                  chatgpt: { attachments: { mode: 'auto' } },
+                  gemini: { attachments: { mode: 'manual' } },
+                  claude: { attachments: { mode: 'auto' } },
+                  grok: { attachments: { mode: 'auto' } },
+              }),
+              getOpenUrl: (provider) => {
+                  const key = String(provider || '')
+                      .trim()
+                      .toLowerCase();
+                  if (key === 'gemini') return 'https://gemini.google.com/';
+                  if (key === 'claude') return 'https://claude.ai/new';
+                  if (key === 'grok') return 'https://grok.com/';
+                  return 'https://chatgpt.com/';
+              },
+          };
+
+const PROVIDER_METADATA = providerRegistry.getMetadataMap();
+const PROVIDER_CAPABILITIES = providerRegistry.getCapabilitiesMap();
+const providerAdapters = mlcProviderAdapters || {};
+const schemaHandlers =
+    mlcSchemaHandlersModule && typeof mlcSchemaHandlersModule.createSchemaHandlers === 'function'
+        ? mlcSchemaHandlersModule.createSchemaHandlers({ schemaReset: mlcSchemaReset })
+        : null;
+const providerHandlers =
+    mlcProviderHandlersModule &&
+    typeof mlcProviderHandlersModule.createProviderHandlers === 'function'
+        ? mlcProviderHandlersModule.createProviderHandlers({
+              providerCapabilities: PROVIDER_CAPABILITIES,
+          })
+        : null;
+
+let tabProfilesOpChain = Promise.resolve();
+
+function withTabProfilesLock(operation) {
+    const run = async () => operation();
+    const next = tabProfilesOpChain.then(run, run);
+    tabProfilesOpChain = next.catch(() => {});
+    return next;
+}
+
+const HISTORY_PAGE_SIZE = 60;
+
+function generateChatId() {
+    return 'chat_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+function toChatSummary(chat) {
+    if (!chat || typeof chat !== 'object') return null;
+    const chatId = chat.chatId || chat.threadId;
+    if (!chatId) return null;
+    return {
+        chatId,
+        title: chat.title || 'New chat',
+        createdAt: Number.isFinite(chat.createdAt) ? chat.createdAt : null,
+        updatedAt: Number.isFinite(chat.updatedAt) ? chat.updatedAt : null,
+        messageCount: Number.isFinite(chat.messageCount)
+            ? chat.messageCount
+            : Array.isArray(chat.messages)
+              ? chat.messages.length
+              : 0,
+        lastPreview: typeof chat.lastPreview === 'string' ? chat.lastPreview : undefined,
+    };
+}
+
+async function ensureHistoryStoreReady() {
+    if (!self.mlcHistoryStore) {
+        const err = new Error('History store is unavailable.');
+        err.code = 'HISTORY_STORE_UNAVAILABLE';
+        throw err;
+    }
+    await self.mlcHistoryStore.openDb();
+    return self.mlcHistoryStore;
+}
+
+const historyBridge =
+    mlcHistoryBridgeModule && typeof mlcHistoryBridgeModule.createHistoryBridge === 'function'
+        ? mlcHistoryBridgeModule.createHistoryBridge({
+              getStore: () => self.mlcHistoryStore,
+          })
+        : null;
+
+async function getHistoryStatus() {
+    if (historyBridge && typeof historyBridge.getStatus === 'function') {
+        return historyBridge.getStatus();
+    }
+    const store = await ensureHistoryStoreReady();
+    return store.getStatus();
+}
+
+async function requireHistoryUnlocked() {
+    if (historyBridge && typeof historyBridge.ensureStore === 'function') {
+        return historyBridge.ensureStore();
+    }
+    const store = await ensureHistoryStoreReady();
+    return store;
+}
+
+let historyMigrationChecked = false;
+let historyMigrationPromise = null;
+
+async function ensureLegacyChatsMigrated(store) {
+    if (historyMigrationChecked) return;
+    if (historyMigrationPromise) return historyMigrationPromise;
+
+    historyMigrationPromise = (async () => {
+        try {
+            const status = await store.getStatus().catch(() => null);
+            if (status?.configured && status?.lockNewChatsByDefault && !status?.unlocked) {
+                // New threads would be protected and require unlock; wait until unlock before migration.
+                return;
+            }
+
+            const version = await store.getMeta('migrationVersion');
+            if (Number(version) >= 1) {
+                historyMigrationChecked = true;
+                return;
+            }
+
+            const stored = await chrome.storage.local.get(CHATS_KEY);
+            const raw = stored?.[CHATS_KEY];
+            const chats =
+                raw && typeof raw === 'object' && Array.isArray(raw.chats) ? raw.chats : [];
+            const legacyActiveChatId =
+                raw && typeof raw === 'object' && typeof raw.activeChatId === 'string'
+                    ? raw.activeChatId
+                    : null;
+
+            if (!chats.length) {
+                await store.setMeta('migrationVersion', 1);
+                historyMigrationChecked = true;
+                return;
+            }
+
+            let importedChats = 0;
+            let importedMessages = 0;
+
+            let lockedFailure = false;
+
+            for (const legacyChat of chats) {
+                const chatId =
+                    typeof legacyChat?.chatId === 'string' && legacyChat.chatId
+                        ? legacyChat.chatId
+                        : generateChatId();
+
+                const existing = await store.getThreadSummary(chatId);
+                if (existing) continue;
+
+                const createdAt = Number.isFinite(legacyChat?.createdAt)
+                    ? legacyChat.createdAt
+                    : Date.now();
+                const updatedAt = Number.isFinite(legacyChat?.updatedAt)
+                    ? legacyChat.updatedAt
+                    : createdAt;
+                const titleRaw =
+                    typeof legacyChat?.title === 'string' ? legacyChat.title : 'New chat';
+                const title = titleRaw.trim() ? titleRaw : 'New chat';
+                const titleIsDefault = title === 'New chat';
+
+                try {
+                    await store.createThread({
+                        threadId: chatId,
+                        title,
+                        createdAt,
+                        updatedAt,
+                        titleIsDefault,
+                    });
+                    importedChats += 1;
+                } catch (error) {
+                    if (error?.code === 'HISTORY_LOCKED') {
+                        lockedFailure = true;
+                        break;
+                    }
+                    console.warn('[MLC History] Failed to create thread during migration:', error);
+                    continue;
+                }
+
+                const messages = Array.isArray(legacyChat?.messages) ? legacyChat.messages : [];
+                for (const legacyMessage of messages) {
+                    const content = String(legacyMessage?.content || '');
+                    if (!content.trim()) continue;
+                    const role = legacyMessage?.role || 'assistant';
+                    const timestamp = Number.isFinite(legacyMessage?.timestamp)
+                        ? legacyMessage.timestamp
+                        : Date.now();
+                    const contentHtml =
+                        typeof legacyMessage?.contentHtml === 'string'
+                            ? legacyMessage.contentHtml
+                            : undefined;
+                    try {
+                        await store.appendMessage(chatId, {
+                            role,
+                            content,
+                            contentHtml,
+                            timestamp,
+                            sessionId: legacyMessage?.sessionId || undefined,
+                            turnIndex: Number.isFinite(legacyMessage?.turnIndex)
+                                ? legacyMessage.turnIndex
+                                : undefined,
+                            roundIndex: Number.isFinite(legacyMessage?.roundIndex)
+                                ? legacyMessage.roundIndex
+                                : undefined,
+                        });
+                        importedMessages += 1;
+                    } catch (error) {
+                        if (error?.code === 'HISTORY_LOCKED') {
+                            lockedFailure = true;
+                            break;
+                        }
+                        console.warn('[MLC History] Failed to migrate message:', error);
+                    }
+                }
+                if (lockedFailure) break;
+            }
+
+            if (lockedFailure) {
+                return;
+            }
+
+            const currentActive = await store.getActiveThreadId();
+            if (!currentActive && legacyActiveChatId) {
+                const migratedActive = await store.getThreadSummary(legacyActiveChatId);
+                if (migratedActive) {
+                    await store.setActiveThreadId(legacyActiveChatId);
+                }
+            }
+
+            await store.setMeta('migrationVersion', 1);
+            historyMigrationChecked = true;
+            await new Promise((resolve) => chrome.storage.local.remove(CHATS_KEY, resolve));
+            console.log('[MLC History] Migration complete.', { importedChats, importedMessages });
+        } catch (error) {
+            console.error('[MLC History] Migration failed:', error);
+        }
+    })().finally(() => {
+        historyMigrationPromise = null;
+    });
+
+    return historyMigrationPromise;
+}
+
+async function loadChatsState({ ensureActive = true } = {}) {
+    const store = await requireHistoryUnlocked();
+    await ensureLegacyChatsMigrated(store);
+    const { threads } = await store.listThreads({ limit: 250 });
+    let activeChatId = await store.getActiveThreadId();
+    const hasActive = activeChatId && threads.some((thread) => thread.chatId === activeChatId);
+
+    if (!ensureActive) {
+        return { activeChatId: hasActive ? activeChatId : null, chats: threads };
+    }
+
+    if (!threads.length) {
+        const chatId = generateChatId();
+        await store.createThread({ threadId: chatId, title: 'New chat', titleIsDefault: true });
+        await store.setActiveThreadId(chatId);
+        const refreshed = await store.listThreads({ limit: 250 });
+        return { activeChatId: chatId, chats: refreshed.threads };
+    }
+
+    if (!hasActive) {
+        activeChatId = threads[0].chatId;
+        await store.setActiveThreadId(activeChatId);
+    }
+
+    return { activeChatId, chats: threads };
+}
+
+async function notifyChatsState(stateOverride = null) {
+    try {
+        const state = stateOverride || (await loadChatsState());
+        sendMessageToPopup({
+            type: 'CHATS_STATE',
+            activeChatId: state.activeChatId,
+            chats: state.chats,
+        });
+    } catch (error) {
+        const status = await getHistoryStatus().catch(() => ({
+            configured: false,
+            unlocked: false,
+        }));
+        sendMessageToPopup({ type: 'HISTORY_STATUS', status, error: error?.message });
+    }
+}
+
+async function createChat({ makeActive = true } = {}) {
+    const store = await requireHistoryUnlocked();
+    const chatId = generateChatId();
+    await store.createThread({ threadId: chatId, title: 'New chat', titleIsDefault: true });
+    if (makeActive) {
+        await store.setActiveThreadId(chatId);
+    }
+    const chat = await store.getThreadSummary(chatId);
+    const state = await loadChatsState({ ensureActive: false });
+    await notifyChatsState(state);
+    return {
+        ok: true,
+        chat: { ...chat, messages: [] },
+        state: { ...state, activeChatId: makeActive ? chatId : state.activeChatId },
+    };
+}
+
+async function setActiveChat(chatId) {
+    const store = await requireHistoryUnlocked();
+    const chat = await store.getThreadSummary(chatId);
+    if (!chat) {
+        return { ok: false, error: 'Chat not found.', code: 'CHAT_NOT_FOUND' };
+    }
+    await store.setActiveThreadId(chatId);
+    const state = await loadChatsState({ ensureActive: false });
+    await notifyChatsState(state);
+    return { ok: true, chat: { ...chat, messages: [] }, state };
+}
+
+async function renameChat(chatId, title) {
+    const store = await requireHistoryUnlocked();
+    try {
+        const updated = await store.renameThread(chatId, title);
+        await notifyChatsState();
+        return { ok: true, chat: updated };
+    } catch (error) {
+        return { ok: false, error: error.message, code: error.code || 'RENAME_FAILED' };
+    }
+}
+
+async function deleteChat(chatId) {
+    const store = await requireHistoryUnlocked();
+    const chat = await store.getThreadSummary(chatId);
+    if (!chat) return { ok: false, error: 'Chat not found.', code: 'CHAT_NOT_FOUND' };
+
+    await store.deleteThread(chatId);
+    try {
+        await store.deleteMeta(getChatDeliveryStateKey(chatId));
+    } catch (error) {
+        // ignore
+    }
+    deliveryStateCache.delete(chatId);
+    const activeChatId = await store.getActiveThreadId();
+    if (activeChatId === chatId) {
+        const { threads } = await store.listThreads({ limit: 1 });
+        await store.setActiveThreadId(threads[0]?.chatId || null);
+    }
+    const state = await loadChatsState({ ensureActive: true });
+    await notifyChatsState(state);
+    return { ok: true, state };
+}
+
+async function appendChatMessage(chatId, message) {
+    if (!chatId || !message) return { ok: false, error: 'Missing chatId or message.' };
+    try {
+        const store = await requireHistoryUnlocked();
+        const provider = isSupportedProviderKey(message.role) ? message.role : null;
+        const saved = await store.appendMessage(chatId, { ...message, provider });
+        await notifyChatsState();
+        return { ok: true, message: saved };
+    } catch (error) {
+        console.warn('[MLC Chats] Failed to persist message:', error);
+        return { ok: false, error: error.message, code: error.code || 'APPEND_MESSAGE_FAILED' };
+    }
+}
+
+const defaultDebateState = {
+    isActive: false,
+    isPaused: false,
+    pausedReason: null,
+    pausedProvider: null,
+    pausedAgentId: null,
+    pausedProfileId: null,
+    pausedAt: 0,
+    autoResume: null,
+    mode: 'debate',
+    route: null,
+    chatId: null,
+    sessionId: null,
+    rounds: 0,
+    totalTurns: 0,
+    turnIndex: 1,
+    firstLLM: 'chatgpt',
+    secondLLM: 'gemini',
+    participants: [],
+    agentProfileIds: {},
+    agentTabIds: {},
+    profileIds: { chatgpt: null, gemini: null },
+    tabIds: { chatgpt: null, gemini: null },
+    userQuery: '',
+    isFollowUp: false,
+    conversationContext: '',
+    promptOverrides: null,
+    userMessageSequence: null,
+    messages: [],
+    waitingFor: null,
+    parallelPromptIds: null,
+    lastPromptId: null,
+    lastPromptTimestamp: 0,
+    startedAt: 0,
+    endedAt: 0,
+};
+
+let sessionsById = new Map();
+let sessionsByChatId = new Map();
+let sessionsLoaded = false;
+let sessionsLoadPromise = null;
+const responseChainsBySessionId = new Map();
+let sessionRedactionEnabled = false;
+let sessionHistoryHydrated = false;
+
+function normalizeSessionState(session) {
+    if (!session || typeof session !== 'object') return null;
+    const sessionId = typeof session.sessionId === 'string' ? session.sessionId : null;
+    if (!sessionId) return null;
+    const normalized = { ...defaultDebateState, ...session, sessionId };
+    normalized.isActive = Boolean(normalized.isActive);
+    normalized.isPaused = Boolean(normalized.isPaused);
+    normalized.pausedAgentId =
+        typeof normalized.pausedAgentId === 'string' ? normalized.pausedAgentId : null;
+    normalized.pausedProfileId =
+        typeof normalized.pausedProfileId === 'string' ? normalized.pausedProfileId : null;
+    normalized.messages = Array.isArray(normalized.messages) ? normalized.messages : [];
+    normalized.profileIds =
+        normalized.profileIds && typeof normalized.profileIds === 'object'
+            ? normalized.profileIds
+            : {};
+    normalized.tabIds =
+        normalized.tabIds && typeof normalized.tabIds === 'object' ? normalized.tabIds : {};
+    normalized.participants = Array.isArray(normalized.participants) ? normalized.participants : [];
+    normalized.agentProfileIds =
+        normalized.agentProfileIds && typeof normalized.agentProfileIds === 'object'
+            ? normalized.agentProfileIds
+            : {};
+    normalized.agentTabIds =
+        normalized.agentTabIds && typeof normalized.agentTabIds === 'object'
+            ? normalized.agentTabIds
+            : {};
+    if (!['debate', 'single', 'direct', 'parallel'].includes(normalized.mode)) {
+        normalized.mode = 'debate';
+    }
+    const providers = getSupportedProviderKeys();
+    for (const provider of providers) {
+        if (!Object.prototype.hasOwnProperty.call(normalized.profileIds, provider)) {
+            normalized.profileIds[provider] = null;
+        }
+        if (!Object.prototype.hasOwnProperty.call(normalized.tabIds, provider)) {
+            normalized.tabIds[provider] = null;
+        }
+    }
+    if (!Object.prototype.hasOwnProperty.call(normalized.profileIds, 'chatgpt')) {
+        normalized.profileIds.chatgpt = null;
+    }
+    if (!Object.prototype.hasOwnProperty.call(normalized.profileIds, 'gemini')) {
+        normalized.profileIds.gemini = null;
+    }
+    if (!Object.prototype.hasOwnProperty.call(normalized.tabIds, 'chatgpt')) {
+        normalized.tabIds.chatgpt = null;
+    }
+    if (!Object.prototype.hasOwnProperty.call(normalized.tabIds, 'gemini')) {
+        normalized.tabIds.gemini = null;
+    }
+
+    // Backward compatibility: derive participants if missing.
+    if (!Array.isArray(normalized.participants) || normalized.participants.length === 0) {
+        const routeAgents = Array.isArray(normalized.route?.agents)
+            ? normalized.route.agents
+            : null;
+        if (routeAgents && routeAgents.length > 0) {
+            normalized.participants = routeAgents
+                .map((agent, idx) => {
+                    const provider = normalizeProviderKey(agent?.provider || '');
+                    if (!provider || !isSupportedProviderKey(provider)) return null;
+                    const agentId =
+                        typeof agent?.id === 'string' && agent.id.trim()
+                            ? agent.id.trim()
+                            : `agent_${provider}_${idx + 1}`;
+                    const rawProfileSelection =
+                        typeof agent?.profileId === 'string' ? agent.profileId.trim() : '';
+                    const profileId =
+                        normalized.agentProfileIds?.[agentId] ||
+                        (rawProfileSelection && rawProfileSelection !== 'default'
+                            ? rawProfileSelection
+                            : normalized.profileIds?.[provider] || null);
+                    const tabId = Number.isFinite(normalized.agentTabIds?.[agentId])
+                        ? normalized.agentTabIds[agentId]
+                        : Number.isFinite(agent?.tabId)
+                          ? agent.tabId
+                          : normalized.tabIds?.[provider] || null;
+                    const label = typeof agent?.label === 'string' ? agent.label : '';
+                    return { agentId, provider, profileId, tabId, label };
+                })
+                .filter(Boolean);
+        } else {
+            const providers =
+                Array.isArray(normalized.route?.providers) && normalized.route.providers.length > 0
+                    ? normalized.route.providers
+                          .map(normalizeProviderKey)
+                          .filter((p) => p && isSupportedProviderKey(p))
+                    : listSessionProviders(normalized);
+            normalized.participants = providers
+                .map((provider, idx) => ({
+                    agentId: provider,
+                    provider,
+                    profileId: normalized.profileIds?.[provider] || null,
+                    tabId: normalized.tabIds?.[provider] || null,
+                    label: formatLLMLabel(provider),
+                }))
+                .filter(Boolean);
+        }
+    }
+
+    // Ensure agent maps contain entries for participants.
+    if (Array.isArray(normalized.participants)) {
+        normalized.participants = normalized.participants
+            .map((participant, idx) => {
+                if (!participant || typeof participant !== 'object') return null;
+                const provider = normalizeProviderKey(participant.provider);
+                if (!provider || !isSupportedProviderKey(provider)) return null;
+                const agentId =
+                    typeof participant.agentId === 'string' && participant.agentId.trim()
+                        ? participant.agentId.trim()
+                        : `agent_${provider}_${idx + 1}`;
+                const profileId =
+                    typeof participant.profileId === 'string' ? participant.profileId : null;
+                const tabId = Number.isFinite(participant.tabId) ? participant.tabId : null;
+                const label = typeof participant.label === 'string' ? participant.label : '';
+                normalized.agentProfileIds[agentId] =
+                    normalized.agentProfileIds[agentId] || profileId;
+                if (tabId)
+                    normalized.agentTabIds[agentId] = normalized.agentTabIds[agentId] || tabId;
+                return { agentId, provider, profileId, tabId, label };
+            })
+            .filter(Boolean);
+    }
+    return normalized;
+}
+
+function redactSessionForStorage(session) {
+    if (!session || typeof session !== 'object') return session;
+    return {
+        ...session,
+        userQuery: '',
+        conversationContext: '',
+        messages: [],
+    };
+}
+
+function mapHistoryMessageToSessionMessage(message) {
+    if (!message || typeof message !== 'object') return null;
+    const content = typeof message.content === 'string' ? message.content : '';
+    const trimmed = content.trim();
+    if (!trimmed) return null;
+    const out = {
+        role: message.role,
+        content: content,
+        timestamp: Number.isFinite(message.timestamp) ? message.timestamp : Date.now(),
+    };
+    if (typeof message.contentHtml === 'string' && message.contentHtml.trim()) {
+        out.contentHtml = message.contentHtml;
+    }
+    if (typeof message.agentId === 'string' && message.agentId.trim()) {
+        out.agentId = message.agentId.trim();
+    }
+    if (typeof message.agentLabel === 'string' && message.agentLabel.trim()) {
+        out.agentLabel = message.agentLabel.trim();
+    }
+    if (Number.isFinite(message.turnIndex)) out.turnIndex = message.turnIndex;
+    if (Number.isFinite(message.roundIndex)) out.roundIndex = message.roundIndex;
+    return out;
+}
+
+function syncSessionMapsFromStore(store) {
+    if (!store) return;
+    const mapById = typeof store.getSessionsMap === 'function' ? store.getSessionsMap() : null;
+    const mapByChat = typeof store.getChatIndexMap === 'function' ? store.getChatIndexMap() : null;
+    if (mapById instanceof Map) sessionsById = mapById;
+    if (mapByChat instanceof Map) sessionsByChatId = mapByChat;
+}
+
+async function hydrateSessionsFromHistory() {
+    if (sessionHistoryHydrated) return;
+    try {
+        const store = await ensureHistoryStoreReady();
+        const historyStatus = await store.getStatus();
+        if (!historyStatus?.historyEnabled) {
+            sessionHistoryHydrated = true;
+            return;
+        }
+        for (const session of sessionsById.values()) {
+            if (!session || !session.chatId || !session.sessionId) continue;
+            const needsHydrate =
+                !Array.isArray(session.messages) ||
+                session.messages.length === 0 ||
+                !String(session.userQuery || '').trim();
+            if (!needsHydrate) continue;
+            try {
+                const page = await store.listMessages(session.chatId, { limit: 240 });
+                const messages = Array.isArray(page?.messages) ? page.messages : [];
+                const sessionMessages = messages.filter(
+                    (msg) => msg?.sessionId === session.sessionId
+                );
+                if (sessionMessages.length > 0) {
+                    const mapped = sessionMessages
+                        .map(mapHistoryMessageToSessionMessage)
+                        .filter(Boolean);
+                    if (mapped.length > 0) {
+                        session.messages = mapped;
+                    }
+                    const userMsg = sessionMessages.find(
+                        (msg) =>
+                            msg?.role === 'user' &&
+                            typeof msg?.content === 'string' &&
+                            msg.content.trim()
+                    );
+                    if (userMsg) {
+                        session.userQuery = userMsg.content;
+                        if (
+                            !Number.isFinite(session.userMessageSequence) &&
+                            Number.isFinite(userMsg.sequence)
+                        ) {
+                            session.userMessageSequence = userMsg.sequence;
+                        }
+                    }
+                }
+                if (session.isFollowUp && Number.isFinite(session.userMessageSequence)) {
+                    try {
+                        const prior = await store.listMessages(session.chatId, {
+                            limit: 12,
+                            beforeSequence: session.userMessageSequence,
+                        });
+                        session.conversationContext = buildConversationContext(prior?.messages, {
+                            maxChars: 4000,
+                            maxMessages: 10,
+                        });
+                    } catch {
+                        // ignore
+                    }
+                }
+            } catch {
+                // ignore hydration failures (locked chat, DB errors, etc.)
+            }
+        }
+    } catch {
+        // ignore history hydration failures
+    } finally {
+        sessionHistoryHydrated = true;
+    }
+}
+
+const sessionStateStore =
+    mlcSessionStateStoreModule &&
+    typeof mlcSessionStateStoreModule.createSessionStateStore === 'function'
+        ? mlcSessionStateStoreModule.createSessionStateStore({
+              storageArea: chrome.storage.local,
+              sessionsKey: SESSIONS_KEY,
+              legacyActiveKey: ACTIVE_SESSION_KEY,
+              normalizeSession: normalizeSessionState,
+              shouldPersistSession: (session) => Boolean(session?.isActive || session?.isPaused),
+              shouldRedactSession: (session) => Boolean(sessionRedactionEnabled && session?.chatId),
+              redactSession: redactSessionForStorage,
+              onLoaded: async () => {
+                  syncSessionMapsFromStore(sessionStateStore);
+                  await hydrateSessionsFromHistory();
+              },
+          })
+        : null;
+
+async function persistSessionsState() {
+    if (sessionStateStore && typeof sessionStateStore.persist === 'function') {
+        let historyStatus = null;
+        try {
+            historyStatus = await getHistoryStatus();
+        } catch {
+            historyStatus = null;
+        }
+        sessionRedactionEnabled = Boolean(historyStatus?.historyEnabled);
+        syncSessionMapsFromStore(sessionStateStore);
+        await sessionStateStore.persist();
+        syncSessionMapsFromStore(sessionStateStore);
+        return;
+    }
+
+    let historyStatus = null;
+    try {
+        historyStatus = await getHistoryStatus();
+    } catch {
+        historyStatus = null;
+    }
+    const shouldRedact = Boolean(historyStatus?.historyEnabled);
+
+    const payload = {};
+    for (const [sessionId, session] of sessionsById.entries()) {
+        const canRedactSession = shouldRedact && session?.chatId;
+        payload[sessionId] = canRedactSession ? redactSessionForStorage(session) : session;
+    }
+    await chrome.storage.local.set({ [SESSIONS_KEY]: payload });
+}
+
+async function loadSessionsState() {
+    if (sessionStateStore && typeof sessionStateStore.load === 'function') {
+        await sessionStateStore.load();
+        syncSessionMapsFromStore(sessionStateStore);
+        sessionsLoaded = true;
+        sessionsLoadPromise = null;
+        return sessionsById;
+    }
+
+    if (sessionsLoaded) return sessionsById;
+    if (sessionsLoadPromise) return sessionsLoadPromise;
+    sessionsLoadPromise = (async () => {
+        const stored = await chrome.storage.local.get([SESSIONS_KEY, ACTIVE_SESSION_KEY]);
+        const rawSessions = stored?.[SESSIONS_KEY];
+        sessionsById = new Map();
+        sessionsByChatId = new Map();
+
+        const ingest = (raw) => {
+            const normalized = normalizeSessionState(raw);
+            if (!normalized || (!normalized.isActive && !normalized.isPaused)) return;
+            sessionsById.set(normalized.sessionId, normalized);
+            if (normalized.chatId) {
+                sessionsByChatId.set(normalized.chatId, normalized.sessionId);
+            }
+        };
+
+        if (rawSessions && typeof rawSessions === 'object') {
+            for (const session of Object.values(rawSessions)) {
+                ingest(session);
+            }
+        }
+
+        const legacy = stored?.[ACTIVE_SESSION_KEY];
+        if (legacy && (!rawSessions || Object.keys(rawSessions).length === 0)) {
+            ingest(legacy);
+        }
+
+        sessionsLoaded = true;
+        sessionsLoadPromise = null;
+
+        try {
+            const store = await ensureHistoryStoreReady();
+            const historyStatus = await store.getStatus();
+            if (historyStatus?.historyEnabled) {
+                for (const session of sessionsById.values()) {
+                    if (!session || !session.chatId || !session.sessionId) continue;
+                    const needsHydrate =
+                        !Array.isArray(session.messages) ||
+                        session.messages.length === 0 ||
+                        !String(session.userQuery || '').trim();
+                    if (!needsHydrate) continue;
+                    try {
+                        const page = await store.listMessages(session.chatId, { limit: 240 });
+                        const messages = Array.isArray(page?.messages) ? page.messages : [];
+                        const sessionMessages = messages.filter(
+                            (msg) => msg?.sessionId === session.sessionId
+                        );
+                        if (sessionMessages.length > 0) {
+                            const mapped = sessionMessages
+                                .map(mapHistoryMessageToSessionMessage)
+                                .filter(Boolean);
+                            if (mapped.length > 0) {
+                                session.messages = mapped;
+                            }
+                            const userMsg = sessionMessages.find(
+                                (msg) =>
+                                    msg?.role === 'user' &&
+                                    typeof msg?.content === 'string' &&
+                                    msg.content.trim()
+                            );
+                            if (userMsg) {
+                                session.userQuery = userMsg.content;
+                                if (
+                                    !Number.isFinite(session.userMessageSequence) &&
+                                    Number.isFinite(userMsg.sequence)
+                                ) {
+                                    session.userMessageSequence = userMsg.sequence;
+                                }
+                            }
+                        }
+                        if (session.isFollowUp && Number.isFinite(session.userMessageSequence)) {
+                            try {
+                                const prior = await store.listMessages(session.chatId, {
+                                    limit: 12,
+                                    beforeSequence: session.userMessageSequence,
+                                });
+                                session.conversationContext = buildConversationContext(
+                                    prior?.messages,
+                                    { maxChars: 4000, maxMessages: 10 }
+                                );
+                            } catch {
+                                // ignore
+                            }
+                        }
+                    } catch (error) {
+                        // ignore hydration failures (locked chat, DB errors, etc.)
+                    }
+                }
+            }
+        } catch {
+            // ignore history hydration failures
+        }
+
+        if (legacy) {
+            await chrome.storage.local.remove(ACTIVE_SESSION_KEY);
+            await persistSessionsState();
+        }
+
+        return sessionsById;
+    })();
+    return sessionsLoadPromise;
+}
+
+async function getSessionById(sessionId) {
+    if (!sessionId) return null;
+    if (sessionStateStore && typeof sessionStateStore.getSessionById === 'function') {
+        const session = await sessionStateStore.getSessionById(sessionId);
+        syncSessionMapsFromStore(sessionStateStore);
+        return session;
+    }
+    await loadSessionsState();
+    return sessionsById.get(sessionId) || null;
+}
+
+async function getSessionForChat(chatId) {
+    if (!chatId) return null;
+    if (sessionStateStore && typeof sessionStateStore.getSessionForChat === 'function') {
+        const session = await sessionStateStore.getSessionForChat(chatId);
+        syncSessionMapsFromStore(sessionStateStore);
+        return session;
+    }
+    await loadSessionsState();
+    const sessionId = sessionsByChatId.get(chatId);
+    if (!sessionId) return null;
+    return sessionsById.get(sessionId) || null;
+}
+
+function pickMostRecentSession() {
+    if (sessionStateStore && typeof sessionStateStore.pickMostRecentSession === 'function') {
+        syncSessionMapsFromStore(sessionStateStore);
+        return sessionStateStore.pickMostRecentSession();
+    }
+    let best = null;
+    for (const session of sessionsById.values()) {
+        if (!session.isActive && !session.isPaused) continue;
+        if (!best || (session.startedAt || 0) > (best.startedAt || 0)) {
+            best = session;
+        }
+    }
+    return best;
+}
+
+async function saveSession(session) {
+    if (!session?.sessionId) return null;
+    if (sessionStateStore && typeof sessionStateStore.saveSession === 'function') {
+        const saved = await sessionStateStore.saveSession(session);
+        syncSessionMapsFromStore(sessionStateStore);
+        return saved;
+    }
+    await loadSessionsState();
+    sessionsById.set(session.sessionId, session);
+    if (session.chatId) {
+        sessionsByChatId.set(session.chatId, session.sessionId);
+    }
+    await persistSessionsState();
+    return session;
+}
+
+async function removeSession(sessionId) {
+    if (!sessionId) return;
+    if (sessionStateStore && typeof sessionStateStore.removeSession === 'function') {
+        await sessionStateStore.removeSession(sessionId);
+        responseChainsBySessionId.delete(sessionId);
+        syncSessionMapsFromStore(sessionStateStore);
+        return;
+    }
+    await loadSessionsState();
+    const existing = sessionsById.get(sessionId);
+    if (existing?.chatId && sessionsByChatId.get(existing.chatId) === sessionId) {
+        sessionsByChatId.delete(existing.chatId);
+    }
+    sessionsById.delete(sessionId);
+    responseChainsBySessionId.delete(sessionId);
+    await persistSessionsState();
+}
+
+// Tracks whether any Chrome window is currently focused (i.e., Chrome is the active app).
+// Used to avoid stealing OS focus when auto-focusing provider tabs while the user is in another app.
+let chromeHasFocus = false;
+
+async function refreshChromeFocusState() {
+    try {
+        const windows = await chrome.windows.getAll({ populate: false });
+        chromeHasFocus = Array.isArray(windows) && windows.some((win) => Boolean(win?.focused));
+    } catch (error) {
+        // Best-effort; leave previous value.
+    }
+}
+
+refreshChromeFocusState().catch(() => {});
+
+const AUTO_FOCUS_SETTINGS = {
+    enabled: true,
+    debateFocus: true,
+    parallelCycleMs: 3500,
+};
+
+const AUTO_FOCUS_DEFAULT_STATE = {
+    sessionId: null,
+    mode: null,
+    agentIds: [],
+    tabIds: {},
+    currentIndex: 0,
+    timerId: null,
+    lastUserTabId: null,
+    lastUserWindowId: null,
+};
+
+let autoFocusState = { ...AUTO_FOCUS_DEFAULT_STATE };
+
+function enqueueDebateResponse(message, label) {
+    const sessionId = message?.sessionId;
+    if (!sessionId) return;
+    const chain = responseChainsBySessionId.get(sessionId) || Promise.resolve();
+    const next = chain
+        .then(() => handleDebateResponse(message))
+        .catch((error) => {
+            console.error(`[MLC Debate] Error handling ${label || 'response'}:`, error);
+        });
+    responseChainsBySessionId.set(sessionId, next);
+}
+
+// Attachment payloads are intentionally kept out of chrome.storage.local (quota + privacy).
+// They live in-memory per session only and are cleared once delivered.
+// sentTo: attachments have been accounted for that provider (uploaded+sent, or intentionally skipped).
+// preparedTo: attachments have been pre-attached to the provider UI but not necessarily sent yet.
+const sessionAttachmentsById = new Map(); // sessionId -> { sessionId, attachments, sentTo, preparedTo }
+
+function normalizeProviderKey(provider) {
+    return providerRegistry.normalizeProviderKey(provider);
+}
+
+function getSupportedProviderKeys() {
+    return providerRegistry.getSupportedProviderKeys();
+}
+
+function isSupportedProviderKey(provider) {
+    return providerRegistry.isSupportedProviderKey(provider);
+}
+
+function initProviderFlagMap(providers, initialValue) {
+    return providerRegistry.buildProviderFlagMap(providers, initialValue);
+}
+
+function listSessionProviders(session, fallbackProvider) {
+    return providerRegistry.listSessionProviders(session, fallbackProvider);
+}
+
+function getSessionProviders(session, fallbackProvider) {
+    return providerRegistry.getSessionProviders(session, fallbackProvider);
+}
+
+function stripDataUrlPrefix(value) {
+    const raw = typeof value === 'string' ? value.trim() : '';
+    if (!raw) return '';
+    if (!raw.startsWith('data:')) return raw;
+    const comma = raw.indexOf(',');
+    return comma === -1 ? '' : raw.slice(comma + 1);
+}
+
+function estimateBytesFromBase64(base64) {
+    if (!base64) return 0;
+    const cleaned = base64.replace(/\s+/g, '');
+    const padding = cleaned.endsWith('==') ? 2 : cleaned.endsWith('=') ? 1 : 0;
+    return Math.max(0, Math.floor((cleaned.length * 3) / 4) - padding);
+}
+
+function normalizeIncomingAttachments(input) {
+    if (!Array.isArray(input) || input.length === 0) return [];
+    const MAX_FILES = 10;
+    const MAX_TOTAL_BYTES = 20 * 1024 * 1024;
+
+    const output = [];
+    let totalBytes = 0;
+
+    for (const raw of input.slice(0, MAX_FILES)) {
+        if (!raw || typeof raw !== 'object') continue;
+        const name =
+            typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : 'attachment';
+        const type =
+            typeof raw.type === 'string' && raw.type.trim()
+                ? raw.type.trim()
+                : 'application/octet-stream';
+        const base64 = stripDataUrlPrefix(raw.base64);
+        if (!base64) continue;
+        const size = Number.isFinite(raw.size) ? raw.size : estimateBytesFromBase64(base64);
+        if (!Number.isFinite(size) || size <= 0) continue;
+        if (totalBytes + size > MAX_TOTAL_BYTES) break;
+        totalBytes += size;
+        output.push({
+            name,
+            type,
+            size,
+            lastModified: Number.isFinite(raw.lastModified) ? raw.lastModified : Date.now(),
+            base64,
+        });
+    }
+
+    return output;
+}
+
+function initStringFlagMap(keys, initialValue) {
+    const map = {};
+    if (!Array.isArray(keys)) return map;
+    for (const raw of keys) {
+        const key = typeof raw === 'string' ? raw.trim() : '';
+        if (!key || Object.prototype.hasOwnProperty.call(map, key)) continue;
+        map[key] = Boolean(initialValue);
+    }
+    return map;
+}
+
+function setActiveSessionAttachments(sessionId, attachments, agents = null) {
+    const sanitized = normalizeIncomingAttachments(attachments);
+    if (!sessionId || sanitized.length === 0) {
+        sessionAttachmentsById.delete(sessionId);
+        return;
+    }
+
+    const agentIds = Array.isArray(agents)
+        ? agents
+              .map((agent) => (typeof agent === 'string' ? agent : agent?.agentId))
+              .filter(Boolean)
+        : [];
+    sessionAttachmentsById.set(sessionId, {
+        sessionId,
+        attachments: sanitized,
+        agentIds,
+        sentTo: initStringFlagMap(agentIds, false),
+        preparedTo: initStringFlagMap(agentIds, false),
+    });
+}
+
+function hasSessionAttachments(sessionId) {
+    const record = sessionAttachmentsById.get(sessionId);
+    return Boolean(record && Array.isArray(record.attachments) && record.attachments.length > 0);
+}
+
+function getPendingSessionAttachments(sessionId, agentId, { includePrepared = false } = {}) {
+    const record = sessionAttachmentsById.get(sessionId);
+    if (!record) return null;
+    const key = typeof agentId === 'string' ? agentId.trim() : '';
+    if (!key) return null;
+    if (record.sentTo?.[key]) return null;
+    if (!includePrepared && record.preparedTo?.[key]) return null;
+    return record.attachments || null;
+}
+
+function markSessionAttachmentsPrepared(session, agentId) {
+    if (!session?.sessionId) return;
+    const record = sessionAttachmentsById.get(session.sessionId);
+    if (!record) return;
+    const key = typeof agentId === 'string' ? agentId.trim() : '';
+    if (!key) return;
+    if (!record.preparedTo || typeof record.preparedTo !== 'object') {
+        record.preparedTo = {};
+    }
+    record.preparedTo[key] = true;
+    if (!record.sentTo || typeof record.sentTo !== 'object') {
+        record.sentTo = {};
+    }
+    if (typeof record.sentTo[key] !== 'boolean') {
+        record.sentTo[key] = false;
+    }
+}
+
+function markSessionAttachmentsSent(session, agentId) {
+    if (!session?.sessionId) return;
+    const record = sessionAttachmentsById.get(session.sessionId);
+    if (!record) return;
+    const key = typeof agentId === 'string' ? agentId.trim() : '';
+    if (!key) return;
+    if (!record.sentTo || typeof record.sentTo !== 'object') {
+        record.sentTo = {};
+    }
+    record.sentTo[key] = true;
+    if (!record.preparedTo || typeof record.preparedTo !== 'object') {
+        record.preparedTo = {};
+    }
+    record.preparedTo[key] = true;
+
+    const requiredAgentIds =
+        Array.isArray(record.agentIds) && record.agentIds.length > 0
+            ? record.agentIds
+            : Object.keys(record.sentTo || {});
+    const allSent =
+        requiredAgentIds.length > 0 && requiredAgentIds.every((id) => record.sentTo?.[id]);
+    if (allSent) {
+        sessionAttachmentsById.delete(session.sessionId);
+    }
+}
+
+function clearSessionAttachments(sessionId) {
+    if (!sessionId) return;
+    sessionAttachmentsById.delete(sessionId);
+}
+
+function notifyAttachmentFallback(session, provider) {
+    const sessionId = session?.sessionId || null;
+    if (!sessionId) return;
+    const label = formatLLMLabel(provider);
+    const timestamp = Date.now();
+    const content = `Attachment upload failed for ${label}. Sent this message without files. If ${label} needs the file, attach it manually in the ${label} tab and resend.`;
+    sendMessageToPopup({
+        type: 'UI_MESSAGE_ADD',
+        chatId: session?.chatId || null,
+        sessionId,
+        role: 'system',
+        content,
+        timestamp,
+    });
+}
+
+function generateSessionId() {
+    return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+async function getPreferredTabs() {
+    const stored = await chrome.storage.local.get(PREFERRED_TABS_KEY);
+    return stored && stored[PREFERRED_TABS_KEY]
+        ? stored[PREFERRED_TABS_KEY]
+        : { chatgpt: null, gemini: null };
+}
+
+async function setPreferredTabs(payload = {}) {
+    const { chatgptTabId, geminiTabId } = payload;
+    const current = await getPreferredTabs();
+    const next = { ...current };
+
+    if (Object.prototype.hasOwnProperty.call(payload, 'chatgptTabId')) {
+        next.chatgpt = Number.isFinite(chatgptTabId) ? chatgptTabId : null;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'geminiTabId')) {
+        next.gemini = Number.isFinite(geminiTabId) ? geminiTabId : null;
+    }
+
+    await chrome.storage.local.set({ [PREFERRED_TABS_KEY]: next });
+    return next;
+}
+
+function normalizeProvider(provider) {
+    return providerRegistry.normalizeProvider(provider);
+}
+
+function getTabUrlCandidate(tab) {
+    if (!tab) return '';
+    if (typeof tab.url === 'string' && tab.url) return tab.url;
+    if (typeof tab.pendingUrl === 'string' && tab.pendingUrl) return tab.pendingUrl;
+    return '';
+}
+
+const tabProfileStore =
+    mlcTabProfileStoreModule && typeof mlcTabProfileStoreModule.createTabProfileStore === 'function'
+        ? mlcTabProfileStoreModule.createTabProfileStore({
+              storageArea: chrome.storage.local,
+              storageKey: TAB_PROFILES_KEY,
+              providerRegistry,
+              formatProviderLabel: (provider) => formatLLMLabel(provider),
+              getTabUrlCandidate,
+          })
+        : null;
+
+function getEmptyProfilesState() {
+    if (tabProfileStore && typeof tabProfileStore.createEmptyState === 'function') {
+        return tabProfileStore.createEmptyState();
+    }
+    const defaults = {};
+    getSupportedProviderKeys().forEach((provider) => {
+        defaults[provider] = null;
+    });
+    return { profiles: [], defaults };
+}
+
+function generateProfileId() {
+    if (tabProfileStore && typeof tabProfileStore.generateProfileId === 'function') {
+        return tabProfileStore.generateProfileId();
+    }
+    return 'profile_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+function normalizeInlineText(value) {
+    return String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function sanitizeModelHint(provider, modelHint) {
+    if (tabProfileStore && typeof tabProfileStore.sanitizeModelHint === 'function') {
+        return tabProfileStore.sanitizeModelHint(provider, modelHint);
+    }
+    const normalizedProvider = normalizeProvider(provider);
+    const cleaned = normalizeInlineText(modelHint)
+        .replace(/^Model:\s*/i, '')
+        .trim();
+    if (!cleaned) return '';
+
+    // Model labels should be short and single-line. Anything longer is almost
+    // certainly a bad DOM match (e.g., capturing chat transcript text).
+    const maxLen = 80;
+    if (cleaned.length > maxLen) return '';
+
+    const words = cleaned.split(' ').filter(Boolean);
+    if (words.length > 12) return '';
+
+    const suspicious = [
+        /iteration\s*\d/i,
+        /user (query|message)/i,
+        /\bnow respond\b/i,
+        /\bmulti[-\s]llm\b/i,
+        /\bmulti[-\s]agent\b/i,
+        /\bdebate\b/i,
+        /\bhere is\b/i,
+        /\bchatgpt\b.*\banswer\b/i,
+        /\bgemini\b.*\banswer\b/i,
+    ];
+    if (suspicious.some((re) => re.test(cleaned))) return '';
+
+    // Lightweight provider sanity checks (non-blocking).
+    if (normalizedProvider === 'chatgpt') {
+        if (!/(gpt|o1|o3|o4)/i.test(cleaned)) {
+            // ChatGPT model labels almost always include GPT/o1/o3/o4; if not, still allow short labels.
+            // No-op.
+        }
+    } else {
+        // Gemini labels often include "Gemini", but may be abbreviated; no strict check.
+    }
+
+    return cleaned;
+}
+
+function sanitizeProfilesState(state) {
+    if (tabProfileStore && typeof tabProfileStore.sanitizeProfilesState === 'function') {
+        return tabProfileStore.sanitizeProfilesState(state);
+    }
+    if (!state || !Array.isArray(state.profiles)) return { state, changed: false };
+    let changed = false;
+    const nextProfiles = state.profiles.map((profile) => {
+        const next = { ...profile };
+        const safeHint = sanitizeModelHint(next.provider, next.modelHint);
+        if (safeHint !== (next.modelHint || '')) {
+            next.modelHint = safeHint;
+            changed = true;
+        }
+        return next;
+    });
+    const nextState = changed ? { ...state, profiles: nextProfiles } : state;
+    return { state: nextState, changed };
+}
+
+function getExpectedHosts(provider) {
+    return providerRegistry.getExpectedHosts(provider);
+}
+
+function isExpectedHost(provider, url) {
+    return providerRegistry.isExpectedHost(provider, url);
+}
+
+async function loadTabProfiles() {
+    if (tabProfileStore && typeof tabProfileStore.load === 'function') {
+        return tabProfileStore.load();
+    }
+    const stored = await chrome.storage.local.get(TAB_PROFILES_KEY);
+    if (stored && stored[TAB_PROFILES_KEY]) {
+        const next = stored[TAB_PROFILES_KEY];
+        if (Array.isArray(next.profiles) && next.defaults) {
+            const baseDefaults = getEmptyProfilesState().defaults;
+            const storedDefaults =
+                next.defaults && typeof next.defaults === 'object' ? next.defaults : {};
+            const defaults = { ...baseDefaults };
+            for (const [provider, profileId] of Object.entries(storedDefaults)) {
+                const key = normalizeProviderKey(provider);
+                if (!key) continue;
+                if (!Object.prototype.hasOwnProperty.call(defaults, key)) continue;
+                defaults[key] = profileId || null;
+            }
+            const state = { profiles: next.profiles, defaults };
+            return sanitizeProfilesState(state).state;
+        }
+    }
+    return getEmptyProfilesState();
+}
+
+async function saveTabProfiles(state) {
+    if (tabProfileStore && typeof tabProfileStore.save === 'function') {
+        return tabProfileStore.save(state);
+    }
+    await chrome.storage.local.set({ [TAB_PROFILES_KEY]: state });
+    return state;
+}
+
+function findProfileById(state, profileId) {
+    if (tabProfileStore && typeof tabProfileStore.findById === 'function') {
+        return tabProfileStore.findById(state, profileId);
+    }
+    return state.profiles.find((profile) => profile.profileId === profileId);
+}
+
+function findProfileByTabId(state, provider, tabId) {
+    if (tabProfileStore && typeof tabProfileStore.findByTabId === 'function') {
+        return tabProfileStore.findByTabId(state, provider, tabId);
+    }
+    return state.profiles.find(
+        (profile) => profile.provider === provider && profile.tabId === tabId
+    );
+}
+
+function formatDefaultProfileLabel(provider, tab) {
+    if (tabProfileStore && typeof tabProfileStore.formatDefaultLabel === 'function') {
+        return tabProfileStore.formatDefaultLabel(provider, tab);
+    }
+    const base = formatLLMLabel(provider);
+    if (tab?.title) {
+        const trimmed = tab.title.trim();
+        if (trimmed) {
+            return `${base} - ${trimmed.length > 32 ? `${trimmed.slice(0, 29)}...` : trimmed}`;
+        }
+    }
+    return `${base} profile`;
+}
+
+function applyProfilePatch(profile, patch = {}) {
+    if (tabProfileStore && typeof tabProfileStore.applyPatch === 'function') {
+        return tabProfileStore.applyPatch(profile, patch);
+    }
+    const next = { ...profile };
+    if (Object.prototype.hasOwnProperty.call(patch, 'label')) {
+        next.label = String(patch.label || '').trim() || next.label;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'tabId')) {
+        next.tabId = Number.isFinite(patch.tabId) ? patch.tabId : null;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'windowId')) {
+        next.windowId = Number.isFinite(patch.windowId) ? patch.windowId : null;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'modelHint')) {
+        next.modelHint = sanitizeModelHint(next.provider, patch.modelHint);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'lastKnownTitle')) {
+        next.lastKnownTitle = patch.lastKnownTitle ? String(patch.lastKnownTitle) : '';
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'lastKnownUrl')) {
+        next.lastKnownUrl = patch.lastKnownUrl ? String(patch.lastKnownUrl) : '';
+    }
+    return next;
+}
+
+async function validateProfile(profile) {
+    if (tabProfileStore && typeof tabProfileStore.validateProfile === 'function') {
+        return tabProfileStore.validateProfile(profile);
+    }
+    const updatedAt = Date.now();
+    if (!profile || !profile.tabId) {
+        return { ...profile, status: 'offline', updatedAt };
+    }
+    try {
+        const tab = await chrome.tabs.get(profile.tabId);
+        const url = getTabUrlCandidate(tab);
+        const status = url
+            ? isExpectedHost(profile.provider, url)
+                ? 'ok'
+                : 'wrong_host'
+            : 'unknown';
+        return {
+            ...profile,
+            tabId: tab.id,
+            windowId: tab.windowId,
+            lastKnownTitle: tab.title || profile.lastKnownTitle || '',
+            lastKnownUrl: url || profile.lastKnownUrl || '',
+            status,
+            lastSeenAt: Date.now(),
+            updatedAt,
+        };
+    } catch (error) {
+        return {
+            ...profile,
+            status: 'offline',
+            windowId: null,
+            updatedAt,
+        };
+    }
+}
+
+async function refreshAllProfiles({ persist = true } = {}) {
+    if (tabProfileStore && typeof tabProfileStore.refreshAllProfiles === 'function') {
+        if (!persist) {
+            return tabProfileStore.refreshAllProfiles({ persist: false });
+        }
+        return withTabProfilesLock(async () =>
+            tabProfileStore.refreshAllProfiles({ persist: true })
+        );
+    }
+    if (!persist) {
+        const state = await loadTabProfiles();
+        const updatedProfiles = await Promise.all(
+            state.profiles.map((profile) => validateProfile(profile))
+        );
+        return sanitizeProfilesState({ ...state, profiles: updatedProfiles }).state;
+    }
+
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        const updatedProfiles = await Promise.all(
+            state.profiles.map((profile) => validateProfile(profile))
+        );
+        const next = sanitizeProfilesState({ ...state, profiles: updatedProfiles }).state;
+        await saveTabProfiles(next);
+        return next;
+    });
+}
+
+async function notifyTabProfiles(stateOverride = null) {
+    const state = stateOverride || (await refreshAllProfiles({ persist: true }));
+    sendMessageToPopup({
+        type: 'TAB_PROFILES',
+        profiles: state.profiles,
+        defaults: state.defaults,
+    });
+}
+
+const CONTENT_SCRIPT_FILES = ['captureUtils.js', 'contentScript.js'];
+const contentScriptInjectionPromises = new Map();
+
+function isMissingContentScriptError(error) {
+    const message = String(error?.message || '');
+    if (!message) return false;
+    if (message.includes('Receiving end does not exist')) return true;
+    if (message.includes('Could not establish connection')) return true;
+    if (message.includes('message port closed')) return true;
+    return false;
+}
+
+function isContentScriptInjectableUrl(provider, url) {
+    return providerRegistry.isContentScriptInjectableUrl(provider, url);
+}
+
+async function injectProviderContentScripts(tabId, provider) {
+    if (!Number.isFinite(tabId)) return false;
+    const normalizedProvider = normalizeProviderKey(provider);
+    if (!normalizedProvider) return false;
+
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        const urlCandidate = getTabUrlCandidate(tab);
+        if (!isContentScriptInjectableUrl(normalizedProvider, urlCandidate)) {
+            return false;
+        }
+
+        await chrome.scripting.executeScript({
+            target: { tabId },
+            files: CONTENT_SCRIPT_FILES,
+        });
+
+        // Give the content script a moment to register its message listeners.
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        return true;
+    } catch (error) {
+        console.warn(
+            `[MLC Background] Failed to inject content scripts for ${normalizedProvider} tab ${tabId}:`,
+            error?.message || error
+        );
+        return false;
+    }
+}
+
+async function ensureProviderContentScripts(tabId, provider) {
+    if (!Number.isFinite(tabId)) return false;
+    if (contentScriptInjectionPromises.has(tabId)) {
+        try {
+            return await contentScriptInjectionPromises.get(tabId);
+        } catch (error) {
+            return false;
+        }
+    }
+
+    const promise = (async () => {
+        try {
+            return await injectProviderContentScripts(tabId, provider);
+        } finally {
+            contentScriptInjectionPromises.delete(tabId);
+        }
+    })();
+    contentScriptInjectionPromises.set(tabId, promise);
+    return promise;
+}
+
+async function pingTab(tabId, provider) {
+    if (!Number.isFinite(tabId)) return false;
+    const normalizedProvider = normalizeProviderKey(provider) || provider;
+    const timeoutMs = 1800;
+
+    const attemptPing = async () => {
+        const response = await Promise.race([
+            chrome.tabs.sendMessage(tabId, { type: 'PING' }),
+            new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+        ]);
+        return Boolean(response && (response.type === 'PONG' || response.status === 'ready'));
+    };
+
+    try {
+        return await attemptPing();
+    } catch (error) {
+        if (isMissingContentScriptError(error)) {
+            const injected = await ensureProviderContentScripts(tabId, normalizedProvider);
+            if (injected) {
+                try {
+                    return await attemptPing();
+                } catch (retryError) {
+                    console.warn(
+                        `[MLC Background] ${normalizedProvider} tab ping still failing after inject:`,
+                        retryError?.message || retryError
+                    );
+                    return false;
+                }
+            }
+        }
+        console.warn(
+            `[MLC Background] ${normalizedProvider} tab ping failed:`,
+            error?.message || error
+        );
+        return false;
+    }
+}
+
+async function migratePreferredTabsToProfiles() {
+    return withTabProfilesLock(async () => {
+        const existing = await chrome.storage.local.get(TAB_PROFILES_KEY);
+        if (existing && existing[TAB_PROFILES_KEY]) return;
+        const preferred = await getPreferredTabs();
+        if (!preferred.chatgpt && !preferred.gemini) return;
+
+        const state = getEmptyProfilesState();
+        for (const provider of ['chatgpt', 'gemini']) {
+            const tabId = preferred[provider];
+            if (!Number.isFinite(tabId)) continue;
+            const profileId = generateProfileId();
+            let profile = {
+                profileId,
+                provider,
+                tabId,
+                windowId: null,
+                label: provider === 'gemini' ? 'Gemini profile' : 'ChatGPT profile',
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+                lastSeenAt: 0,
+                status: 'unknown',
+                modelHint: '',
+                lastKnownTitle: '',
+                lastKnownUrl: '',
+                inUseBySessionId: null,
+            };
+            profile = await validateProfile(profile);
+            state.profiles.push(profile);
+            state.defaults[provider] = profileId;
+        }
+
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+    });
+}
+
+async function claimTabAsProfile({
+    provider,
+    tabId,
+    label,
+    profileId,
+    setDefault = false,
+    skipHostCheck = false,
+}) {
+    return withTabProfilesLock(async () => {
+        const normalizedProvider = normalizeProvider(provider);
+        if (!Number.isFinite(tabId)) {
+            return { ok: false, error: 'Tab ID is invalid.' };
+        }
+        let tab;
+        try {
+            tab = await chrome.tabs.get(tabId);
+        } catch (error) {
+            return { ok: false, error: 'Tab not found.' };
+        }
+        const tabUrl = getTabUrlCandidate(tab);
+        const status = tabUrl
+            ? isExpectedHost(normalizedProvider, tabUrl)
+                ? 'ok'
+                : 'wrong_host'
+            : 'unknown';
+
+        if (!skipHostCheck && status !== 'ok') {
+            return {
+                ok: false,
+                error: `Selected tab is not a valid ${formatLLMLabel(normalizedProvider)} tab.`,
+            };
+        }
+
+        const state = await loadTabProfiles();
+        let profile = profileId ? findProfileById(state, profileId) : null;
+        if (!profile) {
+            profile = findProfileByTabId(state, normalizedProvider, tabId);
+        }
+
+        if (!profile) {
+            profile = {
+                profileId: generateProfileId(),
+                provider: normalizedProvider,
+                tabId: tabId,
+                windowId: tab.windowId || null,
+                label: label
+                    ? String(label).trim()
+                    : formatDefaultProfileLabel(normalizedProvider, tab),
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+                lastSeenAt: Date.now(),
+                status,
+                modelHint: '',
+                lastKnownTitle: tab.title || '',
+                lastKnownUrl: tabUrl || '',
+                inUseBySessionId: null,
+            };
+            state.profiles.push(profile);
+        } else {
+            profile = applyProfilePatch(profile, {
+                tabId: tabId,
+                windowId: tab.windowId,
+                label: label ? String(label).trim() : profile.label,
+                lastKnownTitle: tab.title || profile.lastKnownTitle,
+                lastKnownUrl: tabUrl || profile.lastKnownUrl,
+            });
+            profile.updatedAt = Date.now();
+            profile.lastSeenAt = Date.now();
+            profile.status = status;
+            const index = state.profiles.findIndex((item) => item.profileId === profile.profileId);
+            if (index >= 0) state.profiles[index] = profile;
+        }
+
+        if (setDefault || !state.defaults[normalizedProvider]) {
+            state.defaults[normalizedProvider] = profile.profileId;
+        }
+
+        profile = await validateProfile(profile);
+        const index = state.profiles.findIndex((item) => item.profileId === profile.profileId);
+        if (index >= 0) state.profiles[index] = profile;
+        await saveTabProfiles(state);
+        await syncSessionProfileBinding(profile);
+        await notifyTabProfiles(state);
+        return { ok: true, profile };
+    });
+}
+
+async function createProfileFromActiveTab(provider, label, profileId) {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!activeTab) {
+        return { ok: false, error: 'No active tab found.' };
+    }
+    return claimTabAsProfile({
+        provider,
+        tabId: activeTab.id,
+        label,
+        profileId,
+    });
+}
+
+async function updateTabProfile(profileId, patch) {
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        const profile = findProfileById(state, profileId);
+        if (!profile) return { ok: false, error: 'Profile not found.' };
+
+        let next = applyProfilePatch(profile, patch);
+        if (Number.isFinite(patch?.tabId)) {
+            try {
+                const tab = await chrome.tabs.get(patch.tabId);
+                const tabUrl = getTabUrlCandidate(tab);
+                if (!isExpectedHost(profile.provider, tabUrl)) {
+                    return { ok: false, error: 'Selected tab is not valid for this provider.' };
+                }
+                next = applyProfilePatch(next, {
+                    windowId: tab.windowId,
+                    lastKnownTitle: tab.title || next.lastKnownTitle,
+                    lastKnownUrl: tabUrl || next.lastKnownUrl,
+                });
+                next.status = 'ok';
+                next.lastSeenAt = Date.now();
+            } catch (error) {
+                return { ok: false, error: 'Tab not found.' };
+            }
+        }
+
+        next.updatedAt = Date.now();
+        const updated = await validateProfile(next);
+        const index = state.profiles.findIndex((item) => item.profileId === profileId);
+        if (index >= 0) state.profiles[index] = updated;
+        await saveTabProfiles(state);
+        await syncSessionProfileBinding(updated);
+        await notifyTabProfiles(state);
+        return { ok: true, profile: updated };
+    });
+}
+
+async function deleteTabProfile(profileId) {
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        const profile = findProfileById(state, profileId);
+        if (!profile) return { ok: false, error: 'Profile not found.' };
+        state.profiles = state.profiles.filter((item) => item.profileId !== profileId);
+        for (const provider of Object.keys(state.defaults || {})) {
+            if (state.defaults[provider] === profileId) {
+                state.defaults[provider] = null;
+            }
+        }
+        await saveTabProfiles(state);
+        if (profile.inUseBySessionId) {
+            await pauseDebateSession(
+                profile.inUseBySessionId,
+                `Profile "${profile.label}" was removed.`,
+                profile.provider,
+                {
+                    profileId: profile.profileId,
+                }
+            );
+        }
+        await notifyTabProfiles(state);
+        return { ok: true };
+    });
+}
+
+async function setDefaultProfile(provider, profileId) {
+    return withTabProfilesLock(async () => {
+        const normalizedProvider = normalizeProvider(provider);
+        const state = await loadTabProfiles();
+        if (profileId) {
+            const profile = findProfileById(state, profileId);
+            if (!profile || profile.provider !== normalizedProvider) {
+                return { ok: false, error: 'Profile not found for provider.' };
+            }
+            state.defaults[normalizedProvider] = profileId;
+        } else {
+            state.defaults[normalizedProvider] = null;
+        }
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+        return { ok: true };
+    });
+}
+
+async function focusTab(tabId, options = {}) {
+    if (!Number.isFinite(tabId)) return { ok: false, error: 'Invalid tab ID.' };
+    const activateTab = options.activateTab !== false;
+    const focusWindow = options.focusWindow !== false;
+    const forceWindowFocus = options.forceWindowFocus === true;
+
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        if (activateTab) {
+            await chrome.tabs.update(tabId, { active: true });
+        }
+
+        // Only focus the Chrome window if explicitly requested OR Chrome is already focused.
+        // This prevents the extension from pulling the user out of other apps (macOS/Windows).
+        const shouldFocusWindow = focusWindow && (forceWindowFocus || chromeHasFocus);
+        if (shouldFocusWindow && tab.windowId) {
+            await chrome.windows.update(tab.windowId, { focused: true });
+        }
+
+        return { ok: true };
+    } catch (error) {
+        return { ok: false, error: 'Tab not found.' };
+    }
+}
+
+async function captureUserFocusTarget() {
+    try {
+        const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        if (!tab || !Number.isFinite(tab.id)) return null;
+        return { tabId: tab.id, windowId: tab.windowId };
+    } catch (error) {
+        return null;
+    }
+}
+
+async function restoreUserFocusTarget() {
+    if (!Number.isFinite(autoFocusState.lastUserTabId)) return;
+    await focusTab(autoFocusState.lastUserTabId);
+}
+
+async function stopAutoFocus(reason, { restoreFocus } = {}) {
+    if (autoFocusState.timerId) {
+        clearTimeout(autoFocusState.timerId);
+        autoFocusState.timerId = null;
+    }
+    const shouldRestore =
+        typeof restoreFocus === 'boolean' ? restoreFocus : autoFocusState.mode === 'parallel';
+    if (shouldRestore) {
+        await restoreUserFocusTarget();
+    }
+    if (reason) {
+        console.log('[MLC AutoFocus] Stopped:', reason);
+    }
+    autoFocusState = { ...AUTO_FOCUS_DEFAULT_STATE };
+}
+
+async function ensureDebateAutoFocus(session, provider, tabId) {
+    if (!AUTO_FOCUS_SETTINGS.enabled || !AUTO_FOCUS_SETTINGS.debateFocus) return;
+    if (!session?.sessionId || !Number.isFinite(tabId)) return;
+    if (autoFocusState.sessionId && autoFocusState.sessionId !== session.sessionId) {
+        await stopAutoFocus('session_switched', { restoreFocus: false });
+    }
+    if (!autoFocusState.sessionId) {
+        const focusTarget = await captureUserFocusTarget();
+        if (focusTarget) {
+            autoFocusState.lastUserTabId = focusTarget.tabId;
+            autoFocusState.lastUserWindowId = focusTarget.windowId;
+        }
+    }
+    autoFocusState.sessionId = session.sessionId;
+    autoFocusState.mode = 'debate';
+    await focusTab(tabId);
+}
+
+async function startParallelAutoFocus(session, providers, resolvedTabs) {
+    if (!AUTO_FOCUS_SETTINGS.enabled) return;
+    if (!session?.sessionId || !Array.isArray(providers) || providers.length === 0) return;
+    if (autoFocusState.sessionId && autoFocusState.sessionId !== session.sessionId) {
+        await stopAutoFocus('session_switched', { restoreFocus: false });
+    }
+    if (!autoFocusState.sessionId) {
+        const focusTarget = await captureUserFocusTarget();
+        if (focusTarget) {
+            autoFocusState.lastUserTabId = focusTarget.tabId;
+            autoFocusState.lastUserWindowId = focusTarget.windowId;
+        }
+    }
+    autoFocusState.sessionId = session.sessionId;
+    autoFocusState.mode = 'parallel';
+    autoFocusState.agentIds = providers.map((id) => String(id || '').trim()).filter(Boolean);
+    autoFocusState.tabIds = { ...(resolvedTabs || {}) };
+    autoFocusState.currentIndex = 0;
+    if (autoFocusState.timerId) {
+        clearTimeout(autoFocusState.timerId);
+        autoFocusState.timerId = null;
+    }
+    autoFocusState.timerId = setTimeout(runParallelAutoFocusCycle, 0);
+}
+
+async function runParallelAutoFocusCycle() {
+    if (!AUTO_FOCUS_SETTINGS.enabled) return;
+    const sessionId = autoFocusState.sessionId;
+    if (!sessionId || autoFocusState.mode !== 'parallel') {
+        autoFocusState.timerId = null;
+        return;
+    }
+    const session = await getSessionById(sessionId);
+    if (!session || session.mode !== 'parallel' || session.isPaused) {
+        await stopAutoFocus('session_inactive');
+        return;
+    }
+
+    const waiting = Array.isArray(session.waitingFor)
+        ? session.waitingFor.map((id) => String(id || '').trim()).filter(Boolean)
+        : [];
+    if (waiting.length === 0) {
+        await stopAutoFocus('complete');
+        return;
+    }
+
+    autoFocusState.agentIds = waiting;
+    const index = autoFocusState.currentIndex % waiting.length;
+    const agentId = waiting[index];
+    autoFocusState.currentIndex = (index + 1) % waiting.length;
+    const tabId =
+        autoFocusState.tabIds?.[agentId] ||
+        session.agentTabIds?.[agentId] ||
+        session.tabIds?.[agentId];
+    if (Number.isFinite(tabId)) {
+        await focusTab(tabId);
+    }
+
+    if (autoFocusState.sessionId === sessionId && autoFocusState.mode === 'parallel') {
+        autoFocusState.timerId = setTimeout(
+            runParallelAutoFocusCycle,
+            AUTO_FOCUS_SETTINGS.parallelCycleMs
+        );
+    } else {
+        autoFocusState.timerId = null;
+    }
+}
+
+async function openProviderTab(provider, options = {}) {
+    const normalizedProvider = normalizeProvider(provider);
+    const adapterOpenUrl = providerAdapters?.[normalizedProvider]?.openUrl;
+    const url = adapterOpenUrl || providerRegistry.getOpenUrl(normalizedProvider);
+    const focus = options.focus !== false;
+    const tab = await chrome.tabs.create({
+        url,
+        active: focus,
+        windowId: Number.isFinite(options.windowId) ? options.windowId : undefined,
+    });
+    return { ok: true, provider: normalizedProvider, tabId: tab.id, windowId: tab.windowId };
+}
+
+async function connectProvider(provider, options = {}) {
+    const normalizedProvider = normalizeProvider(provider);
+    const opened = await openProviderTab(normalizedProvider, options);
+    if (!opened?.ok) return opened || { ok: false, error: 'Failed to open provider tab.' };
+    let claimed = await claimTabAsProfile({
+        provider: normalizedProvider,
+        tabId: opened.tabId,
+        setDefault: true,
+    });
+    if (!claimed?.ok) {
+        claimed = await claimTabAsProfile({
+            provider: normalizedProvider,
+            tabId: opened.tabId,
+            setDefault: true,
+            skipHostCheck: true,
+        });
+    }
+    if (!claimed?.ok) return claimed || { ok: false, error: 'Failed to bind provider tab.' };
+    return {
+        ok: true,
+        provider: normalizedProvider,
+        tabId: opened.tabId,
+        profile: claimed.profile,
+    };
+}
+
+async function syncSessionProfileBinding(profile) {
+    if (!profile?.inUseBySessionId) return;
+    const session = await getSessionById(profile.inUseBySessionId);
+    if (!session) return;
+    const tabId = Number.isFinite(profile.tabId) ? profile.tabId : null;
+    const provider = normalizeProviderKey(profile.provider);
+    let changed = false;
+
+    if (provider && session.profileIds?.[provider] === profile.profileId) {
+        session.tabIds[provider] = tabId;
+        changed = true;
+    }
+
+    if (Array.isArray(session.participants)) {
+        session.participants = session.participants.map((participant) => {
+            if (!participant || participant.profileId !== profile.profileId) return participant;
+            changed = true;
+            return { ...participant, tabId };
+        });
+    }
+
+    if (session.agentTabIds && typeof session.agentTabIds === 'object') {
+        const participants = Array.isArray(session.participants) ? session.participants : [];
+        participants.forEach((participant) => {
+            if (participant?.profileId !== profile.profileId) return;
+            if (!participant.agentId) return;
+            session.agentTabIds[participant.agentId] = tabId;
+            changed = true;
+        });
+    }
+
+    if (changed) {
+        await saveSession(session);
+    }
+}
+
+async function updateProfileModelHint(tabId, provider, modelHint) {
+    if (!Number.isFinite(tabId)) return;
+    return withTabProfilesLock(async () => {
+        const normalizedProvider = normalizeProvider(provider);
+        const state = await loadTabProfiles();
+        const profile = state.profiles.find(
+            (item) => item.provider === normalizedProvider && item.tabId === tabId
+        );
+        if (!profile) return;
+        const next = applyProfilePatch(profile, {
+            modelHint: sanitizeModelHint(normalizedProvider, modelHint),
+        });
+        next.updatedAt = Date.now();
+        const index = state.profiles.findIndex((item) => item.profileId === profile.profileId);
+        if (index >= 0) state.profiles[index] = next;
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+    });
+}
+
+function resolveProfileSelection(provider, selection, defaults) {
+    if (!selection || selection === 'default') {
+        return defaults?.[provider] || null;
+    }
+    return selection;
+}
+
+async function validateProfileForSession(provider, profileId, { requirePing = false } = {}) {
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        const profile = findProfileById(state, profileId);
+        if (!profile) {
+            return { ok: false, error: 'Profile not found.' };
+        }
+        const validated = await validateProfile(profile);
+        const index = state.profiles.findIndex((item) => item.profileId === profileId);
+        if (index >= 0) state.profiles[index] = validated;
+        await saveTabProfiles(state);
+        await notifyTabProfiles(state);
+        if (validated.status !== 'ok') {
+            const statusLabel =
+                validated.status === 'offline'
+                    ? 'offline'
+                    : validated.status === 'wrong_host'
+                      ? 'not on the right host'
+                      : 'unavailable';
+            return { ok: false, error: `${validated.label} is ${statusLabel}.` };
+        }
+        if (requirePing) {
+            const pingOk = await pingTab(validated.tabId, provider);
+            if (!pingOk) {
+                return {
+                    ok: false,
+                    error: `${validated.label} is not responding. Refresh the tab and try again.`,
+                };
+            }
+        }
+        return { ok: true, profile: validated };
+    });
+}
+
+async function lockProfilesForSession(sessionId, profileIds) {
+    if (!sessionId || !profileIds) return;
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        let changed = false;
+        const list = Array.isArray(profileIds) ? profileIds : Object.values(profileIds || {});
+        const unique = [
+            ...new Set(list.map((id) => (typeof id === 'string' ? id : '')).filter(Boolean)),
+        ];
+        for (const profileId of unique) {
+            if (!profileId) continue;
+            const profile = findProfileById(state, profileId);
+            if (!profile) continue;
+            if (profile.inUseBySessionId !== sessionId) {
+                profile.inUseBySessionId = sessionId;
+                profile.updatedAt = Date.now();
+                changed = true;
+            }
+        }
+        if (changed) {
+            await saveTabProfiles(state);
+            await notifyTabProfiles(state);
+        }
+    });
+}
+
+async function releaseProfilesForSession(sessionId) {
+    if (!sessionId) return;
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        let changed = false;
+        state.profiles.forEach((profile) => {
+            if (profile.inUseBySessionId === sessionId) {
+                profile.inUseBySessionId = null;
+                profile.updatedAt = Date.now();
+                changed = true;
+            }
+        });
+        if (changed) {
+            await saveTabProfiles(state);
+            await notifyTabProfiles(state);
+        }
+    });
+}
+
+// Message handling
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!mlcMessageRouter || typeof mlcMessageRouter.normalizeRuntimeMessage !== 'function') {
+        sendResponse({
+            ok: false,
+            error: 'Runtime message router is unavailable.',
+            code: 'MESSAGE_ROUTER_UNAVAILABLE',
+        });
+        return true;
+    }
+
+    const normalizedInbound = mlcMessageRouter.normalizeRuntimeMessage(mlcProtocol, message);
+    if (!normalizedInbound || !normalizedInbound.ok) {
+        sendResponse({
+            ok: false,
+            error: normalizedInbound?.error || 'Invalid message payload.',
+            code: normalizedInbound?.code || 'INVALID_MESSAGE',
+        });
+        return true;
+    }
+
+    message = normalizedInbound.message || message;
+
+    const inboundSummary =
+        typeof mlcMessageRouter.summarizeRuntimeMessage === 'function'
+            ? mlcMessageRouter.summarizeRuntimeMessage(mlcProtocol, message)
+            : { type: message?.type || null };
+    mlcDebugLog('runtime_message', inboundSummary);
+
+    switch (message.type) {
+        case 'SCHEMA_V3_STATUS':
+            if (schemaHandlers && typeof schemaHandlers.getStatus === 'function') {
+                schemaHandlers
+                    .getStatus()
+                    .then((result) => {
+                        sendResponse(result);
+                    })
+                    .catch((error) => {
+                        sendResponse({
+                            ok: false,
+                            error: error?.message || 'Failed to read schema status.',
+                        });
+                    });
+                return true;
+            }
+            if (!mlcSchemaReset || typeof mlcSchemaReset.detectLegacyState !== 'function') {
+                sendResponse({
+                    ok: false,
+                    error: 'Schema reset helper is unavailable.',
+                    code: 'SCHEMA_HELPER_UNAVAILABLE',
+                });
+                break;
+            }
+            mlcSchemaReset
+                .detectLegacyState()
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                })
+                .catch((error) => {
+                    sendResponse({
+                        ok: false,
+                        error: error?.message || 'Failed to read schema status.',
+                    });
+                });
+            return true;
+        case 'SCHEMA_V3_RESET':
+            const runSchemaReset =
+                schemaHandlers && typeof schemaHandlers.reset === 'function'
+                    ? () =>
+                          schemaHandlers.reset().then((response) => {
+                              if (!response || response.ok === false) {
+                                  throw new Error(response?.error || 'Schema reset failed.');
+                              }
+                              return response?.result || response;
+                          })
+                    : !mlcSchemaReset || typeof mlcSchemaReset.performReset !== 'function'
+                      ? null
+                      : () => mlcSchemaReset.performReset();
+            if (!runSchemaReset) {
+                sendResponse({
+                    ok: false,
+                    error: 'Schema reset helper is unavailable.',
+                    code: 'SCHEMA_HELPER_UNAVAILABLE',
+                });
+                break;
+            }
+            runSchemaReset()
+                .then(async (result) => {
+                    historyMigrationChecked = false;
+                    historyMigrationPromise = null;
+                    deliveryStateCache.clear();
+                    sessionsById = new Map();
+                    sessionsByChatId = new Map();
+                    sessionsLoaded = false;
+                    sessionsLoadPromise = null;
+                    sessionHistoryHydrated = false;
+                    sessionRedactionEnabled = false;
+                    responseChainsBySessionId.clear();
+                    sessionAttachmentsById.clear();
+                    if (sessionStateStore && typeof sessionStateStore.clear === 'function') {
+                        try {
+                            await sessionStateStore.clear();
+                        } catch {
+                            // ignore state store reset failures
+                        }
+                        syncSessionMapsFromStore(sessionStateStore);
+                    }
+                    try {
+                        await chrome.storage.local.remove([SESSIONS_KEY, ACTIVE_SESSION_KEY]);
+                    } catch {
+                        // ignore storage cleanup failures
+                    }
+                    sendResponse({ ok: true, result });
+                })
+                .catch((error) => {
+                    sendResponse({ ok: false, error: error?.message || 'Schema reset failed.' });
+                });
+            return true;
+        case 'GET_PROVIDER_CAPABILITIES':
+            if (providerHandlers && typeof providerHandlers.getCapabilities === 'function') {
+                sendResponse(providerHandlers.getCapabilities());
+            } else {
+                sendResponse({ ok: true, capabilities: PROVIDER_CAPABILITIES });
+            }
+            break;
+        case 'SEND_PROMPT':
+            handleSendPrompt(message);
+            sendResponse({ status: 'received', type: message.type });
+            break;
+        case 'GET_TAB_PROFILES':
+            notifyTabProfiles().catch((error) => {
+                console.error('[MLC Profiles] Error listing profiles:', error);
+            });
+            sendResponse({ status: 'profiles_sent', type: message.type });
+            break;
+        case 'GET_DEBATE_PROMPTS':
+            getDebatePromptConfigForUi()
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error('[MLC Debate] Error loading prompt templates:', error);
+                    sendResponse({ ok: false, error: error.message });
+                });
+            return true;
+        case 'SET_DEBATE_PROMPTS':
+            setDebatePromptOverride(message.config)
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error('[MLC Debate] Error saving prompt templates:', error);
+                    sendResponse({ ok: false, error: error.message });
+                });
+            return true;
+        case 'RESET_DEBATE_PROMPTS':
+            clearDebatePromptOverride()
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error('[MLC Debate] Error resetting prompt templates:', error);
+                    sendResponse({ ok: false, error: error.message });
+                });
+            return true;
+        case 'CREATE_PROFILE_FROM_ACTIVE_TAB':
+            createProfileFromActiveTab(message.provider, message.label, message.profileId)
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error('[MLC Profiles] Error creating profile from active tab:', error);
+                    sendResponse({ ok: false, error: error.message });
+                });
+            return true;
+        case 'CLAIM_TAB_AS_PROFILE':
+            claimTabAsProfile(message)
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error('[MLC Profiles] Error claiming tab as profile:', error);
+                    sendResponse({ ok: false, error: error.message });
+                });
+            return true;
+        case 'UPDATE_TAB_PROFILE':
+            updateTabProfile(message.profileId, message.patch || {})
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error('[MLC Profiles] Error updating profile:', error);
+                    sendResponse({ ok: false, error: error.message });
+                });
+            return true;
+        case 'DELETE_TAB_PROFILE':
+            deleteTabProfile(message.profileId)
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error('[MLC Profiles] Error deleting profile:', error);
+                    sendResponse({ ok: false, error: error.message });
+                });
+            return true;
+        case 'SET_DEFAULT_PROFILE':
+            setDefaultProfile(message.provider, message.profileId || null)
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error('[MLC Profiles] Error setting default profile:', error);
+                    sendResponse({ ok: false, error: error.message });
+                });
+            return true;
+        case 'FOCUS_TAB':
+            focusTab(message.tabId, { forceWindowFocus: true })
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error('[MLC Profiles] Error focusing tab:', error);
+                    sendResponse({ ok: false, error: error.message });
+                });
+            return true;
+        case 'OPEN_PROVIDER_TAB':
+            openProviderTab(message.provider, message)
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error('[MLC Profiles] Error opening provider tab:', error);
+                    sendResponse({ ok: false, error: error.message });
+                });
+            return true;
+        case 'CONNECT_PROVIDER':
+            connectProvider(message.provider, { focus: true })
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error('[MLC Profiles] Error connecting provider:', error);
+                    sendResponse({ ok: false, error: error.message });
+                });
+            return true;
+        case 'PROVIDER_MODEL_INFO':
+            if (sender?.tab?.id) {
+                const provider = normalizeProvider(message.provider);
+                const modelLabel = sanitizeModelHint(provider, message.modelLabel || '');
+                if (modelLabel) {
+                    updateProfileModelHint(sender.tab.id, provider, modelLabel);
+                }
+                sendMessageToPopup({
+                    type: 'PROVIDER_MODEL_INFO',
+                    provider,
+                    tabId: sender.tab.id,
+                    modelLabel,
+                });
+            }
+            sendResponse({ ok: true });
+            break;
+        case 'GEMINI_RESPONSE_CAPTURED':
+            enqueueDebateResponse(message, 'Gemini response');
+            handleGeminiResponse(message);
+            sendResponse({ status: 'gemini_response_received', type: message.type });
+            break;
+        case 'CHATGPT_RESPONSE_CAPTURED':
+            enqueueDebateResponse(message, 'ChatGPT response');
+            handleChatGPTResponse(message);
+            sendResponse({ status: 'chatgpt_response_received', type: message.type });
+            break;
+        case 'CLAUDE_RESPONSE_CAPTURED':
+            enqueueDebateResponse(message, 'Claude response');
+            handleClaudeResponse(message);
+            sendResponse({ status: 'claude_response_received', type: message.type });
+            break;
+        case 'GROK_RESPONSE_CAPTURED':
+            enqueueDebateResponse(message, 'Grok response');
+            handleGrokResponse(message);
+            sendResponse({ status: 'grok_response_received', type: message.type });
+            break;
+        case 'MLC_RESPONSE_CAPTURED':
+            enqueueDebateResponse(message, 'response');
+            sendResponse({ status: 'mlc_response_received', type: message.type });
+            break;
+        case 'MULTI_AGENT_RESPONSE_CAPTURED':
+            enqueueDebateResponse(message, 'multi-agent response');
+            sendResponse({ status: 'multi_agent_response_received', type: message.type });
+            break;
+        case 'CHECK_CONNECTION': {
+            const profileIds = Array.isArray(message.profileIds)
+                ? message.profileIds.map((id) => String(id || '').trim()).filter(Boolean)
+                : [];
+            checkConnectionStatus({ profileIds }).then((result) => {
+                sendMessageToPopup({
+                    type: 'CONNECTION_STATUS',
+                    status: result.status,
+                    profileStatus: result.profileStatus,
+                });
+                sendResponse({
+                    type: 'CONNECTION_STATUS',
+                    status: result.status,
+                    profileStatus: result.profileStatus,
+                });
+            });
+            return true; // Keep message channel open for async response
+        }
+        case 'LIST_LLM_TABS':
+            handleListLLMTabs().catch((error) => {
+                console.error('[MLC Debate] Error listing tabs:', error);
+            });
+            sendResponse({ status: 'listing_tabs', type: message.type });
+            break;
+        case 'SET_PREFERRED_TABS':
+            setPreferredTabs(message)
+                .then(() => handleListLLMTabs())
+                .catch((error) => {
+                    console.error('[MLC Debate] Error saving preferred tabs:', error);
+                });
+            sendResponse({ status: 'preferred_tabs_saved', type: message.type });
+            break;
+        case 'GET_ACTIVE_SESSION':
+            handleGetActiveSession(message).catch((error) => {
+                console.error('[MLC Debate] Error getting active session:', error);
+            });
+            sendResponse({ status: 'active_session_sent', type: message.type });
+            break;
+        case 'HISTORY_STATUS':
+            getHistoryStatus()
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                })
+                .catch((error) => {
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'HISTORY_STATUS_FAILED',
+                    });
+                });
+            return true;
+        case 'HISTORY_CONFIGURE':
+            ensureHistoryStoreReady()
+                .then((store) =>
+                    store.configureEncryption(message.passphrase, { mode: message.protectionMode })
+                )
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'HISTORY_CONFIGURE_FAILED',
+                    });
+                });
+            return true;
+        case 'HISTORY_SET_ENABLED':
+            ensureHistoryStoreReady()
+                .then((store) => store.setHistoryEnabled(Boolean(message.enabled)))
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'HISTORY_SET_ENABLED_FAILED',
+                    });
+                });
+            return true;
+        case 'HISTORY_SET_PROTECTION_MODE':
+            ensureHistoryStoreReady()
+                .then((store) => store.setProtectionMode(message.protectionMode))
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'HISTORY_SET_PROTECTION_MODE_FAILED',
+                    });
+                });
+            return true;
+        case 'HISTORY_SET_LOCK_NEW_CHATS':
+            ensureHistoryStoreReady()
+                .then((store) => store.setLockNewChatsByDefault(Boolean(message.enabled)))
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'HISTORY_SET_LOCK_NEW_CHATS_FAILED',
+                    });
+                });
+            return true;
+        case 'HISTORY_UNLOCK':
+            ensureHistoryStoreReady()
+                .then((store) => store.unlock(message.passphrase))
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'HISTORY_UNLOCK_FAILED',
+                    });
+                });
+            return true;
+        case 'HISTORY_LOCK':
+            ensureHistoryStoreReady()
+                .then((store) => store.lock())
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'HISTORY_LOCK_FAILED',
+                    });
+                });
+            return true;
+        case 'HISTORY_RESET_PROTECTION':
+            ensureHistoryStoreReady()
+                .then((store) => store.resetProtection())
+                .then((status) => {
+                    deliveryStateCache.clear();
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'HISTORY_RESET_PROTECTION_FAILED',
+                    });
+                });
+            return true;
+        case 'HISTORY_DISABLE_PROTECTION':
+            ensureHistoryStoreReady()
+                .then((store) => store.disableProtection(message.passphrase))
+                .then((status) => {
+                    deliveryStateCache.clear();
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'HISTORY_DISABLE_PROTECTION_FAILED',
+                    });
+                });
+            return true;
+        case 'PROTECT_CHAT':
+            ensureHistoryStoreReady()
+                .then((store) => store.protectThread(message.chatId))
+                .then((chat) => {
+                    sendResponse({ ok: true, chat });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'PROTECT_CHAT_FAILED',
+                    });
+                });
+            return true;
+        case 'UNPROTECT_CHAT':
+            ensureHistoryStoreReady()
+                .then((store) => store.unprotectThread(message.chatId))
+                .then((chat) => {
+                    sendResponse({ ok: true, chat });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'UNPROTECT_CHAT_FAILED',
+                    });
+                });
+            return true;
+        case 'HISTORY_CLEAR_ALL':
+            ensureHistoryStoreReady()
+                .then((store) => store.resetAllData())
+                .then(
+                    () => new Promise((resolve) => chrome.storage.local.remove(CHATS_KEY, resolve))
+                )
+                .then(() => {
+                    historyMigrationChecked = false;
+                    historyMigrationPromise = null;
+                    deliveryStateCache.clear();
+                })
+                .then(() => getHistoryStatus())
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'HISTORY_CLEAR_ALL_FAILED',
+                    });
+                });
+            return true;
+        case 'HISTORY_RESET':
+            ensureHistoryStoreReady()
+                .then((store) => store.resetAllData())
+                .then(
+                    () => new Promise((resolve) => chrome.storage.local.remove(CHATS_KEY, resolve))
+                )
+                .then(() => {
+                    historyMigrationChecked = false;
+                    historyMigrationPromise = null;
+                    deliveryStateCache.clear();
+                })
+                .then(() => getHistoryStatus())
+                .then((status) => {
+                    sendResponse({ ok: true, status });
+                    notifyChatsState().catch(() => {});
+                })
+                .catch((error) => {
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'HISTORY_RESET_FAILED',
+                    });
+                });
+            return true;
+        case 'GET_CHATS_STATE':
+            loadChatsState()
+                .then((state) => {
+                    sendResponse({
+                        ok: true,
+                        activeChatId: state.activeChatId,
+                        chats: state.chats,
+                    });
+                })
+                .catch((error) => {
+                    console.error('[MLC Chats] Error loading chats:', error);
+                    getHistoryStatus()
+                        .then((status) => {
+                            sendResponse({
+                                ok: false,
+                                error: error.message,
+                                code: error.code || 'GET_CHATS_FAILED',
+                                status,
+                            });
+                        })
+                        .catch(() => {
+                            sendResponse({
+                                ok: false,
+                                error: error.message,
+                                code: error.code || 'GET_CHATS_FAILED',
+                            });
+                        });
+                });
+            return true;
+        case 'GET_CHAT':
+            requireHistoryUnlocked()
+                .then((store) => {
+                    const chatId = message.chatId;
+                    return store.getThreadWithMessages(chatId, { limit: HISTORY_PAGE_SIZE });
+                })
+                .then(({ thread, page }) => {
+                    sendResponse({
+                        ok: true,
+                        chat: {
+                            chatId: thread.chatId,
+                            title: thread.title,
+                            createdAt: thread.createdAt,
+                            updatedAt: thread.updatedAt,
+                            messageCount: thread.messageCount,
+                            lastPreview: thread.lastPreview,
+                            messages: page.messages,
+                            nextCursorSequence: page.nextCursorSequence,
+                            hasMore: page.hasMore,
+                        },
+                    });
+                })
+                .catch((error) => {
+                    console.error('[MLC Chats] Error loading chat:', error);
+                    getHistoryStatus()
+                        .then((status) => {
+                            sendResponse({
+                                ok: false,
+                                error: error.message,
+                                code: error.code || 'GET_CHAT_FAILED',
+                                status,
+                            });
+                        })
+                        .catch(() => {
+                            sendResponse({
+                                ok: false,
+                                error: error.message,
+                                code: error.code || 'GET_CHAT_FAILED',
+                            });
+                        });
+                });
+            return true;
+        case 'GET_MESSAGES_PAGE':
+            requireHistoryUnlocked()
+                .then((store) => {
+                    const chatId = message.chatId;
+                    const limit = Number.isFinite(message.limit)
+                        ? message.limit
+                        : HISTORY_PAGE_SIZE;
+                    const beforeSequence = Number.isFinite(message.beforeSequence)
+                        ? message.beforeSequence
+                        : null;
+                    return store.listMessages(chatId, { limit, beforeSequence });
+                })
+                .then((page) => {
+                    sendResponse({ ok: true, ...page });
+                })
+                .catch((error) => {
+                    console.error('[MLC Chats] Error listing messages:', error);
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'GET_MESSAGES_FAILED',
+                    });
+                });
+            return true;
+        case 'CREATE_CHAT':
+            createChat({ makeActive: true })
+                .then((result) => {
+                    sendResponse({
+                        ok: true,
+                        chat: result.chat,
+                        activeChatId: result.state.activeChatId,
+                    });
+                })
+                .catch((error) => {
+                    console.error('[MLC Chats] Error creating chat:', error);
+                    getHistoryStatus()
+                        .then((status) => {
+                            sendResponse({
+                                ok: false,
+                                error: error.message,
+                                code: error.code || 'CREATE_CHAT_FAILED',
+                                status,
+                            });
+                        })
+                        .catch(() => {
+                            sendResponse({
+                                ok: false,
+                                error: error.message,
+                                code: error.code || 'CREATE_CHAT_FAILED',
+                            });
+                        });
+                });
+            return true;
+        case 'SET_ACTIVE_CHAT':
+            setActiveChat(message.chatId)
+                .then((result) => {
+                    if (!result.ok) {
+                        sendResponse(result);
+                        return;
+                    }
+                    sendResponse({
+                        ok: true,
+                        chat: result.chat,
+                        activeChatId: result.state.activeChatId,
+                    });
+                })
+                .catch((error) => {
+                    console.error('[MLC Chats] Error selecting chat:', error);
+                    getHistoryStatus()
+                        .then((status) => {
+                            sendResponse({
+                                ok: false,
+                                error: error.message,
+                                code: error.code || 'SET_ACTIVE_CHAT_FAILED',
+                                status,
+                            });
+                        })
+                        .catch(() => {
+                            sendResponse({
+                                ok: false,
+                                error: error.message,
+                                code: error.code || 'SET_ACTIVE_CHAT_FAILED',
+                            });
+                        });
+                });
+            return true;
+        case 'RENAME_CHAT':
+            renameChat(message.chatId, message.title)
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error('[MLC Chats] Error renaming chat:', error);
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'RENAME_CHAT_FAILED',
+                    });
+                });
+            return true;
+        case 'DELETE_CHAT':
+            deleteChat(message.chatId)
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error('[MLC Chats] Error deleting chat:', error);
+                    sendResponse({
+                        ok: false,
+                        error: error.message,
+                        code: error.code || 'DELETE_CHAT_FAILED',
+                    });
+                });
+            return true;
+        case 'START_DEBATE_SESSION':
+            handleStartDebateSession(message).catch((error) => {
+                console.error('[MLC Debate] Error starting session:', error);
+            });
+            sendResponse({ status: 'debate_session_started', type: message.type });
+            break;
+        case 'START_RUN':
+            handleStartDebateSession(message).catch((error) => {
+                console.error('[MLC Session] Error starting run:', error);
+            });
+            sendResponse({ status: 'run_started', type: message.type });
+            break;
+        case 'RESUME_SESSION':
+            resumeDebateSession(message.sessionId, message.chatId || null)
+                .then(sendResponse)
+                .catch((error) => {
+                    console.error('[MLC Debate] Error resuming session:', error);
+                    sendResponse({ ok: false, error: error.message });
+                });
+            return true;
+        case 'STOP_SESSION':
+            handleStopDebateSession(message).catch((error) => {
+                console.error('[MLC Debate] Error stopping session:', error);
+            });
+            sendResponse({ status: 'debate_session_stopped', type: message.type });
+            break;
+        case 'START_MULTI_AGENT_SESSION':
+            handleStartDebateSession({
+                prompt: message.prompt,
+                firstLLM: message.sourceLLM,
+                rounds: message.maxIterations,
+            }).catch((error) => {
+                console.error('[MLC Debate] Error starting multi-agent session:', error);
+            });
+            sendResponse({ status: 'multi_agent_session_started', type: message.type });
+            break;
+        case 'END_MULTI_AGENT_SESSION':
+            handleStopDebateSession({ reason: message.reason || 'User requested' }).catch(
+                (error) => {
+                    console.error('[MLC Debate] Error stopping multi-agent session:', error);
+                }
+            );
+            sendResponse({ status: 'multi_agent_session_ended', type: message.type });
+            break;
+        default:
+            console.warn('[MLC Background] Unknown message type:', message.type);
+            sendResponse({ status: 'unknown_message_type' });
+            break;
+    }
+
+    return false;
+});
+
+async function handleListLLMTabs() {
+    const chatgptTabs = await listLLMTabs('chatgpt');
+    const geminiTabs = await listLLMTabs('gemini');
+    const sanitize = (tab) => ({
+        id: tab.id,
+        title: tab.title,
+        url: tab.url,
+        active: tab.active,
+        lastAccessed: tab.lastAccessed,
+        status: tab.status,
+    });
+    const preferred = await getPreferredTabs();
+    sendMessageToPopup({
+        type: 'LLM_TABS_LIST',
+        tabs: {
+            chatgpt: chatgptTabs.map(sanitize),
+            gemini: geminiTabs.map(sanitize),
+        },
+        preferred: preferred,
+    });
+}
+
+async function handleGetActiveSession(message = {}) {
+    const chatId = typeof message.chatId === 'string' ? message.chatId : null;
+    let session = null;
+    if (chatId) {
+        session = await getSessionForChat(chatId);
+    }
+    if (!session && !chatId) {
+        await loadSessionsState();
+        session = pickMostRecentSession();
+    }
+    sendMessageToPopup({ type: 'ACTIVE_SESSION', session: session || null });
+}
+
+function sanitizeSessionPromptOverrides(input) {
+    if (!input || typeof input !== 'object') return null;
+    const allowedKeys = new Set([
+        'header',
+        'first_turn_instruction',
+        'intermediary_message',
+        'final_message',
+        'followup_user_msg_wrapper',
+    ]);
+    const output = {};
+    for (const modeKey of ['debate', 'single']) {
+        const section = input[modeKey];
+        if (!section || typeof section !== 'object') continue;
+        const sanitized = {};
+        for (const [key, value] of Object.entries(section)) {
+            if (!allowedKeys.has(key)) continue;
+            if (typeof value !== 'string') continue;
+            sanitized[key] = value;
+        }
+        if (Object.keys(sanitized).length > 0) {
+            output[modeKey] = sanitized;
+        }
+    }
+    return Object.keys(output).length > 0 ? output : null;
+}
+
+function sanitizeUiRoute(input) {
+    if (!input || typeof input !== 'object') return null;
+    const kind = typeof input.kind === 'string' ? input.kind.toLowerCase() : '';
+    const rounds = Math.min(12, Math.max(1, parseInt(input.rounds, 10) || 1));
+
+    const agents = [];
+    const rawAgents = Array.isArray(input.agents) ? input.agents : null;
+
+    const generateRouteAgentId = () => `agent_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const normalizeProfileSelection = (value) => {
+        if (value === null || value === undefined) return null;
+        const text = String(value).trim();
+        if (!text) return null;
+        return text;
+    };
+
+    if (rawAgents) {
+        for (const item of rawAgents) {
+            if (!item || typeof item !== 'object') continue;
+            const provider = normalizeProviderKey(item.provider || item.llm);
+            if (!provider || !isSupportedProviderKey(provider)) continue;
+            const id =
+                typeof item.id === 'string' && item.id.trim()
+                    ? item.id.trim()
+                    : generateRouteAgentId();
+            const profileId = normalizeProfileSelection(
+                item.profileId ?? item.profile ?? item.profile_id
+            );
+            agents.push({ id, provider, profileId });
+        }
+    } else {
+        const rawProviders = Array.isArray(input.providers) ? input.providers : [];
+        rawProviders.forEach((item, index) => {
+            const provider = normalizeProviderKey(item);
+            if (!provider || !isSupportedProviderKey(provider)) return;
+            agents.push({
+                id: `agent_${provider}_${index}_${Math.random().toString(36).slice(2)}`,
+                provider,
+                profileId: 'default',
+            });
+        });
+    }
+
+    if (agents.length === 0) return null;
+
+    if (kind === 'debate') {
+        if (agents.length < 2) return null;
+        return { kind: 'debate', agents, providers: agents.map((agent) => agent.provider), rounds };
+    }
+
+    if (kind === 'parallel') {
+        if (agents.length < 2) return null;
+        return {
+            kind: 'parallel',
+            agents,
+            providers: agents.map((agent) => agent.provider),
+            rounds: 1,
+        };
+    }
+
+    return { kind: 'single', agents: [agents[0]], providers: [agents[0].provider], rounds: 1 };
+}
+
+function buildRouteFromRun(mode, { firstLLM, secondLLM, directTarget, rounds }) {
+    if (mode === 'debate') {
+        const first = firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
+        const second = first === 'chatgpt' ? 'gemini' : 'chatgpt';
+        return { kind: 'debate', providers: [first, second], rounds };
+    }
+    if (mode === 'direct' && directTarget === 'both') {
+        return { kind: 'parallel', providers: ['chatgpt', 'gemini'], rounds: 1 };
+    }
+    const provider = firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
+    return { kind: 'single', providers: [provider], rounds: 1 };
+}
+
+async function handleStartDebateSession(message) {
+    try {
+        const prompt = (message.prompt || '').trim();
+        const baseMode =
+            message.mode === 'direct' ? 'direct' : message.mode === 'single' ? 'single' : 'debate';
+        let mode = baseMode;
+        const directTarget =
+            message.target === 'both' ? 'both' : message.target === 'gemini' ? 'gemini' : 'chatgpt';
+        const rounds =
+            baseMode === 'debate' || baseMode === 'single'
+                ? Math.min(12, Math.max(1, parseInt(message.rounds, 10) || 1))
+                : 1;
+        const singleLLM = message.llm === 'gemini' ? 'gemini' : 'chatgpt';
+        const debateFirstLLM = message.firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
+        let [firstLLM, secondLLM] =
+            baseMode === 'debate'
+                ? [debateFirstLLM, debateFirstLLM === 'chatgpt' ? 'gemini' : 'chatgpt']
+                : baseMode === 'single'
+                  ? [singleLLM, null]
+                  : directTarget === 'both'
+                    ? ['chatgpt', 'gemini']
+                    : [directTarget, null];
+        const route =
+            sanitizeUiRoute(message.route) ||
+            buildRouteFromRun(baseMode, { firstLLM, secondLLM, directTarget, rounds });
+        if (route?.kind === 'parallel') {
+            mode = 'parallel';
+        } else if (route?.kind === 'debate') {
+            mode = 'debate';
+        }
+        if (Array.isArray(route?.providers) && route.providers.length > 0) {
+            firstLLM = route.providers[0] || firstLLM;
+            secondLLM = route.providers.length > 1 ? route.providers[1] : null;
+        }
+        const requestedTabs = message.tabIds || {};
+        const requestedProfiles = message.profileIds || null;
+        const requestedChatId = typeof message.chatId === 'string' ? message.chatId : null;
+        const promptOverrides = sanitizeSessionPromptOverrides(message.promptOverrides);
+
+        if (!prompt) {
+            sendMessageToPopup({
+                type: 'UI_SESSION_ERROR',
+                chatId: requestedChatId || null,
+                error: 'Prompt is empty.',
+            });
+            return;
+        }
+
+        let historyStore = null;
+        try {
+            historyStore = await requireHistoryUnlocked();
+        } catch (error) {
+            historyStore = null;
+        }
+
+        const profileIds = {};
+        const tabIds = {};
+        for (const provider of getSupportedProviderKeys()) {
+            profileIds[provider] = null;
+            tabIds[provider] = null;
+        }
+        let chatId = null;
+        if (historyStore) {
+            const chatsState = await loadChatsState();
+            const chatIdCandidate = requestedChatId || chatsState.activeChatId;
+            const hasCandidate =
+                chatIdCandidate && Array.isArray(chatsState.chats)
+                    ? chatsState.chats.some((chat) => chat.chatId === chatIdCandidate)
+                    : false;
+            chatId = hasCandidate ? chatIdCandidate : chatsState.activeChatId;
+            if (chatId && chatsState.activeChatId !== chatId) {
+                await setActiveChat(chatId);
+            }
+        }
+
+        if (historyStore && chatId) {
+            const summary = await historyStore.getThreadSummary(chatId).catch(() => null);
+            if (summary?.locked) {
+                sendMessageToPopup({
+                    type: 'UI_SESSION_ERROR',
+                    chatId: chatId,
+                    error: 'History is locked. Unlock to continue.',
+                });
+                return;
+            }
+        }
+
+        if (chatId) {
+            const existingSession = await getSessionForChat(chatId);
+            if (existingSession && (existingSession.isActive || existingSession.isPaused)) {
+                await endDebateSession(
+                    'Session replaced by a new request.',
+                    existingSession.sessionId
+                );
+            }
+        }
+
+        let isFollowUp = false;
+        let conversationContext = '';
+        if (historyStore && chatId) {
+            try {
+                const summary = await historyStore.getThreadSummary(chatId);
+                const priorCount = Number.isFinite(summary?.messageCount)
+                    ? summary.messageCount
+                    : 0;
+                isFollowUp = priorCount > 0;
+                if (isFollowUp) {
+                    const page = await historyStore.listMessages(chatId, { limit: 12 });
+                    conversationContext = buildConversationContext(page.messages, {
+                        maxChars: 4000,
+                        maxMessages: 10,
+                    });
+                }
+            } catch (error) {
+                console.warn('[MLC Debate] Failed to build conversation context:', error);
+            }
+        }
+
+        const profilesState = await loadTabProfiles();
+        const routeAgents =
+            Array.isArray(route?.agents) && route.agents.length > 0 ? route.agents : [];
+        const requiredProviders =
+            routeAgents.length > 0
+                ? routeAgents.map((agent) => normalizeProviderKey(agent?.provider)).filter(Boolean)
+                : Array.isArray(route?.providers) && route.providers.length > 0
+                  ? route.providers
+                  : secondLLM
+                    ? ['chatgpt', 'gemini']
+                    : [firstLLM];
+
+        const participants = [];
+        const agentProfileIds = {};
+        const agentTabIds = {};
+        const usedProfileIds = new Set();
+
+        const providerCounts = {};
+        routeAgents.forEach((agent) => {
+            const provider = normalizeProviderKey(agent?.provider);
+            if (!provider) return;
+            providerCounts[provider] = (providerCounts[provider] || 0) + 1;
+        });
+        const hasDuplicateProviders = Object.values(providerCounts).some((count) => count > 1);
+        const hasExplicitProfileSelection = routeAgents.some((agent) => {
+            const selection = typeof agent?.profileId === 'string' ? agent.profileId.trim() : '';
+            return Boolean(selection && selection !== 'default');
+        });
+
+        const uniqueProviders = [
+            ...new Set(requiredProviders.map(normalizeProviderKey).filter(Boolean)),
+        ];
+        const hasDefaultProfiles =
+            uniqueProviders.length > 0 &&
+            uniqueProviders.every((provider) => Boolean(profilesState.defaults?.[provider]));
+        const hasExplicitTabIds = uniqueProviders.some((provider) =>
+            Number.isFinite(requestedTabs[provider])
+        );
+        const hasRequestedProfiles = Boolean(
+            requestedProfiles && uniqueProviders.some((provider) => requestedProfiles?.[provider])
+        );
+        const useProfiles = Boolean(
+            hasDuplicateProviders ||
+            hasExplicitProfileSelection ||
+            hasRequestedProfiles ||
+            (!hasExplicitTabIds && hasDefaultProfiles)
+        );
+
+        if (useProfiles) {
+            // Resolve + validate each agent via Tab Profiles (required for duplicate-provider routes).
+            if (routeAgents.length === 0) {
+                sendMessageToPopup({
+                    type: 'UI_SESSION_ERROR',
+                    chatId: chatId || requestedChatId || null,
+                    error: 'Route agents are missing.',
+                });
+                return;
+            }
+            for (const agent of routeAgents) {
+                const provider = normalizeProviderKey(agent?.provider);
+                if (!provider) continue;
+                const selection = agent?.profileId || requestedProfiles?.[provider] || 'default';
+                const resolvedProfileId = resolveProfileSelection(
+                    provider,
+                    selection,
+                    profilesState.defaults
+                );
+                if (!resolvedProfileId) {
+                    sendMessageToPopup({
+                        type: 'UI_SESSION_ERROR',
+                        chatId: chatId || requestedChatId || null,
+                        error: `${formatLLMLabel(provider)} profile is required to start.`,
+                    });
+                    return;
+                }
+                if (usedProfileIds.has(resolvedProfileId)) {
+                    sendMessageToPopup({
+                        type: 'UI_SESSION_ERROR',
+                        chatId: chatId || requestedChatId || null,
+                        error: `Each agent must use a different ${formatLLMLabel(provider)} profile/tab.`,
+                    });
+                    return;
+                }
+
+                const validation = await validateProfileForSession(provider, resolvedProfileId, {
+                    requirePing: true,
+                });
+                if (!validation.ok) {
+                    sendMessageToPopup({
+                        type: 'UI_SESSION_ERROR',
+                        chatId: chatId || requestedChatId || null,
+                        error: validation.error,
+                    });
+                    return;
+                }
+                const inUseBy = validation.profile?.inUseBySessionId;
+                if (inUseBy) {
+                    const inUseSession = await getSessionById(inUseBy);
+                    if (inUseSession && (inUseSession.isActive || inUseSession.isPaused)) {
+                        sendMessageToPopup({
+                            type: 'UI_SESSION_ERROR',
+                            chatId: chatId || requestedChatId || null,
+                            error: `${validation.profile.label} is already in use by another session.`,
+                        });
+                        return;
+                    }
+                }
+
+                const agentId =
+                    typeof agent?.id === 'string' && agent.id.trim()
+                        ? agent.id.trim()
+                        : `agent_${provider}_${participants.length + 1}`;
+                participants.push({
+                    agentId,
+                    provider,
+                    profileId: resolvedProfileId,
+                    tabId: validation.profile.tabId,
+                    label: validation.profile.label || formatLLMLabel(provider),
+                });
+                agentProfileIds[agentId] = resolvedProfileId;
+                agentTabIds[agentId] = validation.profile.tabId;
+                usedProfileIds.add(resolvedProfileId);
+
+                // Back-compat maps (provider -> first resolved profile/tab).
+                if (profileIds[provider] == null) profileIds[provider] = resolvedProfileId;
+                if (tabIds[provider] == null) tabIds[provider] = validation.profile.tabId;
+            }
+        } else {
+            // Legacy fallback: resolve one tab per provider (no duplicates).
+            if (mode === 'single') {
+                if (firstLLM === 'chatgpt' && Number.isFinite(requestedTabs.chatgpt)) {
+                    await setPreferredTabs({ chatgptTabId: requestedTabs.chatgpt });
+                } else if (firstLLM === 'gemini' && Number.isFinite(requestedTabs.gemini)) {
+                    await setPreferredTabs({ geminiTabId: requestedTabs.gemini });
+                }
+            } else if (
+                Number.isFinite(requestedTabs.chatgpt) ||
+                Number.isFinite(requestedTabs.gemini)
+            ) {
+                await setPreferredTabs({
+                    chatgptTabId: requestedTabs.chatgpt,
+                    geminiTabId: requestedTabs.gemini,
+                });
+            }
+
+            const preferred = await getPreferredTabs();
+            for (const provider of uniqueProviders) {
+                const resolved = await resolveTabForLLM(
+                    provider,
+                    requestedTabs[provider],
+                    preferred[provider]
+                );
+                if (!resolved) {
+                    sendMessageToPopup({
+                        type: 'UI_SESSION_ERROR',
+                        chatId: chatId || requestedChatId || null,
+                        error: `${formatLLMLabel(provider)} tab not found. Please open it and try again.`,
+                    });
+                    return;
+                }
+                if (await isTabInUse(resolved.id)) {
+                    sendMessageToPopup({
+                        type: 'UI_SESSION_ERROR',
+                        chatId: chatId || requestedChatId || null,
+                        error: `${formatLLMLabel(provider)} tab is already in use by another session.`,
+                    });
+                    return;
+                }
+                tabIds[provider] = resolved.id;
+                const agentId = provider;
+                participants.push({
+                    agentId,
+                    provider,
+                    profileId: null,
+                    tabId: resolved.id,
+                    label: formatLLMLabel(provider),
+                });
+                agentTabIds[agentId] = resolved.id;
+            }
+        }
+
+        const now = Date.now();
+        let runConfig =
+            mode === 'parallel'
+                ? { runType: 'parallel', providers: requiredProviders }
+                : mode === 'direct'
+                  ? { runType: 'direct', target: directTarget }
+                  : mode === 'single'
+                    ? { mode: 'single', rounds, llm: firstLLM }
+                    : { runType: 'debate', rounds, firstLLM };
+        if (route) {
+            runConfig = { ...runConfig, route };
+        }
+        const participantCount =
+            participants.length > 0
+                ? participants.length
+                : Array.isArray(route?.providers) && route.providers.length > 0
+                  ? route.providers.length
+                  : secondLLM
+                    ? 2
+                    : 1;
+        const totalTurns =
+            mode === 'parallel'
+                ? 1
+                : mode === 'direct'
+                  ? secondLLM
+                      ? 2
+                      : 1
+                  : mode === 'single'
+                    ? rounds
+                    : mode === 'debate'
+                      ? rounds * (participantCount || 2)
+                      : rounds * 2;
+        const sessionId = generateSessionId();
+        const session = {
+            ...defaultDebateState,
+            isActive: true,
+            mode,
+            route: route || null,
+            chatId: chatId,
+            sessionId,
+            rounds: rounds,
+            totalTurns,
+            turnIndex: 1,
+            firstLLM: firstLLM,
+            secondLLM: secondLLM,
+            participants,
+            agentProfileIds,
+            agentTabIds,
+            profileIds: profileIds,
+            tabIds,
+            userQuery: prompt,
+            isFollowUp,
+            conversationContext,
+            promptOverrides,
+            messages: [{ role: 'user', content: prompt, timestamp: now, turnIndex: 0 }],
+            startedAt: now,
+        };
+
+        setActiveSessionAttachments(sessionId, message.attachments, participants);
+        const attachmentsRecord = sessionAttachmentsById.get(sessionId);
+        const attachmentsMeta = attachmentsRecord
+            ? attachmentsRecord.attachments.map(({ name, type, size }) => ({ name, type, size }))
+            : null;
+
+        await saveSession(session);
+
+        sendMessageToPopup({
+            type: 'UI_SESSION_STARTED',
+            sessionId: session.sessionId,
+            chatId: session.chatId,
+            rounds: rounds,
+            mode,
+            firstLLM: firstLLM,
+            target: mode === 'direct' ? directTarget : undefined,
+            tabIds: session.tabIds,
+            profileIds: session.profileIds,
+            participants: Array.isArray(session.participants) ? session.participants : undefined,
+        });
+
+        sendMessageToPopup({
+            type: 'UI_MESSAGE_ADD',
+            chatId: session.chatId,
+            role: 'user',
+            content: prompt,
+            timestamp: now,
+            turnIndex: 0,
+            sessionId: session.sessionId,
+            meta: {
+                runConfig,
+                isFollowUp,
+                promptOverrides,
+                attachments: attachmentsMeta || undefined,
+            },
+        });
+
+        if (session.chatId) {
+            const appendResult = await appendChatMessage(session.chatId, {
+                role: 'user',
+                content: prompt,
+                timestamp: now,
+                turnIndex: 0,
+                sessionId: session.sessionId,
+                meta: {
+                    runConfig,
+                    isFollowUp,
+                    promptOverrides,
+                    attachments: attachmentsMeta || undefined,
+                },
+            });
+            if (appendResult?.ok && Number.isFinite(appendResult?.message?.sequence)) {
+                session.userMessageSequence = appendResult.message.sequence;
+                await saveSession(session);
+            }
+        }
+
+        await lockProfilesForSession(
+            session.sessionId,
+            Array.isArray(session.participants)
+                ? session.participants.map((p) => p.profileId).filter(Boolean)
+                : session.profileIds
+        );
+        if (session.mode === 'parallel') {
+            await sendParallelTurn(session);
+        } else {
+            await sendDebateTurn(session);
+        }
+    } catch (error) {
+        console.error('[MLC Debate] Error starting session:', error);
+        sendMessageToPopup({
+            type: 'UI_SESSION_ERROR',
+            chatId: typeof message?.chatId === 'string' ? message.chatId : null,
+            error: error?.message || 'Failed to start session.',
+        });
+    }
+}
+
+async function handleStopDebateSession(message) {
+    const reason = message.reason || 'Session stopped.';
+    const sessionId = message.sessionId || null;
+    if (sessionId) {
+        await endDebateSession(reason, sessionId);
+        return;
+    }
+    const chatId = typeof message.chatId === 'string' ? message.chatId : null;
+    if (chatId) {
+        const session = await getSessionForChat(chatId);
+        if (session) {
+            await endDebateSession(reason, session.sessionId);
+        }
+        return;
+    }
+    const fallback = pickMostRecentSession();
+    if (fallback) {
+        await endDebateSession(reason, fallback.sessionId);
+    }
+}
+
+const sessionEngine =
+    mlcSessionEngineModule && typeof mlcSessionEngineModule.createSessionEngine === 'function'
+        ? mlcSessionEngineModule.createSessionEngine({
+              normalizeProviderKey: (provider) => normalizeProviderKey(provider),
+              isSupportedProviderKey: (provider) => isSupportedProviderKey(provider),
+              formatProviderLabel: (provider) => formatLLMLabel(provider),
+              listSessionProviders: (session, fallbackProvider) =>
+                  listSessionProviders(session, fallbackProvider),
+          })
+        : null;
+
+function getRoundIndex(turnIndex, session = null) {
+    if (sessionEngine && typeof sessionEngine.getRoundIndex === 'function') {
+        return sessionEngine.getRoundIndex(turnIndex, session);
+    }
+    if (session?.mode === 'direct' || session?.mode === 'parallel') {
+        return 1;
+    }
+    if (session?.mode === 'single') {
+        return Math.max(1, turnIndex);
+    }
+    if (session?.mode === 'debate') {
+        const participants = getSessionParticipants(session);
+        const divisor = participants.length >= 2 ? participants.length : 2;
+        return Math.ceil(turnIndex / divisor);
+    }
+    return Math.ceil(turnIndex / 2);
+}
+
+function getSessionParticipants(session) {
+    if (sessionEngine && typeof sessionEngine.getSessionParticipants === 'function') {
+        return sessionEngine.getSessionParticipants(session);
+    }
+    if (Array.isArray(session?.participants) && session.participants.length > 0) {
+        return session.participants;
+    }
+    const routeAgents = Array.isArray(session?.route?.agents) ? session.route.agents : null;
+    if (routeAgents && routeAgents.length > 0) {
+        return routeAgents
+            .map((agent, idx) => {
+                const provider = normalizeProviderKey(agent?.provider);
+                if (!provider || !isSupportedProviderKey(provider)) return null;
+                const agentId =
+                    typeof agent?.id === 'string' && agent.id.trim()
+                        ? agent.id.trim()
+                        : `agent_${provider}_${idx + 1}`;
+                const profileId =
+                    typeof session?.agentProfileIds?.[agentId] === 'string'
+                        ? session.agentProfileIds[agentId]
+                        : session?.profileIds?.[provider] || null;
+                const tabId = Number.isFinite(session?.agentTabIds?.[agentId])
+                    ? session.agentTabIds[agentId]
+                    : session?.tabIds?.[provider] || null;
+                const label =
+                    typeof agent?.label === 'string' ? agent.label : formatLLMLabel(provider);
+                return { agentId, provider, profileId, tabId, label };
+            })
+            .filter(Boolean);
+    }
+    const providers =
+        Array.isArray(session?.route?.providers) && session.route.providers.length > 0
+            ? session.route.providers
+                  .map(normalizeProviderKey)
+                  .filter((p) => p && isSupportedProviderKey(p))
+            : listSessionProviders(session);
+    return providers
+        .map((provider) => ({
+            agentId: provider,
+            provider,
+            profileId: session?.profileIds?.[provider] || null,
+            tabId: session?.tabIds?.[provider] || null,
+            label: formatLLMLabel(provider),
+        }))
+        .filter(Boolean);
+}
+
+function getTurnParticipant(session, turnIndex) {
+    if (sessionEngine && typeof sessionEngine.getTurnParticipant === 'function') {
+        return sessionEngine.getTurnParticipant(session, turnIndex);
+    }
+    const participants = getSessionParticipants(session);
+    if (participants.length === 0) return null;
+
+    if (session?.mode === 'parallel') {
+        return participants[0] || null;
+    }
+    if (session?.mode === 'direct') {
+        if (participants.length >= 2) {
+            return turnIndex === 1 ? participants[0] : participants[1];
+        }
+        return participants[0] || null;
+    }
+    if (session?.mode === 'single') {
+        return participants[0] || null;
+    }
+    if (session?.mode === 'debate') {
+        const idx = Math.max(0, (turnIndex - 1) % participants.length);
+        return participants[idx] || null;
+    }
+    return participants[0] || null;
+}
+
+function getTurnLLM(session, turnIndex) {
+    if (sessionEngine && typeof sessionEngine.getTurnProvider === 'function') {
+        return sessionEngine.getTurnProvider(session, turnIndex);
+    }
+    if (session?.mode === 'parallel') {
+        return session.firstLLM || 'chatgpt';
+    }
+    if (session?.mode === 'direct') {
+        if (turnIndex === 1) return session.firstLLM || 'chatgpt';
+        return session.secondLLM || session.firstLLM || 'chatgpt';
+    }
+    if (session?.mode === 'single') {
+        return session.firstLLM || 'chatgpt';
+    }
+    if (session?.mode === 'debate') {
+        const participant = getTurnParticipant(session, turnIndex);
+        if (participant?.provider) return participant.provider;
+    }
+    return turnIndex % 2 === 1 ? session.firstLLM : session.secondLLM;
+}
+
+function formatLLMLabel(llmType) {
+    return providerRegistry.formatProviderLabel(llmType);
+}
+
+function getProviderAttachmentMode(provider) {
+    return providerRegistry.getProviderAttachmentMode(provider);
+}
+
+const DEBATE_PROMPTS_PATH = 'debate_prompts.json';
+const PROMPT_TEMPLATES_OVERRIDE_KEY = 'mlc_debate_prompts_override_v1';
+let cachedDebatePromptConfig = null;
+let cachedDebatePromptSource = null;
+let debatePromptConfigLoadPromise = null;
+
+function getDefaultDebatePromptConfig() {
+    const followupDebateWrapper = [
+        "Here's a new message from the user:",
+        '{raw_user_msg}',
+        '',
+        'This is a continuation of the same chat.',
+        'Run: a debate between {first_llm} and {second_llm} over {rounds} iterations (starting with {first_llm}).',
+        'You are {llm} on iteration {round}/{rounds}.',
+    ].join('\n');
+    const followupSingleWrapper = [
+        "Here's a new message from the user:",
+        '{raw_user_msg}',
+        '',
+        'This is a continuation of the same chat. Please {llm} answer.',
+        'If refining: you are on iteration {round}/{rounds}.',
+    ].join('\n');
+    return {
+        schemaVersion: 1,
+        debate: {
+            placeholders: {},
+            header: [
+                'You will participate in a multi-agent debate with {other_llm} over {rounds} iterations to produce the most accurate answer to the user.',
+                '',
+                'Guidelines:',
+                '- Be precise and non-egoic (optimize for correctness, not for "being right").',
+                '- Be constructive: critique to make progress and improve the answer.',
+                '- If unsure, say so briefly and propose a way to verify.',
+            ].join('\n'),
+            first_turn_instruction: 'Provide your best answer.',
+            intermediary_message: [
+                'Provide a constructive improvement for iteration {round}/{rounds}:',
+                '- Critique key issues (short bullets)',
+                '- Revised answer',
+            ].join('\n'),
+            final_message:
+                'Provide your final best answer for the user. Output only the final answer (no critique section).',
+            followup_user_msg_wrapper: followupDebateWrapper,
+            turn1: [
+                '{header}',
+                '',
+                'Iteration {round}/{rounds}',
+                '',
+                'User question:',
+                '{user_msg}',
+                '',
+                '{first_turn_instruction}',
+            ].join('\n'),
+            turn2: [
+                '{header}',
+                '',
+                'Iteration {round}/{rounds}',
+                '',
+                'User question:',
+                '{user_msg}',
+                '',
+                '{first_llm} answer (iteration 1/{rounds}):',
+                '{first_answer}',
+                '',
+                '{intermediary_message}',
+            ].join('\n'),
+            turn3plus_first: [
+                'Iteration {round}/{rounds}',
+                '',
+                `Here is {other_llm}'s answer for iteration {prev_round}/{rounds}:`,
+                '{other_answer}',
+                '',
+                '{intermediary_message}',
+            ].join('\n'),
+            turn3plus_second: [
+                'Iteration {round}/{rounds}',
+                '',
+                `Here is {other_llm}'s answer for iteration {round}/{rounds}:`,
+                '{other_answer}',
+                '',
+                '{intermediary_message}',
+            ].join('\n'),
+        },
+        single: {
+            placeholders: {},
+            header: 'You are a single LLM agent. Provide the best possible answer to the user.',
+            first_turn_instruction: 'Provide your best answer.',
+            intermediary_message: [
+                'Improve your answer for iteration {round}/{rounds}:',
+                '- Fix errors',
+                '- Add missing details',
+                '- Keep it concise',
+            ].join('\n'),
+            final_message:
+                'Provide your final best answer for the user. Output only the final answer.',
+            followup_user_msg_wrapper: followupSingleWrapper,
+            turn1: [
+                '{header}',
+                '',
+                'Iteration {round}/{rounds}',
+                '',
+                'User message:',
+                '{user_msg}',
+                '',
+                '{first_turn_instruction}',
+            ].join('\n'),
+            turn2plus: [
+                'Iteration {round}/{rounds}',
+                '',
+                'Your previous answer (iteration {prev_round}/{rounds}):',
+                '{prev_answer}',
+                '',
+                'User message:',
+                '{user_msg}',
+                '',
+                '{intermediary_message}',
+            ].join('\n'),
+        },
+        direct: {
+            placeholders: {},
+            single_turn: [
+                "Here's a new message from the user:",
+                '{raw_user_msg}',
+                '',
+                'Please {llm} answer.',
+            ].join('\n'),
+            single_turn_with_history: [
+                'Conversation so far:',
+                '{conversation_history}',
+                '',
+                "Here's a new message from the user:",
+                '{raw_user_msg}',
+                '',
+                'Please {llm} answer.',
+            ].join('\n'),
+            both_turn: [
+                "Here's a new message from the user:",
+                '{raw_user_msg}',
+                '',
+                'You are {llm}. Please answer independently.',
+            ].join('\n'),
+            both_turn_with_history: [
+                'Conversation so far:',
+                '{conversation_history}',
+                '',
+                "Here's a new message from the user:",
+                '{raw_user_msg}',
+                '',
+                'You are {llm}. Please answer independently.',
+            ].join('\n'),
+        },
+    };
+}
+
+function normalizeDebatePromptConfig(rawConfig) {
+    const defaults = getDefaultDebatePromptConfig();
+    if (!rawConfig || typeof rawConfig !== 'object') return defaults;
+
+    const rawDebate =
+        rawConfig.debate && typeof rawConfig.debate === 'object' ? rawConfig.debate : null;
+    const rawSingle =
+        rawConfig.single && typeof rawConfig.single === 'object' ? rawConfig.single : null;
+    const rawDirect =
+        rawConfig.direct && typeof rawConfig.direct === 'object' ? rawConfig.direct : null;
+
+    const pickString = (value, fallback) => (typeof value === 'string' ? value : fallback);
+
+    return {
+        schemaVersion: 1,
+        debate: rawDebate
+            ? {
+                  placeholders:
+                      rawDebate.placeholders && typeof rawDebate.placeholders === 'object'
+                          ? rawDebate.placeholders
+                          : defaults.debate.placeholders,
+                  header: pickString(rawDebate.header, defaults.debate.header),
+                  first_turn_instruction: pickString(
+                      rawDebate.first_turn_instruction,
+                      defaults.debate.first_turn_instruction
+                  ),
+                  intermediary_message: pickString(
+                      rawDebate.intermediary_message,
+                      defaults.debate.intermediary_message
+                  ),
+                  final_message: pickString(rawDebate.final_message, defaults.debate.final_message),
+                  followup_user_msg_wrapper: pickString(
+                      rawDebate.followup_user_msg_wrapper,
+                      defaults.debate.followup_user_msg_wrapper
+                  ),
+                  turn1: pickString(rawDebate.turn1, defaults.debate.turn1),
+                  turn2: pickString(rawDebate.turn2, defaults.debate.turn2),
+                  turn3plus_first: pickString(
+                      rawDebate.turn3plus_first,
+                      defaults.debate.turn3plus_first
+                  ),
+                  turn3plus_second: pickString(
+                      rawDebate.turn3plus_second,
+                      defaults.debate.turn3plus_second
+                  ),
+              }
+            : defaults.debate,
+        single: rawSingle
+            ? {
+                  placeholders:
+                      rawSingle.placeholders && typeof rawSingle.placeholders === 'object'
+                          ? rawSingle.placeholders
+                          : defaults.single.placeholders,
+                  header: pickString(rawSingle.header, defaults.single.header),
+                  first_turn_instruction: pickString(
+                      rawSingle.first_turn_instruction,
+                      defaults.single.first_turn_instruction
+                  ),
+                  intermediary_message: pickString(
+                      rawSingle.intermediary_message,
+                      defaults.single.intermediary_message
+                  ),
+                  final_message: pickString(rawSingle.final_message, defaults.single.final_message),
+                  followup_user_msg_wrapper: pickString(
+                      rawSingle.followup_user_msg_wrapper,
+                      defaults.single.followup_user_msg_wrapper
+                  ),
+                  turn1: pickString(rawSingle.turn1, defaults.single.turn1),
+                  turn2plus: pickString(rawSingle.turn2plus, defaults.single.turn2plus),
+              }
+            : defaults.single,
+        direct: rawDirect
+            ? {
+                  placeholders:
+                      rawDirect.placeholders && typeof rawDirect.placeholders === 'object'
+                          ? rawDirect.placeholders
+                          : defaults.direct.placeholders,
+                  single_turn: pickString(rawDirect.single_turn, defaults.direct.single_turn),
+                  single_turn_with_history: pickString(
+                      rawDirect.single_turn_with_history,
+                      defaults.direct.single_turn_with_history
+                  ),
+                  both_turn: pickString(rawDirect.both_turn, defaults.direct.both_turn),
+                  both_turn_with_history: pickString(
+                      rawDirect.both_turn_with_history,
+                      defaults.direct.both_turn_with_history
+                  ),
+              }
+            : defaults.direct,
+    };
+}
+
+async function getDebatePromptOverride() {
+    const stored = await chrome.storage.local.get(PROMPT_TEMPLATES_OVERRIDE_KEY);
+    return stored?.[PROMPT_TEMPLATES_OVERRIDE_KEY] || null;
+}
+
+async function loadDebatePromptConfigFromFile() {
+    try {
+        const url = chrome.runtime.getURL(DEBATE_PROMPTS_PATH);
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`Failed to load ${DEBATE_PROMPTS_PATH}: ${response.status}`);
+        }
+        const json = await response.json();
+        return normalizeDebatePromptConfig(json);
+    } catch (error) {
+        console.warn('[MLC Debate] Failed to load prompt templates; using defaults.', error);
+        return getDefaultDebatePromptConfig();
+    }
+}
+
+async function loadDebatePromptConfig() {
+    if (cachedDebatePromptConfig) return cachedDebatePromptConfig;
+    if (debatePromptConfigLoadPromise) return debatePromptConfigLoadPromise;
+
+    debatePromptConfigLoadPromise = (async () => {
+        try {
+            const override = await getDebatePromptOverride();
+            if (override) {
+                cachedDebatePromptConfig = normalizeDebatePromptConfig(override);
+                cachedDebatePromptSource = 'override';
+                return cachedDebatePromptConfig;
+            }
+            cachedDebatePromptConfig = await loadDebatePromptConfigFromFile();
+            cachedDebatePromptSource = 'default';
+            return cachedDebatePromptConfig;
+        } finally {
+            debatePromptConfigLoadPromise = null;
+        }
+    })();
+
+    return debatePromptConfigLoadPromise;
+}
+
+async function getDebatePromptConfigForUi() {
+    const override = await getDebatePromptOverride();
+    if (override) {
+        return { ok: true, config: normalizeDebatePromptConfig(override), source: 'override' };
+    }
+    const config = await loadDebatePromptConfigFromFile();
+    return { ok: true, config, source: 'default' };
+}
+
+async function setDebatePromptOverride(config) {
+    if (!config || typeof config !== 'object') {
+        return { ok: false, error: 'Invalid prompt config.' };
+    }
+    const normalized = normalizeDebatePromptConfig(config);
+    await chrome.storage.local.set({ [PROMPT_TEMPLATES_OVERRIDE_KEY]: normalized });
+    cachedDebatePromptConfig = normalized;
+    cachedDebatePromptSource = 'override';
+    return { ok: true, config: normalized, source: 'override' };
+}
+
+async function clearDebatePromptOverride() {
+    await chrome.storage.local.remove(PROMPT_TEMPLATES_OVERRIDE_KEY);
+    cachedDebatePromptConfig = null;
+    cachedDebatePromptSource = null;
+    return { ok: true };
+}
+
+function renderPromptTemplate(template, variables) {
+    if (typeof template !== 'string') return '';
+    const safeVars = variables && typeof variables === 'object' ? variables : {};
+    return template.replace(/{([a-zA-Z0-9_]+)}/g, (match, key) => {
+        if (!Object.prototype.hasOwnProperty.call(safeVars, key)) return match;
+        const value = safeVars[key];
+        if (value === null || value === undefined) return '';
+        return String(value);
+    });
+}
+
+function getLastResponse(session, llmType) {
+    for (let i = session.messages.length - 1; i >= 0; i--) {
+        if (session.messages[i].role === llmType) {
+            return session.messages[i].content;
+        }
+    }
+    return '';
+}
+
+function getLastResponseByAgent(session, agentId, fallbackProvider = null) {
+    const key = typeof agentId === 'string' ? agentId.trim() : '';
+    if (!key) return '';
+    const messages = Array.isArray(session?.messages) ? session.messages : [];
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const msg = messages[i];
+        if (!msg || msg.role === 'user') continue;
+        if (msg.agentId === key || msg.sourceAgentId === key) {
+            return msg.content || '';
+        }
+    }
+    const fallbackKey = normalizeProviderKey(fallbackProvider);
+    if (fallbackKey && isSupportedProviderKey(fallbackKey)) {
+        return getLastResponse(session, fallbackKey) || '';
+    }
+    return '';
+}
+
+function formatParticipantLabelForPrompt(participants, participant) {
+    if (!participant) return '';
+    const provider = normalizeProviderKey(participant.provider);
+    const providerLabel = formatLLMLabel(provider);
+    if (!provider || !isSupportedProviderKey(provider)) return providerLabel;
+
+    const matchCount = Array.isArray(participants)
+        ? participants.filter((p) => normalizeProviderKey(p?.provider) === provider).length
+        : 0;
+    if (matchCount <= 1) return providerLabel;
+
+    const rawLabel = typeof participant.label === 'string' ? participant.label.trim() : '';
+    if (rawLabel && rawLabel !== providerLabel) {
+        return rawLabel.length > 44 ? `${rawLabel.slice(0, 41)}...` : rawLabel;
+    }
+
+    let ordinal = 0;
+    for (const p of participants || []) {
+        if (!p) continue;
+        if (normalizeProviderKey(p.provider) !== provider) continue;
+        ordinal += 1;
+        if (p.agentId && participant.agentId && p.agentId === participant.agentId) break;
+    }
+    return `${providerLabel} #${Math.max(1, ordinal)}`;
+}
+
+function describeMessageRoleForContext(role, message = null) {
+    if (!role) return 'Assistant';
+    if (role === 'user') return 'User';
+    const agentLabel = typeof message?.agentLabel === 'string' ? message.agentLabel.trim() : '';
+    if (agentLabel) return agentLabel;
+    if (isSupportedProviderKey(role)) return formatLLMLabel(role);
+    return String(role);
+}
+
+function buildConversationContext(messages, { maxChars = 4000, maxMessages = 10 } = {}) {
+    if (!Array.isArray(messages) || messages.length === 0) return '';
+    const recent = messages.slice(Math.max(0, messages.length - maxMessages));
+    const blocks = [];
+    for (const message of recent) {
+        if (!message) continue;
+        const role = describeMessageRoleForContext(message.role, message);
+        const content = String(message.content || '').trim();
+        if (!content) continue;
+        blocks.push(`${role}:\n${content}`);
+    }
+    if (blocks.length === 0) return '';
+    let text = blocks.join('\n\n');
+    if (Number.isFinite(maxChars) && maxChars > 0 && text.length > maxChars) {
+        text = text.slice(text.length - maxChars);
+    }
+    return text;
+}
+
+function formatTranscriptForPrompt(messages, { maxChars = 48000 } = {}) {
+    if (!Array.isArray(messages) || messages.length === 0) return '';
+    const blocks = [];
+    for (const message of messages) {
+        if (!message) continue;
+        const role = describeMessageRoleForContext(message.role, message);
+        const content = String(message.content || '').trim();
+        if (!content) continue;
+        blocks.push(`${role}:\n${content}`);
+    }
+    if (blocks.length === 0) return '';
+    let text = blocks.join('\n\n');
+    if (Number.isFinite(maxChars) && maxChars > 0 && text.length > maxChars) {
+        text = `…(earlier messages omitted)\n\n${text.slice(text.length - maxChars)}`;
+    }
+    return text;
+}
+
+const CHAT_DELIVERY_STATE_META_PREFIX = 'mlc_chat_delivery_state_v1:';
+const CHAT_DELIVERY_STATE_SCHEMA_VERSION = 2;
+
+function getChatDeliveryStateKey(chatId) {
+    return `${CHAT_DELIVERY_STATE_META_PREFIX}${chatId}`;
+}
+
+function createEmptyDeliveryState() {
+    const providers = {};
+    for (const provider of getSupportedProviderKeys()) {
+        providers[provider] = { deliveredUpTo: 0, contextKey: null };
+    }
+    // Backward compatibility (older code assumes these keys exist).
+    if (!Object.prototype.hasOwnProperty.call(providers, 'chatgpt'))
+        providers.chatgpt = { deliveredUpTo: 0, contextKey: null };
+    if (!Object.prototype.hasOwnProperty.call(providers, 'gemini'))
+        providers.gemini = { deliveredUpTo: 0, contextKey: null };
+    return {
+        schemaVersion: CHAT_DELIVERY_STATE_SCHEMA_VERSION,
+        updatedAt: 0,
+        providers,
+    };
+}
+
+function normalizeDeliveryProviderState(value) {
+    const out = { deliveredUpTo: 0, contextKey: null };
+    if (!value || typeof value !== 'object') return out;
+    if (Number.isFinite(value.deliveredUpTo) && value.deliveredUpTo > 0) {
+        out.deliveredUpTo = Math.floor(value.deliveredUpTo);
+    }
+    if (typeof value.contextKey === 'string' && value.contextKey.trim()) {
+        out.contextKey = value.contextKey.trim();
+    }
+    return out;
+}
+
+function normalizeChatDeliveryState(value) {
+    const base = createEmptyDeliveryState();
+    if (!value || typeof value !== 'object') return base;
+
+    if (
+        (value.schemaVersion === 1 || value.schemaVersion === 2) &&
+        value.providers &&
+        typeof value.providers === 'object'
+    ) {
+        const out = createEmptyDeliveryState();
+        out.updatedAt = Number.isFinite(value.updatedAt) ? Math.floor(value.updatedAt) : 0;
+        for (const provider of Object.keys(out.providers)) {
+            out.providers[provider] = normalizeDeliveryProviderState(value.providers[provider]);
+        }
+        return out;
+    }
+
+    // Legacy shape: { chatgpt: number, gemini: number }
+    const out = createEmptyDeliveryState();
+    if (Number.isFinite(value.chatgpt) && value.chatgpt > 0)
+        out.providers.chatgpt.deliveredUpTo = Math.floor(value.chatgpt);
+    if (Number.isFinite(value.gemini) && value.gemini > 0)
+        out.providers.gemini.deliveredUpTo = Math.floor(value.gemini);
+    return out;
+}
+
+const deliveryStateCache = new Map();
+
+async function getChatDeliveryState(store, chatId) {
+    if (!store || !chatId) return createEmptyDeliveryState();
+    const cached = deliveryStateCache.get(chatId);
+    if (cached) return cached;
+    try {
+        const raw = await store.getMeta(getChatDeliveryStateKey(chatId));
+        const normalized = normalizeChatDeliveryState(raw);
+        deliveryStateCache.set(chatId, normalized);
+        return normalized;
+    } catch (error) {
+        const fallback = createEmptyDeliveryState();
+        deliveryStateCache.set(chatId, fallback);
+        return fallback;
+    }
+}
+
+async function saveChatDeliveryState(store, chatId, state) {
+    if (!store || !chatId) return { ok: false, error: 'Missing store/chatId.' };
+    const normalized = normalizeChatDeliveryState(state);
+    normalized.updatedAt = Date.now();
+    deliveryStateCache.set(chatId, normalized);
+    try {
+        await store.setMeta(getChatDeliveryStateKey(chatId), normalized);
+        return { ok: true, state: normalized };
+    } catch (error) {
+        return { ok: false, error: error?.message || 'Failed to save delivery state.' };
+    }
+}
+
+function getProviderContextKey(session, provider) {
+    const profileId = session?.profileIds?.[provider];
+    if (typeof profileId === 'string' && profileId.trim()) {
+        return `profile:${profileId.trim()}`;
+    }
+    const tabId = session?.tabIds?.[provider];
+    if (Number.isFinite(tabId)) {
+        return `tab:${Math.floor(tabId)}`;
+    }
+    return null;
+}
+
+function getEffectiveDeliveredUpTo(state, provider, contextKey) {
+    if (!state || typeof state !== 'object') return 0;
+    const providers =
+        state.providers && typeof state.providers === 'object' ? state.providers : null;
+    const normalizedProvider = normalizeProviderKey(provider);
+    const entry =
+        normalizedProvider &&
+        providers?.[normalizedProvider] &&
+        typeof providers[normalizedProvider] === 'object'
+            ? providers[normalizedProvider]
+            : null;
+    const deliveredUpTo = Number.isFinite(entry?.deliveredUpTo)
+        ? Math.max(0, Math.floor(entry.deliveredUpTo))
+        : 0;
+    const storedContextKey =
+        typeof entry?.contextKey === 'string' && entry.contextKey.trim()
+            ? entry.contextKey.trim()
+            : null;
+    if (contextKey && storedContextKey && contextKey !== storedContextKey) {
+        return 0;
+    }
+    return deliveredUpTo;
+}
+
+async function bumpProviderDeliveredUpTo(store, chatId, provider, sequence, contextKey) {
+    if (!store || !chatId) return { ok: false, error: 'Missing store/chatId.' };
+    const normalizedProvider = normalizeProviderKey(provider);
+    if (!normalizedProvider || !isSupportedProviderKey(normalizedProvider))
+        return { ok: false, error: 'Invalid provider.' };
+    if (!Number.isFinite(sequence) || sequence <= 0)
+        return { ok: false, error: 'Invalid sequence.' };
+
+    const state = await getChatDeliveryState(store, chatId);
+    const normalized = normalizeChatDeliveryState(state);
+    const entry = normalized.providers[normalizedProvider] || {
+        deliveredUpTo: 0,
+        contextKey: null,
+    };
+    normalized.providers[normalizedProvider] = entry;
+    const safeContextKey =
+        typeof contextKey === 'string' && contextKey.trim() ? contextKey.trim() : null;
+
+    if (safeContextKey && entry.contextKey && entry.contextKey !== safeContextKey) {
+        entry.deliveredUpTo = 0;
+    }
+    if (safeContextKey) entry.contextKey = safeContextKey;
+
+    entry.deliveredUpTo = Math.max(entry.deliveredUpTo, Math.floor(sequence));
+    return saveChatDeliveryState(store, chatId, normalized);
+}
+
+async function buildDirectHistoryDelta(
+    store,
+    chatId,
+    { afterSequence = 0, cutoffSequence, maxMessages = 400, maxChars = 48000 } = {}
+) {
+    if (!store || !chatId) return '';
+    if (!Number.isFinite(cutoffSequence) || cutoffSequence <= 1) return '';
+    const after = Number.isFinite(afterSequence) ? Math.max(0, Math.floor(afterSequence)) : 0;
+    const cutoff = Math.max(1, Math.floor(cutoffSequence));
+    if (cutoff <= after + 1) return '';
+
+    const collectedReversed = [];
+    let beforeSequence = cutoff; // excludes the new user message (sequence == cutoff) and anything after
+    let reachedBoundary = false;
+
+    while (!reachedBoundary) {
+        const page = await store.listMessages(chatId, { limit: 80, beforeSequence });
+        const messages = Array.isArray(page?.messages) ? page.messages : [];
+        if (messages.length === 0) break;
+
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+            const msg = messages[i];
+            if (!msg || !Number.isFinite(msg.sequence)) continue;
+            if (msg.sequence <= after) {
+                reachedBoundary = true;
+                break;
+            }
+            const role = msg.role;
+            if (role !== 'user' && !isSupportedProviderKey(role)) continue;
+            collectedReversed.push(msg);
+            if (collectedReversed.length >= maxMessages) {
+                reachedBoundary = true;
+                break;
+            }
+        }
+
+        if (reachedBoundary) break;
+        if (!page?.hasMore || !Number.isFinite(page?.nextCursorSequence)) break;
+        beforeSequence = page.nextCursorSequence;
+        if (!Number.isFinite(beforeSequence) || beforeSequence <= 0) break;
+    }
+
+    if (collectedReversed.length === 0) return '';
+    const ordered = collectedReversed.reverse();
+    return formatTranscriptForPrompt(ordered, { maxChars });
+}
+
+function renderUserMessageForSession(session, templates, baseVariables) {
+    const rawUserMsg = String(session?.userQuery || '').trim();
+    if (!rawUserMsg) return '';
+    if (!session?.isFollowUp) return rawUserMsg;
+    const wrapper =
+        typeof templates?.followup_user_msg_wrapper === 'string'
+            ? templates.followup_user_msg_wrapper.trim()
+            : '';
+    if (!wrapper) return rawUserMsg;
+    return renderPromptTemplate(wrapper, {
+        ...(baseVariables && typeof baseVariables === 'object' ? baseVariables : {}),
+        raw_user_msg: rawUserMsg,
+        conversation_context: session?.conversationContext || '',
+    }).trim();
+}
+
+async function buildDebatePrompt(session, turnIndex) {
+    const promptConfig = await loadDebatePromptConfig();
+    const baseTemplates = promptConfig?.debate || getDefaultDebatePromptConfig().debate;
+    const overrides =
+        session?.promptOverrides?.debate && typeof session.promptOverrides.debate === 'object'
+            ? session.promptOverrides.debate
+            : null;
+    const templates = overrides ? { ...baseTemplates, ...overrides } : baseTemplates;
+
+    const participants = getSessionParticipants(session);
+    const participantCount = participants.length >= 2 ? participants.length : 2;
+
+    const roundIndex = getRoundIndex(turnIndex, session);
+    const expectedParticipant = getTurnParticipant(session, turnIndex);
+    const expectedProvider = normalizeProviderKey(
+        expectedParticipant?.provider || getTurnLLM(session, turnIndex)
+    );
+    const expectedAgentId =
+        typeof expectedParticipant?.agentId === 'string' && expectedParticipant.agentId.trim()
+            ? expectedParticipant.agentId.trim()
+            : null;
+    const expectedLabel = expectedParticipant
+        ? formatParticipantLabelForPrompt(participants, expectedParticipant)
+        : formatLLMLabel(expectedProvider);
+
+    const firstParticipant = participants[0] || null;
+    const secondParticipant = participants[1] || null;
+    const firstLabel = firstParticipant
+        ? formatParticipantLabelForPrompt(participants, firstParticipant)
+        : formatLLMLabel(session.firstLLM);
+    const secondLabel = secondParticipant
+        ? formatParticipantLabelForPrompt(participants, secondParticipant)
+        : formatLLMLabel(session.secondLLM);
+
+    const expectedIndex = expectedParticipant
+        ? participants.findIndex(
+              (p) =>
+                  p?.agentId &&
+                  expectedParticipant.agentId &&
+                  p.agentId === expectedParticipant.agentId
+          )
+        : -1;
+    const otherParticipant = (() => {
+        if (!expectedParticipant || participants.length < 2) return null;
+        if (participantCount > 2) {
+            if (turnIndex <= 1) return null;
+            const prevIdx = (turnIndex - 2 + participantCount) % participantCount;
+            return participants[prevIdx] || null;
+        }
+        if (expectedIndex === 0) return participants[1] || null;
+        if (expectedIndex === 1) return participants[0] || null;
+        return participants[0] || null;
+    })();
+    const otherProvider = normalizeProviderKey(otherParticipant?.provider || '');
+    const otherAgentId =
+        typeof otherParticipant?.agentId === 'string' && otherParticipant.agentId.trim()
+            ? otherParticipant.agentId.trim()
+            : null;
+    const otherLabel = otherParticipant
+        ? formatParticipantLabelForPrompt(participants, otherParticipant)
+        : otherProvider
+          ? formatLLMLabel(otherProvider)
+          : '';
+
+    const safeOtherResponse = otherAgentId
+        ? getLastResponseByAgent(session, otherAgentId, otherProvider) ||
+          '[No prior response captured yet]'
+        : '[No prior response captured yet]';
+    const safeFirstResponse = firstParticipant?.agentId
+        ? getLastResponseByAgent(
+              session,
+              firstParticipant.agentId,
+              normalizeProviderKey(firstParticipant.provider)
+          ) || '[No prior response captured yet]'
+        : getLastResponse(session, session.firstLLM) || '[No prior response captured yet]';
+
+    const totalTurns = Number.isFinite(session.totalTurns)
+        ? session.totalTurns
+        : session.rounds * participantCount;
+    const baseVariables = {
+        rounds: session.rounds,
+        iterations: session.rounds,
+        round: roundIndex,
+        iteration: roundIndex,
+        prev_round: Math.max(0, roundIndex - 1),
+        turn: turnIndex,
+        turn_index: turnIndex,
+        total_turns: totalTurns,
+        expected_provider: expectedProvider,
+        expected_llm: expectedLabel,
+        llm: expectedLabel,
+        expected_agent_id: expectedAgentId,
+        other_provider: otherProvider || undefined,
+        other_llm: otherLabel,
+        other_agent_id: otherAgentId,
+        first_llm: firstLabel,
+        fisrt_llm: firstLabel,
+        second_llm: secondLabel,
+        user_msg: session.userQuery,
+        raw_user_msg: session.userQuery,
+        conversation_context: session.conversationContext || '',
+        user_query: session.userQuery,
+        first_answer: safeFirstResponse,
+        other_answer: safeOtherResponse,
+        last_other_answer: safeOtherResponse,
+    };
+
+    const header = renderPromptTemplate(templates.header, baseVariables);
+    const userMsg = renderUserMessageForSession(session, templates, { ...baseVariables, header });
+    const renderedIntermediary = renderPromptTemplate(templates.intermediary_message, {
+        ...baseVariables,
+        header,
+    });
+    const renderedFinal = renderPromptTemplate(templates.final_message, {
+        ...baseVariables,
+        header,
+    });
+    const isFinalTurn = turnIndex === totalTurns;
+    const renderedInitialInstruction = renderPromptTemplate(
+        typeof templates.first_turn_instruction === 'string'
+            ? templates.first_turn_instruction
+            : 'Provide your best answer.',
+        { ...baseVariables, header }
+    );
+    const turnInstruction =
+        turnIndex === 1
+            ? renderedInitialInstruction
+            : isFinalTurn
+              ? session.rounds === 1
+                  ? `${renderedInitialInstruction}\n\n${renderedFinal}`
+                  : renderedFinal
+              : session.rounds >= 3
+                ? renderedIntermediary
+                : renderedInitialInstruction;
+    const variables = {
+        ...baseVariables,
+        header,
+        user_msg: userMsg,
+        first_turn_instruction: renderedInitialInstruction,
+        intermediary_message: turnInstruction,
+        final_message: renderedFinal,
+    };
+
+    if (participantCount > 2) {
+        const isFinalTurn = turnIndex === totalTurns;
+        const instruction =
+            turnIndex === 1
+                ? renderedInitialInstruction
+                : isFinalTurn
+                  ? renderedFinal
+                  : renderedIntermediary;
+
+        const utils = globalThis.MLCDebatePromptUtils;
+        if (utils && typeof utils.buildMultiProviderDebatePrompt === 'function') {
+            return utils
+                .buildMultiProviderDebatePrompt({
+                    header,
+                    roundIndex,
+                    rounds: session.rounds,
+                    expectedAgentId,
+                    expectedProvider,
+                    messages: Array.isArray(session?.messages) ? session.messages : [],
+                    roleLabelFn: describeMessageRoleForContext,
+                    userMessageOverride: userMsg,
+                    instruction,
+                    maxChars: 48000,
+                })
+                .trim();
+        }
+
+        // Fallback (should not normally run): include all transcript messages since this agent last responded.
+        const messages = Array.isArray(session?.messages) ? session.messages : [];
+        let lastOwnIndex = -1;
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+            if (
+                expectedAgentId &&
+                (messages[i]?.agentId === expectedAgentId ||
+                    messages[i]?.sourceAgentId === expectedAgentId)
+            ) {
+                lastOwnIndex = i;
+                break;
+            }
+            if (!expectedAgentId && messages[i]?.role === expectedProvider) {
+                lastOwnIndex = i;
+                break;
+            }
+        }
+        const delta = messages
+            .slice(Math.max(0, lastOwnIndex + 1))
+            .map((msg) => {
+                if (!msg) return null;
+                if (msg.role === 'user') return { ...msg, content: userMsg };
+                return msg;
+            })
+            .filter(Boolean);
+        const deltaText = formatTranscriptForPrompt(delta, { maxChars: 48000 }).trim();
+
+        const blocks = [
+            header,
+            '',
+            `Iteration ${roundIndex}/${session.rounds}`,
+            '',
+            lastOwnIndex < 0 ? 'Conversation so far:' : 'New messages since your last turn:',
+            deltaText || '[No new messages]',
+            '',
+            instruction,
+        ];
+        return blocks.join('\n').trim();
+    }
+
+    if (turnIndex === 1) {
+        return renderPromptTemplate(templates.turn1, variables).trim();
+    }
+
+    if (turnIndex === 2) {
+        return renderPromptTemplate(templates.turn2, variables).trim();
+    }
+
+    const isFirstParticipant =
+        expectedParticipant && firstParticipant?.agentId && expectedParticipant.agentId
+            ? expectedParticipant.agentId === firstParticipant.agentId
+            : expectedProvider === session.firstLLM;
+    if (isFirstParticipant) {
+        return renderPromptTemplate(templates.turn3plus_first, variables).trim();
+    }
+
+    return renderPromptTemplate(templates.turn3plus_second, variables).trim();
+}
+
+async function buildSinglePrompt(session, turnIndex) {
+    const promptConfig = await loadDebatePromptConfig();
+    const baseTemplates = promptConfig?.single || getDefaultDebatePromptConfig().single;
+    const overrides =
+        session?.promptOverrides?.single && typeof session.promptOverrides.single === 'object'
+            ? session.promptOverrides.single
+            : null;
+    const templates = overrides ? { ...baseTemplates, ...overrides } : baseTemplates;
+
+    const roundIndex = Math.max(1, turnIndex);
+    const expectedLLM = getTurnLLM(session, turnIndex);
+    const expectedLabel = formatLLMLabel(expectedLLM);
+    const safePrevAnswer =
+        getLastResponse(session, expectedLLM) || '[No prior response captured yet]';
+
+    const totalTurns = Number.isFinite(session.totalTurns) ? session.totalTurns : session.rounds;
+    const baseVariables = {
+        rounds: session.rounds,
+        iterations: session.rounds,
+        round: roundIndex,
+        iteration: roundIndex,
+        prev_round: Math.max(0, roundIndex - 1),
+        turn: turnIndex,
+        turn_index: turnIndex,
+        total_turns: totalTurns,
+        expected_llm: expectedLabel,
+        llm: expectedLabel,
+        user_msg: session.userQuery,
+        raw_user_msg: session.userQuery,
+        conversation_context: session.conversationContext || '',
+        user_query: session.userQuery,
+        prev_answer: safePrevAnswer,
+    };
+
+    const header = renderPromptTemplate(templates.header, baseVariables);
+    const userMsg = renderUserMessageForSession(session, templates, { ...baseVariables, header });
+    const renderedIntermediary = renderPromptTemplate(templates.intermediary_message, {
+        ...baseVariables,
+        header,
+    });
+    const renderedFinal = renderPromptTemplate(templates.final_message, {
+        ...baseVariables,
+        header,
+    });
+    const isFinalTurn = turnIndex === totalTurns;
+    const renderedInitialInstruction = renderPromptTemplate(
+        typeof templates.first_turn_instruction === 'string'
+            ? templates.first_turn_instruction
+            : 'Provide your best answer.',
+        { ...baseVariables, header }
+    );
+    const turnInstruction =
+        turnIndex === 1
+            ? renderedInitialInstruction
+            : isFinalTurn
+              ? session.rounds === 1
+                  ? `${renderedInitialInstruction}\n\n${renderedFinal}`
+                  : renderedFinal
+              : renderedIntermediary;
+
+    const variables = {
+        ...baseVariables,
+        header,
+        user_msg: userMsg,
+        first_turn_instruction: renderedInitialInstruction,
+        intermediary_message: turnInstruction,
+        final_message: renderedFinal,
+    };
+
+    if (turnIndex === 1) {
+        return renderPromptTemplate(templates.turn1, variables).trim();
+    }
+
+    return renderPromptTemplate(templates.turn2plus, variables).trim();
+}
+
+async function buildDirectPrompt(session, turnIndex) {
+    const promptConfig = await loadDebatePromptConfig();
+    const defaults = getDefaultDebatePromptConfig();
+    const templates = promptConfig?.direct || defaults.direct;
+
+    const expectedLLM = getTurnLLM(session, turnIndex);
+    const expectedLabel = formatLLMLabel(expectedLLM);
+    const rawUserMsg = String(session?.userQuery || '').trim();
+
+    let conversationHistory = '';
+    try {
+        const store = await requireHistoryUnlocked();
+        const deliveryState = await getChatDeliveryState(store, session?.chatId);
+        const contextKey = getProviderContextKey(session, expectedLLM);
+        const deliveredUpTo = getEffectiveDeliveredUpTo(deliveryState, expectedLLM, contextKey);
+        conversationHistory = await buildDirectHistoryDelta(store, session?.chatId, {
+            afterSequence: deliveredUpTo,
+            cutoffSequence: session?.userMessageSequence,
+            maxMessages: 400,
+            maxChars: 48000,
+        });
+    } catch (error) {
+        conversationHistory = '';
+    }
+
+    const baseVariables = {
+        llm: expectedLabel,
+        expected_llm: expectedLabel,
+        raw_user_msg: rawUserMsg,
+        user_msg: rawUserMsg,
+        conversation_history: conversationHistory,
+        conversation_context: session?.conversationContext || '',
+    };
+
+    const isBoth = Boolean(session?.secondLLM);
+    const useHistory = Boolean(conversationHistory && conversationHistory.trim().length > 0);
+    const template = isBoth
+        ? useHistory && typeof templates?.both_turn_with_history === 'string'
+            ? templates.both_turn_with_history
+            : templates?.both_turn
+        : useHistory && typeof templates?.single_turn_with_history === 'string'
+          ? templates.single_turn_with_history
+          : templates?.single_turn;
+    const rendered = renderPromptTemplate(template, baseVariables).trim();
+    if (rendered) return rendered;
+
+    const header = "Here's a new message from the user:";
+    if (isBoth) {
+        return `${header}\n${rawUserMsg}\n\nYou are ${expectedLabel}. Please answer independently.`.trim();
+    }
+    return `${header}\n${rawUserMsg}\n\nPlease ${expectedLabel} answer.`.trim();
+}
+
+async function buildSessionPrompt(session, turnIndex) {
+    if (session?.mode === 'parallel') {
+        return ((session?.userQuery || '') + '').trim();
+    }
+    if (session?.mode === 'direct') {
+        return buildDirectPrompt(session, turnIndex);
+    }
+    if (session?.mode === 'single') {
+        return buildSinglePrompt(session, turnIndex);
+    }
+    return buildDebatePrompt(session, turnIndex);
+}
+
+async function validateTabForProvider(tabId, provider) {
+    if (!Number.isFinite(tabId)) {
+        return { ok: false, error: 'Tab not set.' };
+    }
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        if (!isExpectedHost(provider, getTabUrlCandidate(tab))) {
+            return { ok: false, error: 'Tab is not on the expected host.' };
+        }
+        return { ok: true, tabId: tab.id };
+    } catch (error) {
+        return { ok: false, error: 'Tab not found.' };
+    }
+}
+
+async function resolveSessionTab(session, target, { requirePing = false } = {}) {
+    const participants = getSessionParticipants(session);
+    const participant =
+        target && typeof target === 'object'
+            ? target
+            : participants.find((p) => p?.agentId === target) || null;
+
+    const provider = participant?.provider
+        ? normalizeProviderKey(participant.provider)
+        : normalizeProviderKey(target);
+    if (!provider || !isSupportedProviderKey(provider)) {
+        return { ok: false, error: 'Unknown provider for session.' };
+    }
+
+    const agentId = participant?.agentId
+        ? String(participant.agentId)
+        : typeof target === 'string'
+          ? target
+          : provider;
+
+    const profileId =
+        participant?.profileId === 'default'
+            ? session.profileIds?.[provider] || null
+            : participant?.profileId || session.profileIds?.[provider] || null;
+
+    if (profileId) {
+        const validation = await validateProfileForSession(provider, profileId, { requirePing });
+        if (!validation.ok) {
+            return { ok: false, error: validation.error };
+        }
+        if (
+            validation.profile?.inUseBySessionId &&
+            validation.profile.inUseBySessionId !== session.sessionId
+        ) {
+            return {
+                ok: false,
+                error: `${validation.profile.label} is already in use by another session.`,
+            };
+        }
+
+        if (participant && Array.isArray(session.participants)) {
+            session.participants = session.participants.map((p) =>
+                p?.agentId === agentId
+                    ? { ...p, tabId: validation.profile.tabId, profileId, provider }
+                    : p
+            );
+        }
+        if (session.agentTabIds && typeof session.agentTabIds === 'object') {
+            session.agentTabIds[agentId] = validation.profile.tabId;
+        }
+        if (session.agentProfileIds && typeof session.agentProfileIds === 'object') {
+            session.agentProfileIds[agentId] = profileId;
+        }
+        session.tabIds[provider] = validation.profile.tabId;
+        session.profileIds[provider] = profileId;
+        await saveSession(session);
+        return {
+            ok: true,
+            tabId: validation.profile.tabId,
+            participant: participant || null,
+            provider,
+            agentId,
+        };
+    }
+
+    const fallbackTabId = participant?.tabId || session.tabIds?.[provider];
+    const fallbackValidation = await validateTabForProvider(fallbackTabId, provider);
+    if (fallbackValidation.ok) {
+        const inUse = await isTabInUse(fallbackValidation.tabId, {
+            excludeSessionId: session.sessionId,
+        });
+        if (inUse) {
+            return {
+                ok: false,
+                error: `${formatLLMLabel(provider)} tab is already in use by another session.`,
+            };
+        }
+        if (participant && Array.isArray(session.participants)) {
+            session.participants = session.participants.map((p) =>
+                p?.agentId === agentId ? { ...p, tabId: fallbackValidation.tabId, provider } : p
+            );
+        }
+        if (session.agentTabIds && typeof session.agentTabIds === 'object') {
+            session.agentTabIds[agentId] = fallbackValidation.tabId;
+        }
+        session.tabIds[provider] = fallbackValidation.tabId;
+        await saveSession(session);
+        return {
+            ok: true,
+            tabId: fallbackValidation.tabId,
+            participant: participant || null,
+            provider,
+            agentId,
+        };
+    }
+    return fallbackValidation;
+}
+
+async function isTabInUse(tabId, { excludeSessionId } = {}) {
+    if (!Number.isFinite(tabId)) return false;
+    await loadSessionsState();
+    for (const session of sessionsById.values()) {
+        if (!session || (!session.isActive && !session.isPaused)) continue;
+        if (excludeSessionId && session.sessionId === excludeSessionId) continue;
+        const seenTabIds = new Set();
+        const tabIds = session.tabIds && typeof session.tabIds === 'object' ? session.tabIds : {};
+        Object.values(tabIds).forEach((id) => {
+            if (Number.isFinite(id)) seenTabIds.add(id);
+        });
+        const agentTabIds =
+            session.agentTabIds && typeof session.agentTabIds === 'object'
+                ? session.agentTabIds
+                : {};
+        Object.values(agentTabIds).forEach((id) => {
+            if (Number.isFinite(id)) seenTabIds.add(id);
+        });
+        const participants = Array.isArray(session.participants) ? session.participants : [];
+        participants.forEach((p) => {
+            if (Number.isFinite(p?.tabId)) seenTabIds.add(p.tabId);
+        });
+        if (seenTabIds.has(tabId)) return true;
+    }
+    return false;
+}
+
+async function pauseDebateSession(sessionId, reason, provider, options = {}) {
+    const session = await getSessionById(sessionId);
+    if (!session) return;
+    session.isPaused = true;
+    session.pausedReason = reason || 'Session paused.';
+    session.pausedProvider = provider || null;
+    session.pausedAgentId = typeof options?.agentId === 'string' ? options.agentId : null;
+    session.pausedProfileId = typeof options?.profileId === 'string' ? options.profileId : null;
+    if (!session.pausedProfileId && session.pausedAgentId) {
+        const fromAgentMap = session.agentProfileIds?.[session.pausedAgentId];
+        if (typeof fromAgentMap === 'string') session.pausedProfileId = fromAgentMap;
+        if (!session.pausedProfileId && Array.isArray(session.participants)) {
+            const match = session.participants.find((p) => p?.agentId === session.pausedAgentId);
+            if (match?.profileId) session.pausedProfileId = match.profileId;
+        }
+    }
+    if (
+        !session.pausedProfileId &&
+        session.pausedProvider &&
+        session.profileIds?.[session.pausedProvider]
+    ) {
+        session.pausedProfileId = session.profileIds[session.pausedProvider];
+    }
+    if (!session.pausedAgentId && session.pausedProfileId && Array.isArray(session.participants)) {
+        const match = session.participants.find((p) => p?.profileId === session.pausedProfileId);
+        if (match?.agentId) session.pausedAgentId = match.agentId;
+    }
+    session.pausedAt = Date.now();
+    session.autoResume = options && typeof options === 'object' ? options.autoResume || null : null;
+    await saveSession(session);
+    const participants = getSessionParticipants(session);
+    const pausedParticipant = session.pausedAgentId
+        ? participants.find((p) => p?.agentId === session.pausedAgentId) || null
+        : null;
+    sendMessageToPopup({
+        type: 'UI_SESSION_PAUSED',
+        chatId: session.chatId || null,
+        sessionId: session.sessionId,
+        provider: provider || null,
+        agentId: session.pausedAgentId,
+        profileId: session.pausedProfileId,
+        agentLabel: pausedParticipant
+            ? formatParticipantLabelForPrompt(participants, pausedParticipant)
+            : null,
+        reason: session.pausedReason,
+    });
+    if (autoFocusState.sessionId === session.sessionId) {
+        await stopAutoFocus('paused');
+    }
+}
+
+async function resumeDebateSession(sessionId, chatId = null) {
+    const session = sessionId
+        ? await getSessionById(sessionId)
+        : chatId
+          ? await getSessionForChat(chatId)
+          : null;
+    if (!session || !session.isPaused) {
+        return { ok: false, error: 'No paused session to resume.' };
+    }
+
+    if (session.chatId) {
+        try {
+            const store = await requireHistoryUnlocked();
+            const summary = await store.getThreadSummary(session.chatId).catch(() => null);
+            if (summary?.locked) {
+                return {
+                    ok: false,
+                    error: 'History is locked. Unlock to continue.',
+                    code: 'HISTORY_LOCKED',
+                };
+            }
+        } catch (error) {
+            if (error?.code === 'HISTORY_DISABLED') {
+                return { ok: false, error: 'History is disabled.', code: 'HISTORY_DISABLED' };
+            }
+        }
+    }
+
+    if (session.mode === 'parallel') {
+        const participants = getSessionParticipants(session);
+        const allAgentIds = participants.map((p) => p.agentId).filter(Boolean);
+        const agentIds =
+            Array.isArray(session.waitingFor) && session.waitingFor.length > 0
+                ? session.waitingFor.map((id) => String(id || '').trim()).filter(Boolean)
+                : allAgentIds;
+        for (const agentId of agentIds) {
+            const participant = participants.find((p) => p?.agentId === agentId) || null;
+            const provider = normalizeProviderKey(participant?.provider);
+            const validation = await resolveSessionTab(session, participant || agentId, {
+                requirePing: true,
+            });
+            if (!validation.ok) {
+                await pauseDebateSession(session.sessionId, validation.error, provider, {
+                    agentId,
+                    profileId: participant?.profileId || null,
+                });
+                return { ok: false, error: validation.error };
+            }
+        }
+        session.isPaused = false;
+        session.pausedReason = null;
+        session.pausedProvider = null;
+        session.pausedAgentId = null;
+        session.pausedProfileId = null;
+        session.pausedAt = 0;
+        session.autoResume = null;
+        await saveSession(session);
+        sendMessageToPopup({
+            type: 'UI_SESSION_RESUMED',
+            chatId: session.chatId || null,
+            sessionId: session.sessionId,
+        });
+        await sendParallelTurn(session, { providers: agentIds });
+        return { ok: true };
+    }
+
+    const expectedParticipant = getTurnParticipant(session, session.turnIndex);
+    if (!expectedParticipant) {
+        await pauseDebateSession(session.sessionId, 'No agent available for this turn.', null);
+        return { ok: false, error: 'No agent available for this turn.' };
+    }
+    const expectedProvider = normalizeProviderKey(expectedParticipant.provider);
+    const validation = await resolveSessionTab(session, expectedParticipant, { requirePing: true });
+    if (!validation.ok) {
+        await pauseDebateSession(session.sessionId, validation.error, expectedProvider, {
+            agentId: expectedParticipant.agentId,
+            profileId: expectedParticipant.profileId || null,
+        });
+        return { ok: false, error: validation.error };
+    }
+    session.isPaused = false;
+    session.pausedReason = null;
+    session.pausedProvider = null;
+    session.pausedAgentId = null;
+    session.pausedProfileId = null;
+    session.pausedAt = 0;
+    session.autoResume = null;
+    await saveSession(session);
+    sendMessageToPopup({
+        type: 'UI_SESSION_RESUMED',
+        chatId: session.chatId || null,
+        sessionId: session.sessionId,
+    });
+    await sendDebateTurn(session);
+    return { ok: true };
+}
+
+async function updateProfilesForTab(tab) {
+    if (!tab || !Number.isFinite(tab.id)) return null;
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        let changed = false;
+        const affected = [];
+        state.profiles = state.profiles.map((profile) => {
+            if (profile.tabId !== tab.id) return profile;
+            const urlCandidate = getTabUrlCandidate(tab);
+            const status = urlCandidate
+                ? isExpectedHost(profile.provider, urlCandidate)
+                    ? 'ok'
+                    : 'wrong_host'
+                : 'unknown';
+            const next = {
+                ...profile,
+                windowId: tab.windowId,
+                lastKnownTitle: tab.title || profile.lastKnownTitle || '',
+                lastKnownUrl: urlCandidate || profile.lastKnownUrl || '',
+                status,
+                lastSeenAt: Date.now(),
+                updatedAt: Date.now(),
+            };
+            changed = true;
+            affected.push(next);
+            return next;
+        });
+        if (changed) {
+            await saveTabProfiles(state);
+            await notifyTabProfiles(state);
+            for (const profile of affected) {
+                if (profile.inUseBySessionId && profile.status !== 'ok') {
+                    await pauseDebateSession(
+                        profile.inUseBySessionId,
+                        `Profile "${profile.label}" is ${profile.status}.`,
+                        profile.provider,
+                        {
+                            profileId: profile.profileId,
+                        }
+                    );
+                }
+            }
+        }
+        return affected;
+    });
+}
+
+async function handleTabRemoved(tabId) {
+    return withTabProfilesLock(async () => {
+        const state = await loadTabProfiles();
+        let changed = false;
+        const affected = [];
+        state.profiles = state.profiles.map((profile) => {
+            if (profile.tabId !== tabId) return profile;
+            const next = {
+                ...profile,
+                status: 'offline',
+                windowId: null,
+                updatedAt: Date.now(),
+            };
+            changed = true;
+            affected.push(next);
+            return next;
+        });
+        if (changed) {
+            await saveTabProfiles(state);
+            await notifyTabProfiles(state);
+            for (const profile of affected) {
+                if (profile.inUseBySessionId) {
+                    await pauseDebateSession(
+                        profile.inUseBySessionId,
+                        `Profile "${profile.label}" went offline.`,
+                        profile.provider,
+                        {
+                            profileId: profile.profileId,
+                        }
+                    );
+                }
+            }
+        }
+    });
+}
+
+async function handleTabActivated(activeInfo) {
+    if (!activeInfo || !Number.isFinite(activeInfo.tabId)) return;
+    try {
+        const tab = await chrome.tabs.get(activeInfo.tabId);
+        await updateProfilesForTab(tab);
+    } catch (error) {
+        // ignore
+    }
+}
+
+async function handleWindowFocusChanged(windowId) {
+    chromeHasFocus = windowId !== chrome.windows.WINDOW_ID_NONE;
+    if (!chromeHasFocus) return;
+    try {
+        const [tab] = await chrome.tabs.query({ active: true, windowId });
+        if (tab) {
+            await updateProfilesForTab(tab);
+        }
+
+        try {
+            await loadSessionsState();
+            for (const session of sessionsById.values()) {
+                if (!session.isPaused || session.autoResume?.trigger !== 'chrome_focus') continue;
+                console.log(
+                    '[MLC Debate] Auto-resuming paused session on Chrome focus.',
+                    session.autoResume
+                );
+                await resumeDebateSession(session.sessionId);
+            }
+        } catch (error) {
+            // ignore auto-resume failures
+        }
+    } catch (error) {
+        // ignore
+    }
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+    handleTabRemoved(tabId).catch((error) => {
+        console.warn('[MLC Profiles] Failed to handle tab removal:', error);
+    });
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (!tab || !Number.isFinite(tabId)) return;
+    if (changeInfo.url || changeInfo.status === 'complete' || changeInfo.title) {
+        updateProfilesForTab(tab).catch((error) => {
+            console.warn('[MLC Profiles] Failed to handle tab update:', error);
+        });
+    }
+});
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+    handleTabActivated(activeInfo).catch((error) => {
+        console.warn('[MLC Profiles] Failed to handle tab activation:', error);
+    });
+});
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+    handleWindowFocusChanged(windowId).catch((error) => {
+        console.warn('[MLC Profiles] Failed to handle window focus change:', error);
+    });
+});
+
+async function prefetchSessionAttachments(session, excludeAgentId) {
+    try {
+        const sessionId = session?.sessionId;
+        if (!sessionId) return;
+        if (!hasSessionAttachments(sessionId)) return;
+        const record = sessionAttachmentsById.get(sessionId);
+        if (!record) return;
+
+        const attachments = record.attachments;
+        if (!Array.isArray(attachments) || attachments.length === 0) return;
+
+        const excludeKey = typeof excludeAgentId === 'string' ? excludeAgentId.trim() : '';
+        const participants = getSessionParticipants(session);
+
+        for (const participant of participants) {
+            if (!hasSessionAttachments(sessionId)) return;
+            if (!participant?.agentId) continue;
+            if (excludeKey && participant.agentId === excludeKey) continue;
+            const provider = normalizeProviderKey(participant.provider);
+            if (!provider || !isSupportedProviderKey(provider)) continue;
+            if (getProviderAttachmentMode(provider) !== 'auto') continue;
+            if (record.sentTo?.[participant.agentId]) continue;
+            if (record.preparedTo?.[participant.agentId]) continue;
+
+            const resolution = await resolveSessionTab(session, participant);
+            if (!resolution.ok) {
+                console.warn(
+                    `[MLC Attachments] Prefetch skipped for ${provider}: ${resolution.error || 'Tab validation failed.'}`
+                );
+                continue;
+            }
+
+            try {
+                await injectAndPrepareAttachments(resolution.tabId, provider, attachments);
+                markSessionAttachmentsPrepared(session, participant.agentId);
+            } catch (error) {
+                console.warn(
+                    `[MLC Attachments] Prefetch failed for ${provider}:`,
+                    error?.message || error
+                );
+            }
+        }
+    } catch (error) {
+        console.warn('[MLC Attachments] Prefetch threw unexpectedly:', error);
+    }
+}
+
+function getParallelProviders(session) {
+    const providers = [];
+    const candidates =
+        Array.isArray(session?.route?.providers) && session.route.providers.length > 0
+            ? session.route.providers
+            : listSessionProviders(session);
+    for (const candidate of candidates) {
+        const key = normalizeProviderKey(candidate);
+        if (!isSupportedProviderKey(key)) continue;
+        if (!providers.includes(key)) providers.push(key);
+    }
+    return providers;
+}
+
+function buildParallelPromptId(sessionId, agentId) {
+    return `${sessionId}:parallel:${String(agentId || '').trim()}`;
+}
+
+function formatProvidersForUi(providers) {
+    if (!Array.isArray(providers) || providers.length === 0) return '';
+    return providers.map(formatLLMLabel).join(' + ');
+}
+
+async function sendParallelTurn(session, { providers: providersOverride } = {}) {
+    if (session.isPaused) return;
+    const sessionId = session.sessionId;
+    if (!sessionId) return;
+
+    if (session.chatId) {
+        try {
+            const store = await requireHistoryUnlocked();
+            const summary = await store.getThreadSummary(session.chatId).catch(() => null);
+            if (summary?.locked) {
+                await pauseDebateSession(
+                    session.sessionId,
+                    'History is locked. Unlock to continue.',
+                    null
+                );
+                return;
+            }
+        } catch (error) {
+            if (error?.code === 'HISTORY_DISABLED') {
+                await pauseDebateSession(session.sessionId, 'History is disabled.', null);
+                return;
+            }
+        }
+    }
+
+    const participants = getSessionParticipants(session);
+    const allAgentIds = participants.map((p) => p.agentId).filter(Boolean);
+    const waitingAgentIds = Array.isArray(session.waitingFor)
+        ? session.waitingFor.map((id) => String(id || '').trim()).filter(Boolean)
+        : [];
+    const base = Array.isArray(providersOverride)
+        ? providersOverride.map((id) => String(id || '').trim()).filter(Boolean)
+        : waitingAgentIds.length > 0
+          ? waitingAgentIds
+          : allAgentIds;
+    const agentIds = base.filter((id) => allAgentIds.includes(id));
+    if (agentIds.length === 0) return;
+
+    const resolvedTabs = {};
+    for (const agentId of agentIds) {
+        const participant = participants.find((p) => p?.agentId === agentId) || null;
+        const provider = normalizeProviderKey(participant?.provider);
+        const resolution = await resolveSessionTab(session, participant || agentId);
+        if (!resolution.ok) {
+            await pauseDebateSession(
+                session.sessionId,
+                resolution.error || 'Tab validation failed.',
+                provider || null,
+                {
+                    agentId,
+                    profileId: participant?.profileId || null,
+                }
+            );
+            return;
+        }
+        resolvedTabs[agentId] = resolution.tabId;
+    }
+
+    const promptText = await buildSessionPrompt(session, 1);
+    const promptIds = {};
+    agentIds.forEach((agentId) => {
+        promptIds[agentId] = buildParallelPromptId(sessionId, agentId);
+    });
+
+    const nextWaiting = waitingAgentIds.length > 0 ? waitingAgentIds : allAgentIds;
+    session.waitingFor = nextWaiting;
+    session.parallelPromptIds = { ...(session.parallelPromptIds || {}), ...promptIds };
+    session.lastPromptTimestamp = Date.now();
+    await saveSession(session);
+
+    sendMessageToPopup({
+        type: 'UI_SESSION_PROGRESS',
+        chatId: session.chatId || null,
+        sessionId,
+        waitingFor: participants.map((p) => p.provider),
+        waitingForAgentIds: nextWaiting,
+        waitingForLabel: nextWaiting
+            .map((agentId) => {
+                const p = participants.find((item) => item?.agentId === agentId);
+                return p
+                    ? formatParticipantLabelForPrompt(participants, p)
+                    : formatLLMLabel(p?.provider);
+            })
+            .filter(Boolean)
+            .join(' + '),
+        roundIndex: 1,
+        totalRounds: 1,
+    });
+
+    await startParallelAutoFocus(session, agentIds, resolvedTabs);
+
+    const sessionHasAttachments = hasSessionAttachments(sessionId);
+
+    const results = await Promise.allSettled(
+        agentIds.map(async (agentId) => {
+            const participant = participants.find((p) => p?.agentId === agentId) || null;
+            const provider = normalizeProviderKey(participant?.provider);
+            const tabId = resolvedTabs[agentId];
+            const promptId = promptIds[agentId];
+
+            const attachmentMode = sessionHasAttachments
+                ? getProviderAttachmentMode(provider)
+                : 'auto';
+            const shouldSkipAttachments = sessionHasAttachments && attachmentMode !== 'auto';
+            const attachmentsToSend =
+                shouldSkipAttachments || !sessionHasAttachments
+                    ? null
+                    : getPendingSessionAttachments(sessionId, agentId);
+
+            try {
+                await injectAndExecute(tabId, provider, promptText, {
+                    sessionId,
+                    promptId,
+                    turnIndex: 1,
+                    agentId,
+                    attachments: attachmentsToSend || undefined,
+                });
+                if (sessionHasAttachments) {
+                    markSessionAttachmentsSent(session, agentId);
+                }
+                return { ok: true, provider, agentId };
+            } catch (error) {
+                const code = error?.code;
+                const isAttachmentFailure =
+                    code === 'ATTACHMENTS_FAILED' ||
+                    String(error?.message || '').includes('Attachment upload failed');
+                if (attachmentsToSend && attachmentsToSend.length > 0 && isAttachmentFailure) {
+                    try {
+                        notifyAttachmentFallback(session, provider);
+                        if (sessionHasAttachments) {
+                            markSessionAttachmentsSent(session, agentId);
+                        }
+                        await injectAndExecute(tabId, provider, promptText, {
+                            sessionId,
+                            promptId,
+                            turnIndex: 1,
+                            agentId,
+                        });
+                        return { ok: true, provider, agentId, retriedWithoutAttachments: true };
+                    } catch (retryError) {
+                        throw { provider, agentId, error: retryError };
+                    }
+                }
+                throw { provider, agentId, error };
+            }
+        })
+    );
+
+    const firstFailure = results.find((result) => result.status === 'rejected');
+    if (firstFailure && firstFailure.status === 'rejected') {
+        const failure = firstFailure.reason;
+        const provider = normalizeProviderKey(failure?.provider);
+        const error = failure?.error || failure;
+        const agentId =
+            typeof failure?.agentId === 'string' && failure.agentId.trim()
+                ? failure.agentId.trim()
+                : null;
+        const participant = agentId
+            ? participants.find((p) => p?.agentId === agentId) || null
+            : null;
+        const autoResume =
+            provider === 'claude' && error?.code === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED'
+                ? { trigger: 'chrome_focus', provider: 'claude', createdAt: Date.now() }
+                : null;
+        await pauseDebateSession(
+            session.sessionId,
+            error?.message || 'Failed to send prompt.',
+            provider || null,
+            autoResume
+                ? {
+                      autoResume,
+                      agentId: agentId || undefined,
+                      profileId: participant?.profileId || null,
+                  }
+                : { agentId: agentId || undefined, profileId: participant?.profileId || null }
+        );
+    }
+}
+
+async function sendDebateTurn(session) {
+    if (session.isPaused) return;
+    const turnIndex = session.turnIndex;
+    const expectedParticipant = getTurnParticipant(session, turnIndex);
+    if (!expectedParticipant) {
+        await pauseDebateSession(session.sessionId, 'No agent available for this turn.', null);
+        return;
+    }
+    const expectedProvider = normalizeProviderKey(expectedParticipant.provider);
+    const expectedAgentId = expectedParticipant.agentId;
+
+    if (session.chatId) {
+        try {
+            const store = await requireHistoryUnlocked();
+            const summary = await store.getThreadSummary(session.chatId).catch(() => null);
+            if (summary?.locked) {
+                await pauseDebateSession(
+                    session.sessionId,
+                    'History is locked. Unlock to continue.',
+                    expectedProvider,
+                    { agentId: expectedAgentId, profileId: expectedParticipant.profileId || null }
+                );
+                return;
+            }
+        } catch (error) {
+            if (error?.code === 'HISTORY_DISABLED') {
+                await pauseDebateSession(
+                    session.sessionId,
+                    'History is disabled.',
+                    expectedProvider,
+                    { agentId: expectedAgentId, profileId: expectedParticipant.profileId || null }
+                );
+                return;
+            }
+        }
+    }
+
+    const resolution = await resolveSessionTab(session, expectedParticipant);
+    if (!resolution.ok) {
+        await pauseDebateSession(
+            session.sessionId,
+            resolution.error || 'Tab validation failed.',
+            expectedProvider,
+            { agentId: expectedAgentId, profileId: expectedParticipant.profileId || null }
+        );
+        return;
+    }
+
+    const promptText = await buildSessionPrompt(session, turnIndex);
+    const promptId = `${session.sessionId}:turn:${turnIndex}`;
+
+    session.waitingFor = expectedAgentId;
+    session.lastPromptId = promptId;
+    session.lastPromptTimestamp = Date.now();
+
+    await saveSession(session);
+
+    sendMessageToPopup({
+        type: 'UI_SESSION_PROGRESS',
+        chatId: session.chatId || null,
+        sessionId: session.sessionId,
+        waitingFor: expectedProvider,
+        waitingForAgentId: expectedAgentId,
+        waitingForLabel:
+            formatParticipantLabelForPrompt(getSessionParticipants(session), expectedParticipant) ||
+            formatLLMLabel(expectedProvider),
+        roundIndex: getRoundIndex(turnIndex, session),
+        totalRounds: session.rounds,
+    });
+
+    await ensureDebateAutoFocus(session, expectedProvider, resolution.tabId);
+
+    const sessionHasAttachments = hasSessionAttachments(session.sessionId);
+    const attachmentMode = sessionHasAttachments
+        ? getProviderAttachmentMode(expectedProvider)
+        : 'auto';
+    const shouldSkipAttachments = sessionHasAttachments && attachmentMode !== 'auto';
+    const attachmentsToSend =
+        shouldSkipAttachments || !sessionHasAttachments
+            ? null
+            : getPendingSessionAttachments(session.sessionId, expectedAgentId);
+
+    try {
+        await injectAndExecute(resolution.tabId, expectedProvider, promptText, {
+            sessionId: session.sessionId,
+            promptId: promptId,
+            turnIndex: turnIndex,
+            agentId: expectedAgentId,
+            attachments: attachmentsToSend || undefined,
+        });
+        if (sessionHasAttachments) {
+            markSessionAttachmentsSent(session, expectedAgentId);
+            await prefetchSessionAttachments(session, expectedAgentId);
+        }
+
+        if (
+            session.mode === 'direct' &&
+            session.chatId &&
+            Number.isFinite(session.userMessageSequence)
+        ) {
+            try {
+                const store = await requireHistoryUnlocked();
+                await bumpProviderDeliveredUpTo(
+                    store,
+                    session.chatId,
+                    expectedProvider,
+                    session.userMessageSequence,
+                    getProviderContextKey(session, expectedProvider)
+                );
+            } catch (error) {
+                // ignore delivery tracking failures
+            }
+        }
+    } catch (error) {
+        const code = error?.code;
+        const isAttachmentFailure =
+            code === 'ATTACHMENTS_FAILED' ||
+            String(error?.message || '').includes('Attachment upload failed');
+        if (attachmentsToSend && attachmentsToSend.length > 0 && isAttachmentFailure) {
+            // Attach failed (DOM drift / provider change). Retry immediately without attachments so the run continues.
+            try {
+                notifyAttachmentFallback(session, expectedProvider);
+                markSessionAttachmentsSent(session, expectedAgentId);
+                await injectAndExecute(resolution.tabId, expectedProvider, promptText, {
+                    sessionId: session.sessionId,
+                    promptId: promptId,
+                    turnIndex: turnIndex,
+                    agentId: expectedAgentId,
+                });
+                if (sessionHasAttachments) {
+                    await prefetchSessionAttachments(session, expectedAgentId);
+                }
+                return;
+            } catch (retryError) {
+                const rootError = retryError || error;
+                const autoResume =
+                    expectedProvider === 'claude' &&
+                    rootError?.code === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED'
+                        ? { trigger: 'chrome_focus', provider: 'claude', createdAt: Date.now() }
+                        : null;
+                await pauseDebateSession(
+                    session.sessionId,
+                    retryError?.message || error?.message || 'Failed to send prompt.',
+                    expectedProvider,
+                    autoResume
+                        ? {
+                              autoResume,
+                              agentId: expectedAgentId,
+                              profileId: expectedParticipant.profileId || null,
+                          }
+                        : {
+                              agentId: expectedAgentId,
+                              profileId: expectedParticipant.profileId || null,
+                          }
+                );
+                return;
+            }
+        }
+
+        const autoResume =
+            expectedProvider === 'claude' && error?.code === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED'
+                ? { trigger: 'chrome_focus', provider: 'claude', createdAt: Date.now() }
+                : null;
+        await pauseDebateSession(
+            session.sessionId,
+            error?.message || 'Failed to send prompt.',
+            expectedProvider,
+            autoResume
+                ? {
+                      autoResume,
+                      agentId: expectedAgentId,
+                      profileId: expectedParticipant.profileId || null,
+                  }
+                : { agentId: expectedAgentId, profileId: expectedParticipant.profileId || null }
+        );
+    }
+}
+
+async function handleParallelResponse(session, message) {
+    const sessionId = session?.sessionId;
+    if (!sessionId) return;
+
+    const agentId =
+        typeof message.agentId === 'string' && message.agentId.trim()
+            ? message.agentId.trim()
+            : typeof message.sourceAgentId === 'string' && message.sourceAgentId.trim()
+              ? message.sourceAgentId.trim()
+              : '';
+    if (!agentId) return;
+
+    const waitingFor = Array.isArray(session.waitingFor)
+        ? session.waitingFor.map((id) => String(id || '').trim()).filter(Boolean)
+        : [];
+    if (!waitingFor.includes(agentId)) {
+        return;
+    }
+
+    const expectedPromptId =
+        session.parallelPromptIds?.[agentId] || buildParallelPromptId(sessionId, agentId);
+    if (expectedPromptId && message.promptId && expectedPromptId !== message.promptId) {
+        console.log('[MLC Parallel] Ignoring response with mismatched promptId.', {
+            expectedPromptId,
+            messagePromptId: message.promptId,
+            agentId,
+        });
+        return;
+    }
+
+    const participants = getSessionParticipants(session);
+    const participant = participants.find((p) => p?.agentId === agentId) || null;
+    const provider = normalizeProviderKey(
+        participant?.provider || message.sourceLLM || message.provider || ''
+    );
+    if (!provider || !isSupportedProviderKey(provider)) return;
+
+    const rawContent = typeof message.content === 'string' ? message.content : '';
+    const content = rawContent.trim();
+    if (!content) {
+        console.warn('[MLC Parallel] Dropping captured response: empty content.', {
+            reason: 'empty_content_after_capture',
+            sessionId,
+            promptId: message.promptId || null,
+            turnIndex: Number.isFinite(message.turnIndex) ? message.turnIndex : null,
+            agentId,
+            sourceLLM: message.sourceLLM || message.provider || null,
+            contentHtmlLength:
+                typeof message.contentHtml === 'string' ? message.contentHtml.length : 0,
+        });
+        return;
+    }
+    const rawHtml = typeof message.contentHtml === 'string' ? message.contentHtml : '';
+    const trimmedHtml = rawHtml.trim();
+    const MAX_HTML_CHARS = 120000;
+    const contentHtml = trimmedHtml && trimmedHtml.length <= MAX_HTML_CHARS ? rawHtml : '';
+
+    const timestamp = Date.now();
+    const entry = {
+        role: provider,
+        agentId,
+        agentLabel: participant
+            ? formatParticipantLabelForPrompt(participants, participant)
+            : undefined,
+        content,
+        timestamp,
+        roundIndex: 1,
+    };
+    if (contentHtml) entry.contentHtml = contentHtml;
+    session.messages.push(entry);
+
+    session.waitingFor = waitingFor.filter((item) => item !== agentId);
+
+    await saveSession(session);
+
+    sendMessageToPopup({
+        type: 'UI_MESSAGE_ADD',
+        chatId: session.chatId || null,
+        sessionId: sessionId,
+        role: provider,
+        agentId,
+        agentLabel: participant
+            ? formatParticipantLabelForPrompt(participants, participant)
+            : undefined,
+        content: content,
+        contentHtml: contentHtml || undefined,
+        timestamp: timestamp,
+        roundIndex: 1,
+    });
+
+    if (session.chatId) {
+        await appendChatMessage(session.chatId, {
+            role: provider,
+            agentId,
+            agentLabel: participant
+                ? formatParticipantLabelForPrompt(participants, participant)
+                : undefined,
+            content,
+            contentHtml: contentHtml || undefined,
+            timestamp,
+            roundIndex: 1,
+            sessionId: sessionId,
+        });
+    }
+
+    if (Array.isArray(session.waitingFor) && session.waitingFor.length === 0) {
+        await endDebateSession('Session completed.', session.sessionId);
+        return;
+    }
+
+    sendMessageToPopup({
+        type: 'UI_SESSION_PROGRESS',
+        chatId: session.chatId || null,
+        sessionId,
+        waitingFor: participants.map((p) => p.provider),
+        waitingForAgentIds: session.waitingFor,
+        waitingForLabel: Array.isArray(session.waitingFor)
+            ? session.waitingFor
+                  .map((remainingId) => {
+                      const p = participants.find((item) => item?.agentId === remainingId);
+                      return p
+                          ? formatParticipantLabelForPrompt(participants, p)
+                          : formatLLMLabel(p?.provider);
+                  })
+                  .filter(Boolean)
+                  .join(' + ')
+            : '',
+    });
+}
+
+async function handleDebateResponse(message) {
+    if (!message.sessionId) return;
+
+    const session = await getSessionById(message.sessionId);
+    if (!session || !session.isActive) {
+        console.log('[MLC Debate] Ignoring response: session not active or mismatch.');
+        return;
+    }
+
+    if (session.mode === 'parallel') {
+        await handleParallelResponse(session, message);
+        return;
+    }
+
+    if (session.isPaused && !session.lastPromptId) {
+        console.log('[MLC Debate] Ignoring response while paused with no active prompt.');
+        return;
+    }
+
+    const expectedAgentId = typeof session.waitingFor === 'string' ? session.waitingFor : null;
+    const messageAgentId =
+        typeof message.agentId === 'string' && message.agentId.trim()
+            ? message.agentId.trim()
+            : typeof message.sourceAgentId === 'string' && message.sourceAgentId.trim()
+              ? message.sourceAgentId.trim()
+              : null;
+    if (expectedAgentId && !messageAgentId) {
+        console.log('[MLC Debate] Ignoring response without agentId for an agent-based session.');
+        return;
+    }
+    if (expectedAgentId && messageAgentId && messageAgentId !== expectedAgentId) {
+        console.log('[MLC Debate] Ignoring response from unexpected agent:', messageAgentId);
+        return;
+    }
+
+    const messageTurnIndex = Number.isFinite(message.turnIndex)
+        ? message.turnIndex
+        : parseInt(message.turnIndex, 10);
+    const hasTurnIndex = Number.isFinite(messageTurnIndex);
+    const promptMismatch =
+        session.lastPromptId && message.promptId && session.lastPromptId !== message.promptId;
+    const turnMismatch = hasTurnIndex && messageTurnIndex !== session.turnIndex;
+
+    if (promptMismatch && (!hasTurnIndex || turnMismatch)) {
+        console.log('[MLC Debate] Ignoring response with mismatched promptId/turnIndex.', {
+            expectedPromptId: session.lastPromptId,
+            messagePromptId: message.promptId,
+            expectedTurnIndex: session.turnIndex,
+            messageTurnIndex: messageTurnIndex,
+        });
+        return;
+    }
+
+    const rawContent = typeof message.content === 'string' ? message.content : '';
+    const content = rawContent.trim();
+    if (!content) {
+        console.warn('[MLC Debate] Dropping captured response: empty content.', {
+            reason: 'empty_content_after_capture',
+            sessionId: message.sessionId,
+            promptId: message.promptId || null,
+            turnIndex: hasTurnIndex ? messageTurnIndex : null,
+            agentId: messageAgentId || expectedAgentId || null,
+            sourceLLM: message.sourceLLM || null,
+            contentHtmlLength:
+                typeof message.contentHtml === 'string' ? message.contentHtml.length : 0,
+        });
+        return;
+    }
+    const rawHtml = typeof message.contentHtml === 'string' ? message.contentHtml : '';
+    const trimmedHtml = rawHtml.trim();
+    const MAX_HTML_CHARS = 120000;
+    const contentHtml = trimmedHtml && trimmedHtml.length <= MAX_HTML_CHARS ? rawHtml : '';
+
+    const turnIndex = session.turnIndex;
+    const roundIndex = getRoundIndex(turnIndex, session);
+    const timestamp = Date.now();
+
+    const participants = getSessionParticipants(session);
+    const expectedParticipant = expectedAgentId
+        ? participants.find((p) => p?.agentId === expectedAgentId) || null
+        : getTurnParticipant(session, turnIndex);
+    const expectedProvider = normalizeProviderKey(
+        expectedParticipant?.provider || message.sourceLLM || ''
+    );
+
+    const entry = {
+        role: expectedProvider || message.sourceLLM || 'assistant',
+        agentId: expectedAgentId || messageAgentId || undefined,
+        agentLabel: expectedParticipant
+            ? formatParticipantLabelForPrompt(participants, expectedParticipant)
+            : undefined,
+        content: content,
+        timestamp: timestamp,
+        turnIndex: turnIndex,
+        roundIndex: roundIndex,
+    };
+    if (contentHtml) entry.contentHtml = contentHtml;
+    session.messages.push(entry);
+
+    session.waitingFor = null;
+    session.lastPromptId = null;
+    session.lastPromptTimestamp = 0;
+
+    await saveSession(session);
+
+    sendMessageToPopup({
+        type: 'UI_MESSAGE_ADD',
+        chatId: session.chatId || null,
+        sessionId: session.sessionId,
+        role: expectedProvider || message.sourceLLM,
+        agentId: expectedAgentId || messageAgentId || undefined,
+        agentLabel: expectedParticipant
+            ? formatParticipantLabelForPrompt(participants, expectedParticipant)
+            : undefined,
+        content: content,
+        contentHtml: contentHtml || undefined,
+        timestamp: timestamp,
+        turnIndex: turnIndex,
+        roundIndex: roundIndex,
+    });
+
+    if (session.chatId) {
+        const persisted = await appendChatMessage(session.chatId, {
+            role: expectedProvider || message.sourceLLM,
+            agentId: expectedAgentId || messageAgentId || undefined,
+            agentLabel: expectedParticipant
+                ? formatParticipantLabelForPrompt(participants, expectedParticipant)
+                : undefined,
+            content,
+            contentHtml: contentHtml || undefined,
+            timestamp,
+            turnIndex,
+            roundIndex,
+            sessionId: session.sessionId,
+        });
+        if (persisted?.ok && Number.isFinite(persisted?.message?.sequence)) {
+            const provider = expectedProvider || message.sourceLLM;
+            if (isSupportedProviderKey(provider)) {
+                try {
+                    const store = await requireHistoryUnlocked();
+                    await bumpProviderDeliveredUpTo(
+                        store,
+                        session.chatId,
+                        provider,
+                        persisted.message.sequence,
+                        getProviderContextKey(session, provider)
+                    );
+                } catch (error) {
+                    // ignore delivery tracking failures
+                }
+            }
+        }
+    }
+
+    if (turnIndex >= session.totalTurns) {
+        await endDebateSession('Session completed.', session.sessionId);
+        return;
+    }
+
+    session.turnIndex = turnIndex + 1;
+    await saveSession(session);
+    if (!session.isPaused) {
+        await sendDebateTurn(session);
+    }
+}
+
+async function endDebateSession(reason, sessionId) {
+    const session = sessionId ? await getSessionById(sessionId) : null;
+    if (!session) return;
+
+    session.isActive = false;
+    session.isPaused = false;
+    session.waitingFor = null;
+    session.endedAt = Date.now();
+
+    await releaseProfilesForSession(session.sessionId);
+
+    sendMessageToPopup({
+        type: 'UI_SESSION_ENDED',
+        chatId: session.chatId || null,
+        sessionId: session.sessionId,
+        reason: reason || 'Session ended.',
+    });
+
+    if (autoFocusState.sessionId === session.sessionId) {
+        await stopAutoFocus('ended');
+    }
+
+    clearSessionAttachments(session.sessionId);
+    await removeSession(session.sessionId);
+}
+
+async function handleSendPrompt(message) {
+    const { prompt, targets, multiAgent } = message;
+
+    mlcDebugLog('send_prompt_received', {
+        promptChars: prompt.length,
+        targets,
+        multiAgentEnabled: Boolean(multiAgent?.enabled),
+    });
+
+    // Check if multi-agent mode is requested
+    if (multiAgent && multiAgent.enabled) {
+        const firstLLM = targets.chatgpt ? 'chatgpt' : targets.gemini ? 'gemini' : 'claude';
+        handleStartDebateSession({
+            prompt: prompt,
+            firstLLM: firstLLM,
+            rounds: multiAgent.maxIterations || 3,
+        });
+        return;
+    }
+
+    // Regular mode - send to individual LLMs
+    if (targets.claude) {
+        await processLLM('claude', prompt);
+    }
+
+    if (targets.gemini) {
+        await processLLM('gemini', prompt);
+    }
+
+    if (targets.chatgpt) {
+        await processLLM('chatgpt', prompt);
+    }
+}
+
+function handleGeminiResponse(message) {
+    if (message.sessionId) return;
+    if (!message.content || message.content.trim().length === 0) {
+        console.log('[MLC] Received empty Gemini response, ignoring.');
+        return;
+    }
+
+    sendMessageToPopup({
+        type: 'LLM_RESPONSE',
+        llm: 'gemini',
+        content: message.content,
+        contentHtml: message.contentHtml || undefined,
+    });
+}
+
+function handleChatGPTResponse(message) {
+    if (message.sessionId) return;
+
+    if (!message.content || message.content.trim().length === 0) {
+        console.log('[MLC] Received empty ChatGPT response, ignoring.');
+        return;
+    }
+
+    sendMessageToPopup({
+        type: 'LLM_RESPONSE',
+        llm: 'chatgpt',
+        content: message.content,
+        contentHtml: message.contentHtml || undefined,
+    });
+}
+
+function handleClaudeResponse(message) {
+    if (message.sessionId) return;
+
+    if (!message.content || message.content.trim().length === 0) {
+        console.log('[MLC] Received empty Claude response, ignoring.');
+        return;
+    }
+
+    sendMessageToPopup({
+        type: 'LLM_RESPONSE',
+        llm: 'claude',
+        content: message.content,
+        contentHtml: message.contentHtml || undefined,
+    });
+}
+
+function handleGrokResponse(message) {
+    if (message.sessionId) return;
+
+    if (!message.content || message.content.trim().length === 0) {
+        console.log('[MLC] Received empty Grok response, ignoring.');
+        return;
+    }
+
+    sendMessageToPopup({
+        type: 'LLM_RESPONSE',
+        llm: 'grok',
+        content: message.content,
+        contentHtml: message.contentHtml || undefined,
+    });
+}
+
+async function processLLM(llmType, prompt, context = {}) {
+    try {
+        mlcDebugLog('process_llm', {
+            provider: llmType,
+            promptChars: typeof prompt === 'string' ? prompt.length : 0,
+        });
+
+        const profilesState = await loadTabProfiles();
+        const defaultProfileId = profilesState.defaults?.[llmType];
+        const defaultProfile = defaultProfileId
+            ? findProfileById(profilesState, defaultProfileId)
+            : null;
+        const preferred = await getPreferredTabs();
+        const preferredId = context.tabId || defaultProfile?.tabId || preferred[llmType];
+
+        sendMessageToPopup({ type: 'LLM_PROGRESS', llm: llmType, status: 'Finding tab...' });
+        const tab = await findLLMTab(llmType, preferredId);
+
+        if (!tab) {
+            throw new Error(
+                `${formatLLMLabel(llmType)} tab not found. Please open it in a tab and ensure you're logged in.`
+            );
+        }
+        console.log(`[MLC Background] Found ${llmType} tab: ID ${tab.id}, URL ${tab.url}`);
+
+        sendMessageToPopup({ type: 'LLM_PROGRESS', llm: llmType, status: 'Injecting script...' });
+        const promptId = context.promptId || generatePromptId();
+        await injectAndExecute(tab.id, llmType, prompt, {
+            promptId: promptId,
+            sessionId: context.sessionId || null,
+            turnIndex: context.turnIndex || null,
+        });
+
+        return promptId;
+    } catch (error) {
+        console.error(`[MLC Background] Error processing ${llmType}:`, error.message, error.stack);
+        sendMessageToPopup({ type: 'LLM_ERROR', llm: llmType, error: error.message });
+        return null;
+    }
+}
+
+async function listLLMTabs(llmType) {
+    const normalized = normalizeProviderKey(llmType);
+    const patterns = PROVIDER_METADATA?.[normalized]?.urlPatterns;
+    if (!patterns) {
+        throw new Error(`[MLC Background] Unknown LLM type for listLLMTabs: ${llmType}`);
+    }
+
+    let allTabs = [];
+    for (const pattern of patterns) {
+        const tabs = await chrome.tabs.query({ url: pattern });
+        allTabs = allTabs.concat(tabs);
+    }
+
+    if (allTabs.length === 0) {
+        const allTabsQuery = await chrome.tabs.query({});
+        const titleMatches = allTabsQuery.filter((tab) => {
+            const title = tab.title?.toLowerCase() || '';
+            const url = tab.url?.toLowerCase() || '';
+            const llmName = llmType.toLowerCase();
+            return (
+                title.includes(llmName) ||
+                url.includes(llmName) ||
+                (llmName === 'chatgpt' && (title.includes('openai') || url.includes('openai')))
+            );
+        });
+        allTabs = titleMatches;
+    }
+
+    const seen = new Set();
+    return allTabs.filter((tab) => {
+        if (seen.has(tab.id)) return false;
+        seen.add(tab.id);
+        return true;
+    });
+}
+
+function selectTabFromList(tabs, preferredTabId) {
+    if (!tabs || tabs.length === 0) return null;
+    if (preferredTabId) {
+        const preferred = tabs.find((tab) => tab.id === preferredTabId);
+        if (preferred) return preferred;
+    }
+
+    const activeTab = tabs.find((tab) => tab.active);
+    if (activeTab) return activeTab;
+
+    const byLastAccessed = [...tabs].sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
+    return byLastAccessed[0] || null;
+}
+
+async function resolveTabForLLM(llmType, requestedTabId, preferredTabId) {
+    const tabs = await listLLMTabs(llmType);
+    const completeTabs = tabs.filter((tab) => tab.status === 'complete');
+    const candidates = completeTabs.length > 0 ? completeTabs : tabs;
+
+    if (requestedTabId) {
+        const match = candidates.find((tab) => tab.id === requestedTabId);
+        if (match) return match;
+    }
+
+    if (preferredTabId) {
+        const preferred = candidates.find((tab) => tab.id === preferredTabId);
+        if (preferred) return preferred;
+    }
+
+    if (llmType === 'claude') {
+        const chatTabs = candidates.filter(
+            (tab) => typeof tab.url === 'string' && /:\/\/claude\.ai\/chat\//i.test(tab.url)
+        );
+        if (chatTabs.length > 0) {
+            return selectTabFromList(chatTabs, null);
+        }
+    }
+
+    return selectTabFromList(candidates, null);
+}
+
+async function findLLMTab(llmType, preferredTabId) {
+    try {
+        const selectedTab = await resolveTabForLLM(llmType, null, preferredTabId);
+        console.log(
+            `[MLC Background] findLLMTab for ${llmType} selected:`,
+            selectedTab
+                ? { id: selectedTab.id, url: selectedTab.url, title: selectedTab.title }
+                : 'None'
+        );
+        return selectedTab;
+    } catch (error) {
+        console.error(`[MLC Background] Error in findLLMTab for ${llmType}:`, error);
+        return null;
+    }
+}
+
+function debuggerAttach(debuggee, protocolVersion = '1.3') {
+    return new Promise((resolve, reject) => {
+        try {
+            chrome.debugger.attach(debuggee, protocolVersion, () => {
+                if (chrome.runtime.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message));
+                    return;
+                }
+                resolve();
+            });
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+function debuggerDetach(debuggee) {
+    return new Promise((resolve) => {
+        try {
+            chrome.debugger.detach(debuggee, () => resolve());
+        } catch (error) {
+            resolve();
+        }
+    });
+}
+
+function debuggerSendCommand(debuggee, method, params = {}) {
+    return new Promise((resolve, reject) => {
+        try {
+            chrome.debugger.sendCommand(debuggee, method, params, (result) => {
+                if (chrome.runtime.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message));
+                    return;
+                }
+                resolve(result);
+            });
+        } catch (error) {
+            reject(error);
+        }
+    });
+}
+
+async function sendTabMessageWithRetry(tabId, message, options = {}) {
+    const retries = Number.isFinite(options.retries)
+        ? Math.max(1, Math.floor(options.retries))
+        : 10;
+    const delayMs = Number.isFinite(options.delayMs)
+        ? Math.max(50, Math.floor(options.delayMs))
+        : 450;
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= retries; attempt += 1) {
+        try {
+            await chrome.tabs.sendMessage(tabId, message);
+            return { ok: true, attempt };
+        } catch (error) {
+            lastError = error;
+        }
+        await sleep(delayMs);
+    }
+
+    return { ok: false, error: String(lastError?.message || lastError || 'unknown_error') };
+}
+
+async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
+    const debuggee = { tabId };
+    await debuggerAttach(debuggee, '1.3');
+    try {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const readyTimeoutMs = (() => {
+            const value = options && typeof options === 'object' ? options.readyTimeoutMs : null;
+            const fallbackMs = 12000;
+            if (!Number.isFinite(value)) return fallbackMs;
+            return Math.min(120000, Math.max(2000, Math.floor(value)));
+        })();
+
+        // Make the tab active to maximize the chance CDP input targets the correct frame/element.
+        // Only focus the window when Chrome is already focused to avoid stealing OS focus.
+        try {
+            await refreshChromeFocusState();
+            const sendingWhileChromeUnfocused = !chromeHasFocus;
+            if (sendingWhileChromeUnfocused) {
+                try {
+                    await debuggerSendCommand(debuggee, 'Emulation.setFocusEmulationEnabled', {
+                        enabled: true,
+                    });
+                } catch (error) {
+                    // Best-effort; not all Chrome builds support this, and the debugger domain may be disabled.
+                }
+            }
+            const tab = await chrome.tabs.get(tabId);
+            if (tab?.windowId && chromeHasFocus) {
+                await chrome.windows.update(tab.windowId, { focused: true });
+            }
+            await chrome.tabs.update(tabId, { active: true });
+        } catch (error) {
+            // ignore focus errors
+        }
+
+        const focusExpr = `(() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = el.getBoundingClientRect();
+                if (!(rect.width > 8 && rect.height > 8)) return false;
+                if (rect.bottom < 0 || rect.right < 0) return false;
+                if (rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+                return true;
+            };
+
+            const bottomMost = (nodes) => {
+                let best = null;
+                let bestBottom = -Infinity;
+                for (const node of nodes) {
+                    if (!isVisible(node)) continue;
+                    const rect = node.getBoundingClientRect();
+                    const bottom = Number.isFinite(rect.bottom) ? rect.bottom : 0;
+                    if (bottom >= bestBottom) {
+                        bestBottom = bottom;
+                        best = node;
+                    }
+                }
+                return best;
+            };
+
+            const sendSelectors = [
+                'button[aria-label*="message" i]',
+                'button[aria-label*="envoyer" i]',
+                'button[aria-label*="send" i]'
+            ];
+
+            const findComposerRoot = () => {
+                const uploadSelectors = [
+                    'input[type="file"][data-testid="file-upload"]',
+                    'input[type="file"]#chat-input-file-upload-onpage',
+                    'input[type="file"][id*="chat-input-file-upload" i]'
+                ];
+                for (const sel of uploadSelectors) {
+                    const upload = bottomMost(Array.from(document.querySelectorAll(sel)));
+                    if (upload) {
+                        return upload.closest('fieldset')
+                            || upload.closest('form')
+                            || upload.closest('[role="form"]')
+                            || upload.parentElement
+                            || document.body;
+                    }
+                }
+
+                const ta = bottomMost(Array.from(document.querySelectorAll('textarea[data-testid="chat-input-ssr"], textarea')));
+                if (ta) {
+                    return ta.closest('fieldset')
+                        || ta.closest('form')
+                        || ta.closest('[role="form"]')
+                        || ta.parentElement
+                        || document.body;
+                }
+
+                for (const sel of sendSelectors) {
+                    const btn = bottomMost(Array.from(document.querySelectorAll(sel)));
+                    if (btn) {
+                        return btn.closest('fieldset')
+                            || btn.closest('form')
+                            || btn.closest('[role="form"]')
+                            || btn.parentElement
+                            || document.body;
+                    }
+                }
+
+                return document.body;
+            };
+
+            const root = findComposerRoot();
+
+            let sendBtn = null;
+            for (const sel of sendSelectors) {
+                const btn = bottomMost(Array.from(root.querySelectorAll(sel)));
+                if (btn) {
+                    sendBtn = btn;
+                    break;
+                }
+            }
+            if (!sendBtn) {
+                for (const sel of sendSelectors) {
+                    const btn = bottomMost(Array.from(document.querySelectorAll(sel)));
+                    if (btn) {
+                        sendBtn = btn;
+                        break;
+                    }
+                }
+            }
+
+            const isVisibleInput = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = el.getBoundingClientRect();
+                if (rect.bottom < 0 || rect.right < 0) return false;
+                if (rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+                return true;
+            };
+
+            const inputSelectors = [
+                'div[data-testid="chat-input"][role="textbox"]',
+                '[contenteditable="true"][role="textbox"]',
+                '.ProseMirror[contenteditable="true"]',
+                '[contenteditable="true"]',
+                'textarea[data-testid="chat-input-ssr"]',
+                'textarea'
+            ];
+            const seen = new Set();
+            const candidates = [];
+            const active = document.activeElement;
+            if (active && active !== document.body && !seen.has(active)) {
+                const isLikelyEditor = active.matches?.('div[data-testid="chat-input"][role="textbox"]')
+                    || (Boolean(active.isContentEditable || String(active.getAttribute?.('contenteditable') || '').toLowerCase() === 'true')
+                        && String(active.getAttribute?.('role') || '').toLowerCase() === 'textbox');
+                if (isLikelyEditor && isVisibleInput(active)) {
+                    seen.add(active);
+                    candidates.push(active);
+                }
+            }
+            for (const sel of inputSelectors) {
+                for (const scope of [root, document]) {
+                    if (!scope?.querySelectorAll) continue;
+                    for (const node of Array.from(scope.querySelectorAll(sel))) {
+                        if (!node || seen.has(node)) continue;
+                        seen.add(node);
+                        if (!isVisibleInput(node)) continue;
+                        candidates.push(node);
+                    }
+                }
+            }
+
+            const scoreInput = (node) => {
+                const rect = node.getBoundingClientRect();
+                const bottom = Number.isFinite(rect.bottom) ? rect.bottom : 0;
+                const testId = String(node.getAttribute?.('data-testid') || '');
+                const aria = String(node.getAttribute?.('aria-label') || '');
+                const isTextArea = node.tagName === 'TEXTAREA';
+                const role = String(node.getAttribute?.('role') || '');
+                const isEditable = Boolean(node.isContentEditable || node.getAttribute?.('contenteditable') === 'true');
+
+                let score = bottom;
+                if (testId.toLowerCase() === 'chat-input') score += 250000;
+                if (isEditable) score += 100000;
+                if (role.toLowerCase() === 'textbox') score += 65000;
+                if (isTextArea) score += 40000;
+                if (testId.toLowerCase() === 'chat-input-ssr') score -= 150000;
+                if (/claude/i.test(aria)) score += 8000;
+                if (/invite|prompt|message/i.test(aria)) score += 4000;
+                return score;
+            };
+
+            let input = null;
+            let bestScore = -Infinity;
+            for (const candidate of candidates) {
+                const score = scoreInput(candidate);
+                if (score > bestScore) {
+                    bestScore = score;
+                    input = candidate;
+                }
+            }
+
+            if (!input) return { ok: false, error: 'input_not_found', hasSendButton: Boolean(sendBtn) };
+
+            window.__mlcClaudeComposerRoot = root || null;
+            window.__mlcClaudeInputEl = input || null;
+            window.__mlcClaudeSendBtn = sendBtn || null;
+
+            input.focus();
+            if (input.tagName === 'TEXTAREA' && typeof input.select === 'function') {
+                input.select();
+            } else {
+                try {
+                    const range = document.createRange();
+                    range.selectNodeContents(input);
+                    const sel = window.getSelection();
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                } catch (error) {
+                    // ignore selection failures
+                }
+            }
+
+            const resolveClickTarget = (el) => {
+                let current = el;
+                for (let i = 0; i < 6 && current; i += 1) {
+                    const rect = current.getBoundingClientRect();
+                    if (rect && rect.width > 8 && rect.height > 8) return current;
+                    current = current.parentElement;
+                }
+                return el;
+            };
+
+            const clickTarget = resolveClickTarget(input);
+            const inputRect = clickTarget.getBoundingClientRect();
+            const sendRect = sendBtn ? sendBtn.getBoundingClientRect() : null;
+
+            return {
+                ok: true,
+                inputTag: input.tagName.toLowerCase(),
+                inputTestId: input.getAttribute('data-testid') || null,
+                inputRole: input.getAttribute('role') || null,
+                inputContentEditable: input.isContentEditable || input.contentEditable === 'true',
+                inputX: inputRect.left + inputRect.width / 2,
+                inputY: inputRect.top + inputRect.height / 2,
+                hasSendButton: Boolean(sendBtn),
+                sendLabel: sendBtn?.getAttribute?.('aria-label') || null,
+                sendX: sendRect ? (sendRect.left + sendRect.width / 2) : null,
+                sendY: sendRect ? (sendRect.top + sendRect.height / 2) : null,
+                rootTag: root?.tagName?.toLowerCase?.() || null
+            };
+        })()`;
+
+        const evalFocus = async () => {
+            const focusResult = await debuggerSendCommand(debuggee, 'Runtime.evaluate', {
+                expression: focusExpr,
+                returnByValue: true,
+            });
+            return focusResult?.result?.value || null;
+        };
+
+        const toFocusMeta = (value) => ({
+            inputTag: value?.inputTag || null,
+            inputTestId: value?.inputTestId || null,
+            inputRole: value?.inputRole || null,
+            inputContentEditable: Boolean(value?.inputContentEditable),
+            sendLabel: value?.sendLabel || null,
+            rootTag: value?.rootTag || null,
+        });
+
+        let focusValue = await evalFocus();
+        if (!focusValue?.ok) {
+            const details = focusValue ? ` details=${JSON.stringify(focusValue)}` : '';
+            throw new Error(
+                `Claude focus failed: ${focusValue?.error || 'unknown_error'}.${details}`
+            );
+        }
+        let focusMeta = toFocusMeta(focusValue);
+        if (focusMeta.inputTestId === 'chat-input-ssr') {
+            console.warn(
+                '[MLC Background] Claude focus selected SSR textarea (chat-input-ssr); composer may not be fully hydrated yet.'
+            );
+        }
+
+        const clickAt = async (x, y) => {
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+            await debuggerSendCommand(debuggee, 'Input.dispatchMouseEvent', {
+                type: 'mouseMoved',
+                x,
+                y,
+                button: 'none',
+            });
+            await debuggerSendCommand(debuggee, 'Input.dispatchMouseEvent', {
+                type: 'mousePressed',
+                x,
+                y,
+                button: 'left',
+                clickCount: 1,
+            });
+            await debuggerSendCommand(debuggee, 'Input.dispatchMouseEvent', {
+                type: 'mouseReleased',
+                x,
+                y,
+                button: 'left',
+                clickCount: 1,
+            });
+        };
+
+        // Ensure the target input is really focused.
+        const inputX = Number(focusValue?.inputX);
+        const inputY = Number(focusValue?.inputY);
+        if (Number.isFinite(inputX) && Number.isFinite(inputY)) {
+            await clickAt(inputX, inputY);
+            await sleep(80);
+        }
+
+        const refreshComposerRefs = async (reason) => {
+            try {
+                const refreshed = await evalFocus();
+                if (!refreshed?.ok) {
+                    console.warn(
+                        '[MLC Background] Claude composer refresh failed:',
+                        reason,
+                        refreshed || null
+                    );
+                    return false;
+                }
+                focusValue = refreshed;
+                focusMeta = toFocusMeta(refreshed);
+                if (focusMeta.inputTestId === 'chat-input-ssr') {
+                    console.warn(
+                        '[MLC Background] Claude refresh selected SSR textarea (chat-input-ssr); waiting for hydrated editor.',
+                        { reason }
+                    );
+                }
+                const nextX = Number(refreshed?.inputX);
+                const nextY = Number(refreshed?.inputY);
+                if (Number.isFinite(nextX) && Number.isFinite(nextY)) {
+                    await clickAt(nextX, nextY);
+                    await sleep(80);
+                }
+                return true;
+            } catch (error) {
+                console.warn('[MLC Background] Claude composer refresh threw:', reason, error);
+                return false;
+            }
+        };
+
+        const dispatchSelectAll = async (modifier) => {
+            await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
+                type: 'rawKeyDown',
+                key: 'a',
+                code: 'KeyA',
+                modifiers: modifier,
+                windowsVirtualKeyCode: 65,
+                nativeVirtualKeyCode: 65,
+            });
+            await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
+                type: 'keyUp',
+                key: 'a',
+                code: 'KeyA',
+                modifiers: modifier,
+                windowsVirtualKeyCode: 65,
+                nativeVirtualKeyCode: 65,
+            });
+        };
+
+        const dispatchBackspace = async () => {
+            await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
+                type: 'rawKeyDown',
+                key: 'Backspace',
+                code: 'Backspace',
+                windowsVirtualKeyCode: 8,
+                nativeVirtualKeyCode: 8,
+            });
+            await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
+                type: 'keyUp',
+                key: 'Backspace',
+                code: 'Backspace',
+                windowsVirtualKeyCode: 8,
+                nativeVirtualKeyCode: 8,
+            });
+        };
+
+        // Clear any existing text (Cmd/Ctrl + A, Backspace).
+        await dispatchSelectAll(4); // Meta (Cmd)
+        await dispatchBackspace();
+        await dispatchSelectAll(2); // Ctrl (fallback)
+        await dispatchBackspace();
+
+        const stateExpr = `(() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = el.getBoundingClientRect();
+                if (!(rect.width > 8 && rect.height > 8)) return false;
+                if (rect.bottom < 0 || rect.right < 0) return false;
+                if (rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+                return true;
+            };
+            const input = window.__mlcClaudeInputEl;
+            const btn = window.__mlcClaudeSendBtn;
+            const getText = (el) => {
+                if (!el) return '';
+                const tag = (el.tagName || '').toUpperCase();
+                if (tag === 'TEXTAREA' || tag === 'INPUT') return String(el.value || '');
+                if (el.isContentEditable || String(el.getAttribute?.('contenteditable') || '').toLowerCase() === 'true') {
+                    return String(el.innerText || el.textContent || '');
+                }
+                return String(el.innerText || el.textContent || '');
+            };
+            const inputText = getText(input);
+            const inputTrim = inputText.trim();
+            const inputLen = inputTrim.length;
+            const btnVisible = Boolean(btn && isVisible(btn));
+            const btnStyle = btn ? window.getComputedStyle(btn) : null;
+            const pointerEvents = btnStyle ? btnStyle.pointerEvents : null;
+            const ariaDisabled = String(btn?.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
+            const disabledAttr = btn?.getAttribute('disabled') !== null;
+            const domDisabled = Boolean(btn?.disabled);
+            const disabled = !btnVisible
+                || domDisabled || disabledAttr
+                || ariaDisabled
+                || pointerEvents === 'none';
+            const rect = btnVisible ? btn.getBoundingClientRect() : null;
+            const sendX = rect ? rect.left + rect.width / 2 : null;
+            const sendY = rect ? rect.top + rect.height / 2 : null;
+            let sendHit = null;
+            try {
+                if (Number.isFinite(sendX) && Number.isFinite(sendY)) {
+                    sendHit = document.elementFromPoint(sendX, sendY);
+                }
+            } catch (error) {
+                sendHit = null;
+            }
+            return {
+                ok: Boolean(input) && Boolean(btn),
+                documentHasFocus: Boolean(document.hasFocus && document.hasFocus()),
+                visibilityState: document.visibilityState || null,
+                activeElementTag: document.activeElement?.tagName?.toLowerCase?.() || null,
+                activeElementTestId: document.activeElement?.getAttribute?.('data-testid') || null,
+                activeElementRole: document.activeElement?.getAttribute?.('role') || null,
+                inputConnected: Boolean(input?.isConnected),
+                sendConnected: Boolean(btn?.isConnected),
+                inputTag: input?.tagName?.toLowerCase?.() || null,
+                inputContentEditable: Boolean(input?.isContentEditable || String(input?.getAttribute?.('contenteditable') || '').toLowerCase() === 'true'),
+                inputLen,
+                inputPreview: inputTrim.slice(0, 160),
+                sendDisabled: disabled,
+                sendVisible: btnVisible,
+                sendPointerEvents: pointerEvents,
+                sendAriaDisabled: ariaDisabled,
+                sendDisabledAttr: disabledAttr,
+                sendDomDisabled: domDisabled,
+                sendLabel: btn?.getAttribute?.('aria-label') || '',
+                sendX,
+                sendY,
+                sendHitTag: sendHit?.tagName?.toLowerCase?.() || null,
+                sendHitLabel: sendHit?.getAttribute?.('aria-label') || null,
+                sendHitTestId: sendHit?.getAttribute?.('data-testid') || null
+            };
+        })()`;
+
+        const evalState = async () => {
+            const result = await debuggerSendCommand(debuggee, 'Runtime.evaluate', {
+                expression: stateExpr,
+                returnByValue: true,
+            });
+            return result?.result?.value || null;
+        };
+
+        const text = String(promptText || '');
+        await debuggerSendCommand(debuggee, 'Input.insertText', { text });
+        // Nudge: generate a real text input via key events (some apps ignore insertText-only changes).
+        await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', { type: 'char', text: ' ' });
+        await dispatchBackspace();
+        await sleep(120);
+
+        let state = await evalState();
+        if (!state?.ok) {
+            await refreshComposerRefs('state_missing_after_typing');
+            state = await evalState();
+        }
+        if (!state?.ok) {
+            throw new Error(
+                `Claude composer state unavailable after typing (input/send references lost). focus=${JSON.stringify(focusMeta)}`
+            );
+        }
+        if (!state.inputLen) {
+            throw new Error(
+                `Claude input stayed empty after typing (input did not receive programmatic text). focus=${JSON.stringify(focusMeta)}`
+            );
+        }
+
+        // Wait for Send to become enabled/clickable, but do not hard-fail here:
+        // fallback send paths (Enter/DOM click) can still succeed on Claude UI transitions.
+        const isSendReady = (value) =>
+            Boolean(
+                value?.ok &&
+                value.sendDisabled === false &&
+                Number.isFinite(value.sendX) &&
+                Number.isFinite(value.sendY)
+            );
+        let sendReady = isSendReady(state);
+        const startedAt = Date.now();
+        let lastRefreshAt = 0;
+        while (!sendReady && Date.now() - startedAt < readyTimeoutMs) {
+            state = await evalState();
+            sendReady = isSendReady(state);
+            if (sendReady) break;
+
+            const shouldRefreshRefs =
+                !state?.ok ||
+                state.inputConnected === false ||
+                state.sendConnected === false ||
+                !Number.isFinite(state?.sendX) ||
+                !Number.isFinite(state?.sendY);
+            if (shouldRefreshRefs && Date.now() - lastRefreshAt >= 900) {
+                await refreshComposerRefs('ready_wait_reacquire');
+                state = await evalState();
+                sendReady = isSendReady(state);
+                lastRefreshAt = Date.now();
+                if (sendReady) break;
+            }
+            await sleep(150);
+        }
+
+        if (!state?.ok) {
+            await refreshComposerRefs('ready_wait_failed');
+            state = await evalState();
+        }
+        if (!state?.ok) {
+            throw new Error('Claude send readiness check failed (composer missing).');
+        }
+        if (!sendReady) {
+            console.warn(
+                '[MLC Background] Claude send still not ready after wait; trying fallback send paths.',
+                {
+                    inputLen: state.inputLen,
+                    pointerEvents: state.sendPointerEvents || 'unknown',
+                    ariaDisabled: state.sendAriaDisabled,
+                    domDisabled: state.sendDomDisabled,
+                    disabledAttr: state.sendDisabledAttr,
+                    visible: state.sendVisible,
+                    waitMs: readyTimeoutMs,
+                    focus: focusMeta,
+                }
+            );
+        }
+
+        const ackExpr = `(() => {
+            const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = el.getBoundingClientRect();
+                if (!(rect.width > 4 && rect.height > 4)) return false;
+                if (rect.bottom < 0 || rect.right < 0) return false;
+                if (rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+                return true;
+            };
+
+            const composerRoot = window.__mlcClaudeComposerRoot || null;
+            const input = window.__mlcClaudeInputEl || null;
+            const getText = (el) => {
+                if (!el) return '';
+                const tag = (el.tagName || '').toUpperCase();
+                if (tag === 'TEXTAREA' || tag === 'INPUT') return String(el.value || '');
+                if (el.isContentEditable || String(el.getAttribute?.('contenteditable') || '').toLowerCase() === 'true') {
+                    return String(el.innerText || el.textContent || '');
+                }
+                return String(el.innerText || el.textContent || '');
+            };
+
+            const inputText = getText(input);
+            const inputTrim = inputText.trim();
+
+            const stopSelectors = [
+                'button[aria-label*="stop" i]',
+                'button[aria-label*="cancel" i]',
+                'button[aria-label*="annuler" i]',
+                'button[aria-label*="arrêter" i]',
+                'button[title*="stop" i]',
+                'button[title*="cancel" i]',
+                'button[data-testid*="stop" i]'
+            ];
+            const stopButton = document.querySelector(stopSelectors.join(','));
+
+            const spinnerSelectors = [
+                '[role="progressbar"]',
+                '.animate-spin',
+                '.spinner',
+                '.loading'
+            ];
+            const spinner = document.querySelector(spinnerSelectors.join(','));
+
+            const hasStop = Boolean(stopButton && isVisible(stopButton));
+            const hasSpinner = Boolean(spinner && isVisible(spinner));
+            const generating = hasStop || hasSpinner;
+
+            const main = document.querySelector('main') || document.querySelector('[role="main"]') || document.body;
+            const candidates = [];
+            const addCandidates = (sel, limit) => {
+                let nodes = [];
+                try {
+                    nodes = Array.from(main.querySelectorAll(sel));
+                } catch (error) {
+                    nodes = [];
+                }
+                if (nodes.length > limit) {
+                    nodes = nodes.slice(nodes.length - limit);
+                }
+                for (const node of nodes) {
+                    if (!node) continue;
+                    if (composerRoot && (node === composerRoot || composerRoot.contains(node) || node.contains(composerRoot))) continue;
+                    if (!isVisible(node)) continue;
+                    candidates.push(node);
+                }
+            };
+            addCandidates('article', 60);
+            addCandidates('[role="article"]', 60);
+            addCandidates('[data-testid*="message" i]', 80);
+            addCandidates('[data-testid*="chat" i]', 80);
+            addCandidates('.markdown', 80);
+            addCandidates('.prose', 80);
+            addCandidates('[class*="message" i]', 120);
+            addCandidates('[class*="assistant" i]', 120);
+
+            let bestNode = null;
+            let bestBottom = -Infinity;
+            for (const node of candidates) {
+                let rect;
+                try {
+                    rect = node.getBoundingClientRect();
+                } catch (error) {
+                    rect = null;
+                }
+                const bottom = rect && Number.isFinite(rect.bottom) ? rect.bottom : 0;
+                if (bottom >= bestBottom) {
+                    bestBottom = bottom;
+                    bestNode = node;
+                }
+            }
+
+            const bottomText = bestNode ? getText(bestNode).trim() : '';
+            return {
+                href: String(location.href || ''),
+                inputLen: inputTrim.length,
+                inputPreview: inputTrim.slice(0, 120),
+                generating,
+                hasStop,
+                hasSpinner,
+                bottomLen: bottomText.length,
+                bottomPreview: bottomText.slice(0, 200)
+            };
+        })()`;
+
+        const evalAck = async () => {
+            const result = await debuggerSendCommand(debuggee, 'Runtime.evaluate', {
+                expression: ackExpr,
+                returnByValue: true,
+            });
+            return result?.result?.value || null;
+        };
+
+        const normalize = (value) =>
+            String(value || '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .toLowerCase();
+        const probe = normalize(text).slice(0, 80);
+
+        const beforeSend = await evalAck();
+        const tryPointerSend = async (reason) => {
+            state = await evalState();
+            if (!state?.ok || !Number.isFinite(state.sendX) || !Number.isFinite(state.sendY)) {
+                await refreshComposerRefs(`pointer_send_${reason}`);
+                state = await evalState();
+            }
+            if (!state?.ok) return false;
+            if (state.sendDisabled === true) {
+                return false;
+            }
+            if (!Number.isFinite(state.sendX) || !Number.isFinite(state.sendY)) {
+                return false;
+            }
+            await clickAt(Number(state.sendX), Number(state.sendY));
+            return true;
+        };
+
+        await tryPointerSend('initial');
+
+        const pressEnter = async () => {
+            await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
+                type: 'rawKeyDown',
+                key: 'Enter',
+                code: 'Enter',
+                windowsVirtualKeyCode: 13,
+                nativeVirtualKeyCode: 13,
+            });
+            await debuggerSendCommand(debuggee, 'Input.dispatchKeyEvent', {
+                type: 'keyUp',
+                key: 'Enter',
+                code: 'Enter',
+                windowsVirtualKeyCode: 13,
+                nativeVirtualKeyCode: 13,
+            });
+        };
+
+        const detectAckReason = (current) => {
+            if (!current) return null;
+
+            if (beforeSend?.href && current.href && current.href !== beforeSend.href) {
+                return 'navigation';
+            }
+
+            if (beforeSend && beforeSend.generating === false && current.generating === true) {
+                return current.hasStop ? 'generating_stop' : 'generating_spinner';
+            }
+
+            if (beforeSend && beforeSend.inputLen > 0 && current.inputLen === 0) {
+                return 'input_cleared';
+            }
+
+            const beforeBottom = normalize(beforeSend?.bottomPreview || '');
+            const currentBottom = normalize(current.bottomPreview || '');
+            if (beforeBottom && currentBottom && currentBottom !== beforeBottom) {
+                if (probe && probe.length >= 16 && currentBottom.includes(probe.slice(0, 16))) {
+                    return 'message_appended';
+                }
+            }
+
+            return null;
+        };
+
+        const waitForAck = async (timeoutMs) => {
+            const start = Date.now();
+            while (Date.now() - start < timeoutMs) {
+                const current = await evalAck();
+                const reason = detectAckReason(current);
+                if (reason) return { ok: true, reason, current };
+                await sleep(150);
+            }
+            return { ok: false, reason: null, current: await evalAck() };
+        };
+
+        const sendingWhileChromeUnfocused = !chromeHasFocus;
+        const ackTimeoutMs = sendingWhileChromeUnfocused ? 12000 : 3500;
+
+        const domSendExpr = `(() => {
+            const out = { ok: true, clicked: false, dispatched: false, submitted: false, error: null };
+            const root = window.__mlcClaudeComposerRoot || null;
+            const resolveBtn = () => {
+                const btn = window.__mlcClaudeSendBtn || null;
+                if (btn) return btn;
+                const selectors = [
+                    'button[aria-label*="message" i]',
+                    'button[aria-label*="envoyer" i]',
+                    'button[aria-label*="send" i]'
+                ];
+                for (const sel of selectors) {
+                    const found = document.querySelector(sel);
+                    if (found) return found;
+                }
+                return null;
+            };
+
+            const btn = resolveBtn();
+            if (!btn) {
+                out.ok = false;
+                out.error = 'send_btn_not_found';
+                return out;
+            }
+
+            try {
+                btn.scrollIntoView({ block: 'center', inline: 'center' });
+            } catch (error) {
+                // ignore
+            }
+
+            try {
+                btn.click();
+                out.clicked = true;
+            } catch (error) {
+                // ignore
+            }
+
+            try {
+                btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                out.dispatched = true;
+            } catch (error) {
+                // ignore
+            }
+
+            try {
+                const form = btn.closest('form') || (root && typeof root.closest === 'function' ? root.closest('form') : null);
+                if (form && typeof form.requestSubmit === 'function') {
+                    form.requestSubmit();
+                    out.submitted = true;
+                }
+            } catch (error) {
+                // ignore
+            }
+
+            return out;
+        })()`;
+
+        const tryDomSend = async () => {
+            try {
+                const res = await debuggerSendCommand(debuggee, 'Runtime.evaluate', {
+                    expression: domSendExpr,
+                    returnByValue: true,
+                });
+                return res?.result?.value || null;
+            } catch (error) {
+                return { ok: false, error: String(error?.message || error || 'dom_send_failed') };
+            }
+        };
+
+        let ack = await waitForAck(ackTimeoutMs);
+        if (!ack.ok) {
+            await pressEnter();
+            ack = await waitForAck(ackTimeoutMs);
+        }
+
+        if (!ack.ok) {
+            await tryPointerSend('retry');
+            ack = await waitForAck(ackTimeoutMs);
+        }
+
+        if (!ack.ok) {
+            // When Chrome is not focused (user in another app), CDP mouse events can be flaky.
+            // Fall back to triggering the send action via DOM APIs, then re-check for ack.
+            await refreshComposerRefs('before_dom_send');
+            await tryDomSend();
+            ack = await waitForAck(ackTimeoutMs);
+        }
+
+        if (ack.ok) {
+            return { ok: true, meta: { ...focusMeta, ack: ack.reason } };
+        }
+
+        try {
+            await refreshChromeFocusState();
+        } catch (error) {
+            // ignore
+        }
+        const finalState = await evalState();
+        const finalAck = ack.current;
+        const sendErr = new Error(
+            `Claude send could not be confirmed. ` +
+                `chromeHasFocus=${chromeHasFocus} ` +
+                `docHasFocus=${finalState?.documentHasFocus ?? 'unknown'} ` +
+                `visibility=${finalState?.visibilityState ?? 'unknown'} ` +
+                `activeEl=${finalState?.activeElementTag ?? 'unknown'} ` +
+                `sendHit=${finalState?.sendHitTag ?? 'unknown'} ` +
+                `inputLen=${finalState?.inputLen ?? 'unknown'} ` +
+                `sendDisabled=${finalState?.sendDisabled ?? 'unknown'} ` +
+                `sendVisible=${finalState?.sendVisible ?? 'unknown'} ` +
+                `ariaDisabled=${finalState?.sendAriaDisabled ?? 'unknown'} ` +
+                `domDisabled=${finalState?.sendDomDisabled ?? 'unknown'} ` +
+                `disabledAttr=${finalState?.sendDisabledAttr ?? 'unknown'} ` +
+                `pointerEvents=${finalState?.sendPointerEvents ?? 'unknown'} ` +
+                `ackBottomLen=${finalAck?.bottomLen ?? 'unknown'} ` +
+                `ackGenerating=${finalAck?.generating ?? 'unknown'} ` +
+                `focus=${JSON.stringify(focusMeta)}`
+        );
+        sendErr.code = chromeHasFocus
+            ? 'CLAUDE_SEND_UNCONFIRMED'
+            : 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED';
+        sendErr.meta = { focus: focusMeta, state: finalState, ack: finalAck };
+        throw sendErr;
+    } finally {
+        await debuggerDetach(debuggee);
+    }
+}
+
+async function injectAndExecute(tabId, llmType, prompt, context = {}) {
+    try {
+        if (llmType === 'claude') {
+            console.log(`[MLC Background] Preparing Claude send for Tab ID ${tabId}.`);
+        } else {
+            console.log(
+                `[MLC Background] Injecting simpleInteraction into Tab ID ${tabId} for ${llmType}.`
+            );
+        }
+
+        sendMessageToPopup({ type: 'LLM_PROGRESS', llm: llmType, status: 'Sending prompt...' });
+
+        if (llmType === 'claude') {
+            const promptId = context.promptId || generatePromptId();
+            try {
+                const attachments = Array.isArray(context.attachments)
+                    ? context.attachments.filter(Boolean)
+                    : [];
+
+                if (attachments.length > 0) {
+                    console.log(
+                        `[MLC Background] Preparing ${attachments.length} attachment(s) for Claude before sending...`
+                    );
+                    await injectAndPrepareAttachments(tabId, llmType, attachments);
+                    if (context.sessionId && context.agentId) {
+                        markSessionAttachmentsPrepared(
+                            { sessionId: context.sessionId },
+                            context.agentId
+                        );
+                    }
+                }
+
+                console.log('[MLC Background] Sending prompt to Claude via chrome.debugger...');
+                const result = await sendPromptViaClaudeDebugger(tabId, prompt, {
+                    readyTimeoutMs: attachments.length > 0 ? 30000 : undefined,
+                });
+                if (result?.ok) {
+                    console.log(
+                        '[MLC Background] Claude debugger send succeeded (verified input cleared).',
+                        result?.meta || null
+                    );
+                    const preview = typeof prompt === 'string' ? prompt.trim().slice(0, 800) : '';
+                    const ack = result?.meta?.ack || null;
+                    try {
+                        const payload = {
+                            type: 'MLC_PROMPT_SENT',
+                            sessionId: context.sessionId || null,
+                            promptId: promptId,
+                            agentId: context.agentId || null,
+                            llmType: llmType,
+                            turnIndex: context.turnIndex || null,
+                            timestamp: Date.now(),
+                            promptPreview: preview,
+                        };
+                        // Claude often navigates `/new` -> `/chat/...` on send; retry until the content script is ready.
+                        if (ack === 'navigation') {
+                            await new Promise((resolve) => setTimeout(resolve, 600));
+                        }
+                        const notify = await sendTabMessageWithRetry(tabId, payload, {
+                            retries: 14,
+                            delayMs: 500,
+                        });
+                        if (!notify.ok) {
+                            console.warn(
+                                '[MLC Background] Failed to notify Claude content script about prompt after retries:',
+                                notify.error
+                            );
+                        }
+                    } catch (error) {
+                        console.warn(
+                            '[MLC Background] Failed to notify Claude content script about prompt:',
+                            error
+                        );
+                    }
+                    sendMessageToPopup({
+                        type: 'LLM_PROGRESS',
+                        llm: llmType,
+                        status: 'Prompt sent.',
+                    });
+                    return promptId;
+                }
+            } catch (error) {
+                const rawMessage = String(error?.message || error || '').trim();
+                const originalCode = typeof error?.code === 'string' ? error.code : null;
+                const tips = [];
+                if (/another debugger|already attached/i.test(rawMessage)) {
+                    tips.push('Close DevTools on the Claude tab (only one debugger can attach).');
+                }
+                if (
+                    /missing.*permission|permission|not allowed|cannot access chrome\\.debugger/i.test(
+                        rawMessage
+                    )
+                ) {
+                    tips.push(
+                        'Reload the extension and re-enable it to grant the "debugger" permission.'
+                    );
+                }
+                if (/focus failed|input_not_found/i.test(rawMessage)) {
+                    tips.push(
+                        'Open an actual Claude chat (not the landing/login page) and ensure the message box is visible.'
+                    );
+                }
+                if (
+                    /input stayed empty after typing|did not receive programmatic text/i.test(
+                        rawMessage
+                    )
+                ) {
+                    tips.push(
+                        'Click inside the Claude message box once, then retry (some sessions require a real user focus).'
+                    );
+                }
+                if (/send button stayed disabled/i.test(rawMessage)) {
+                    tips.push(
+                        'Verify you can type and send manually in that Claude tab; if not, Claude is blocking input (or the composer is not ready).'
+                    );
+                }
+                if (/send could not be confirmed|CLAUDE_SEND_UNCONFIRMED/i.test(rawMessage)) {
+                    tips.push(
+                        'Keep the Claude tab visible and fully loaded, then retry; transient UI transitions can delay send confirmation.'
+                    );
+                }
+                if (/ariaDisabled=true|sendDisabled=true|pointerEvents=none/i.test(rawMessage)) {
+                    tips.push(
+                        'Claude still reports the send control as disabled; wait briefly for composer readiness and retry.'
+                    );
+                }
+                const suffix = tips.length ? ` ${tips.join(' ')}` : '';
+                const needsChromeFocus = originalCode === 'CLAUDE_SEND_UNCONFIRMED_UNFOCUSED';
+                const prefix = needsChromeFocus
+                    ? 'Failed to send to Claude while Chrome is not focused; it will retry automatically when you return to Chrome.'
+                    : 'Failed to send to Claude via debugger.';
+                const err = new Error(`${prefix}${rawMessage ? ` (${rawMessage})` : ''}${suffix}`);
+                err.code = originalCode || 'CLAUDE_DEBUGGER_FAILED';
+                err.provider = 'claude';
+                err.meta = error?.meta || null;
+                throw err;
+            }
+        }
+
+        const execOptions = {
+            target: { tabId: tabId },
+            func: simpleInteraction, // This function is defined below
+            args: [prompt, llmType, context.attachments || null],
+        };
+        if (llmType === 'claude') {
+            execOptions.world = 'MAIN';
+        }
+
+        let results;
+        try {
+            results = await chrome.scripting.executeScript(execOptions);
+        } catch (error) {
+            if (execOptions.world === 'MAIN') {
+                delete execOptions.world;
+                results = await chrome.scripting.executeScript(execOptions);
+            } else {
+                throw error;
+            }
+        }
+
+        console.log(
+            `[MLC Background] Injection results for ${llmType} (Tab ID: ${tabId}):`,
+            JSON.stringify(results, null, 2)
+        );
+
+        if (results && results[0] && results[0].result) {
+            const result = results[0].result;
+            if (result.success) {
+                console.log(
+                    `[MLC Background] simpleInteraction SUCCEEDED for ${llmType}: ${result.method}`
+                );
+                const promptId = context.promptId || generatePromptId();
+                try {
+                    const preview = typeof prompt === 'string' ? prompt.trim().slice(0, 800) : '';
+                    chrome.tabs.sendMessage(tabId, {
+                        type: 'MLC_PROMPT_SENT',
+                        sessionId: context.sessionId || null,
+                        promptId: promptId,
+                        agentId: context.agentId || null,
+                        llmType: llmType,
+                        turnIndex: context.turnIndex || null,
+                        timestamp: Date.now(),
+                        promptPreview: preview,
+                    });
+                } catch (error) {
+                    console.warn(
+                        '[MLC Background] Failed to notify content script about prompt:',
+                        error
+                    );
+                }
+                sendMessageToPopup({ type: 'LLM_PROGRESS', llm: llmType, status: 'Prompt sent.' });
+                return promptId;
+            } else {
+                console.error(
+                    `[MLC Background] simpleInteraction FAILED for ${llmType}:`,
+                    result.error
+                );
+                const err = new Error(
+                    result.error || `Unknown error in simpleInteraction for ${llmType}`
+                );
+                err.code =
+                    result.details?.stage === 'attachments'
+                        ? 'ATTACHMENTS_FAILED'
+                        : 'INTERACTION_FAILED';
+                err.provider = llmType;
+                err.details = result.details || null;
+                throw err;
+            }
+        } else {
+            const noResultError = `No result or unexpected result structure from injection for ${llmType}.`;
+            console.error(`[MLC Background] ${noResultError} Results:`, results);
+            const err = new Error(noResultError);
+            err.code = 'INJECT_NO_RESULT';
+            err.provider = llmType;
+            throw err;
+        }
+    } catch (error) {
+        console.error(
+            `[MLC Background] Error injecting script for ${llmType} into Tab ID ${tabId}:`,
+            error.message,
+            error.stack
+        );
+        const wrapped = new Error(`Failed to interact with ${llmType}: ${error.message}`);
+        wrapped.code = error?.code || 'INTERACTION_FAILED';
+        wrapped.provider = llmType;
+        wrapped.details = error?.details || null;
+        wrapped.cause = error;
+        throw wrapped;
+    }
+}
+
+async function injectAndPrepareAttachments(tabId, llmType, attachments) {
+    try {
+        console.log(
+            `[MLC Background] Prefetching attachments into Tab ID ${tabId} for ${llmType}.`
+        );
+        const execOptions = {
+            target: { tabId: tabId },
+            func: simpleInteraction,
+            args: ['', llmType, attachments || null, { mode: 'prepare_attachments' }],
+        };
+        if (llmType === 'claude') {
+            execOptions.world = 'MAIN';
+        }
+
+        let results;
+        try {
+            results = await chrome.scripting.executeScript(execOptions);
+        } catch (error) {
+            if (execOptions.world === 'MAIN') {
+                delete execOptions.world;
+                results = await chrome.scripting.executeScript(execOptions);
+            } else {
+                throw error;
+            }
+        }
+
+        if (results && results[0] && results[0].result) {
+            const result = results[0].result;
+            if (result.success) {
+                console.log(
+                    `[MLC Background] simpleInteraction prepare_attachments SUCCEEDED for ${llmType}: ${result.method}`
+                );
+                return result;
+            }
+            console.error(
+                `[MLC Background] simpleInteraction prepare_attachments FAILED for ${llmType}:`,
+                result.error
+            );
+            const err = new Error(
+                result.error || `Unknown error preparing attachments for ${llmType}`
+            );
+            err.code =
+                result.details?.stage === 'attachments'
+                    ? 'ATTACHMENTS_FAILED'
+                    : 'INTERACTION_FAILED';
+            err.provider = llmType;
+            err.details = result.details || null;
+            throw err;
+        }
+
+        const noResultError = `No result or unexpected result structure from preparation injection for ${llmType}.`;
+        console.error(`[MLC Background] ${noResultError} Results:`, results);
+        const err = new Error(noResultError);
+        err.code = 'INJECT_NO_RESULT';
+        err.provider = llmType;
+        throw err;
+    } catch (error) {
+        console.error(
+            `[MLC Background] Error preparing attachments for ${llmType} in Tab ID ${tabId}:`,
+            error.message,
+            error.stack
+        );
+        const wrapped = new Error(`Failed to prepare attachments for ${llmType}: ${error.message}`);
+        wrapped.code = error?.code || 'INTERACTION_FAILED';
+        wrapped.provider = llmType;
+        wrapped.details = error?.details || null;
+        wrapped.cause = error;
+        throw wrapped;
+    }
+}
+
+// This function is injected and executed in the context of the target LLM's page
+// ... (including onInstalled, sendMessageToPopup, onMessage, handleSendPrompt, processLLM, findLLMTab, injectAndExecute, checkConnectionStatus) ...
+
+// THIS IS THE FUNCTION THAT GETS INJECTED AND EXECUTED IN THE TARGET PAGE
+async function simpleInteraction(prompt, llmType, attachments, options = null) {
+    // Added async here for the setTimeout
+    const mode = options && typeof options === 'object' ? options.mode : null;
+    const prepareAttachmentsOnly = mode === 'prepare_attachments';
+    const promptText = typeof prompt === 'string' ? prompt : String(prompt || '');
+    const LARGE_PROMPT_THRESHOLD = 8000;
+    const isLargePrompt = promptText.length >= LARGE_PROMPT_THRESHOLD;
+    const SIMPLE_INTERACTION_BUILD = 'grok-fix-r3-2026-02-08';
+
+    console.log(
+        `[SimpleInteraction INJECTED] Attempting on ${llmType} (mode=${prepareAttachmentsOnly ? 'prepare_attachments' : 'send'}, build=${SIMPLE_INTERACTION_BUILD}, promptChars=${promptText.length}).`
+    );
+
+    try {
+        let inputElement = null;
+        let sendButton = null;
+        const attachmentPayloads = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
+
+        function base64ToUint8Array(base64) {
+            const cleaned = String(base64 || '').replace(/\s+/g, '');
+            const binary = atob(cleaned);
+            const len = binary.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i += 1) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return bytes;
+        }
+
+        function acceptAllowsFile(accept, file) {
+            const acceptValue = String(accept || '')
+                .trim()
+                .toLowerCase();
+            if (!acceptValue) return true;
+            const tokens = acceptValue
+                .split(',')
+                .map((token) => token.trim())
+                .filter(Boolean);
+            if (tokens.length === 0) return true;
+
+            const name = String(file?.name || '').toLowerCase();
+            const mime = String(file?.type || '').toLowerCase();
+
+            return tokens.some((token) => {
+                if (token === '*/*') return true;
+                if (token.endsWith('/*')) {
+                    const prefix = token.slice(0, -1);
+                    return mime.startsWith(prefix);
+                }
+                if (token.startsWith('.')) {
+                    return name.endsWith(token);
+                }
+                if (token.includes('/')) {
+                    return mime === token;
+                }
+                return false;
+            });
+        }
+
+        async function attachFilesToComposer(targetInput) {
+            if (attachmentPayloads.length === 0) return { success: true, attached: 0 };
+
+            const files = [];
+            for (const att of attachmentPayloads) {
+                const base64 = String(att?.base64 || '').trim();
+                if (!base64) continue;
+                const name =
+                    typeof att?.name === 'string' && att.name.trim()
+                        ? att.name.trim()
+                        : 'attachment';
+                const type =
+                    typeof att?.type === 'string' && att.type.trim()
+                        ? att.type.trim()
+                        : 'application/octet-stream';
+                const lastModified = Number.isFinite(att?.lastModified)
+                    ? att.lastModified
+                    : Date.now();
+                try {
+                    const bytes = base64ToUint8Array(base64);
+                    files.push(new File([bytes], name, { type, lastModified }));
+                } catch (error) {
+                    return {
+                        success: false,
+                        error: `Failed to decode ${name}: ${error?.message || error}`,
+                    };
+                }
+            }
+
+            if (files.length === 0) return { success: true, attached: 0 };
+
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const container =
+                targetInput?.closest?.('form') ||
+                targetInput?.closest?.('main') ||
+                targetInput?.parentElement ||
+                document.body;
+
+            const collectSearchRoots = (rootNode) => {
+                const roots = [];
+                const queue = [];
+                const seen = new Set();
+                if (rootNode) queue.push(rootNode);
+
+                while (queue.length > 0) {
+                    const current = queue.shift();
+                    if (!current || seen.has(current)) continue;
+                    seen.add(current);
+                    roots.push(current);
+
+                    let walker = null;
+                    try {
+                        walker = document.createTreeWalker(current, NodeFilter.SHOW_ELEMENT);
+                    } catch (error) {
+                        walker = null;
+                    }
+                    if (!walker) continue;
+
+                    let node = walker.currentNode;
+                    while (node) {
+                        if (node.shadowRoot) queue.push(node.shadowRoot);
+                        if (node.tagName === 'IFRAME') {
+                            try {
+                                if (node.contentDocument) queue.push(node.contentDocument);
+                            } catch (error) {
+                                // ignore cross-origin frames
+                            }
+                        }
+                        node = walker.nextNode();
+                    }
+                }
+
+                return roots;
+            };
+
+            const querySelectorAllDeep = (rootNode, selector) => {
+                const results = [];
+                const seenNodes = new Set();
+                const roots = collectSearchRoots(rootNode);
+                for (const root of roots) {
+                    let matches = [];
+                    try {
+                        matches = Array.from(root.querySelectorAll(selector));
+                    } catch (error) {
+                        continue;
+                    }
+                    for (const match of matches) {
+                        if (!match || seenNodes.has(match)) continue;
+                        seenNodes.add(match);
+                        results.push(match);
+                    }
+                }
+                return results;
+            };
+
+            const findFileInputs = () => {
+                let found = querySelectorAllDeep(container, 'input[type="file"]');
+                if (found.length === 0) {
+                    found = querySelectorAllDeep(document, 'input[type="file"]');
+                }
+                return found.filter((input) => input && !input.disabled);
+            };
+
+            const assignFiles = async (input, nextFiles) => {
+                const dataTransfer = new DataTransfer();
+                nextFiles.forEach((file) => dataTransfer.items.add(file));
+                try {
+                    input.files = dataTransfer.files;
+                } catch (error) {
+                    return {
+                        success: false,
+                        error: `Failed to set input.files: ${error?.message || error}`,
+                    };
+                }
+                input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                await sleep(120);
+                return { success: true };
+            };
+
+            const attachViaInputs = async (candidateInputs) => {
+                const inputs = Array.isArray(candidateInputs)
+                    ? candidateInputs.filter(Boolean)
+                    : [];
+                if (inputs.length === 0) {
+                    return { success: false, error: 'No usable file inputs found.' };
+                }
+
+                const groups = new Map();
+                for (const file of files) {
+                    const candidates = inputs.filter((input) =>
+                        acceptAllowsFile(input.getAttribute('accept'), file)
+                    );
+                    const chosen = candidates[0] || inputs[0];
+                    if (!groups.has(chosen)) groups.set(chosen, []);
+                    groups.get(chosen).push(file);
+                }
+
+                let attached = 0;
+                for (const [input, groupFiles] of groups.entries()) {
+                    if (!input.multiple && groupFiles.length > 1) {
+                        for (const single of groupFiles) {
+                            const result = await assignFiles(input, [single]);
+                            if (!result.success) return result;
+                            attached += 1;
+                        }
+                    } else {
+                        const result = await assignFiles(input, groupFiles);
+                        if (!result.success) return result;
+                        attached += groupFiles.length;
+                    }
+                }
+
+                return { success: true, attached, method: 'file_input' };
+            };
+
+            const dispatchDragEvent = (eventType, target, dataTransfer) => {
+                if (!target || !(target instanceof Element)) return false;
+                let event;
+                try {
+                    event = new DragEvent(eventType, { bubbles: true, cancelable: true });
+                } catch (error) {
+                    event = new Event(eventType, { bubbles: true, cancelable: true });
+                }
+                try {
+                    Object.defineProperty(event, 'dataTransfer', { value: dataTransfer });
+                } catch (error) {
+                    // ignore defineProperty failures
+                }
+                return target.dispatchEvent(event);
+            };
+
+            const attachViaDrop = async () => {
+                if (!('DataTransfer' in window)) {
+                    return {
+                        success: false,
+                        error: 'DataTransfer is unavailable (cannot use drag/drop fallback).',
+                    };
+                }
+
+                const dataTransfer = new DataTransfer();
+                files.forEach((file) => dataTransfer.items.add(file));
+
+                const rootEl = container instanceof Element ? container : document.body;
+                const targets = [targetInput, rootEl, document.body].filter(Boolean);
+                const uniqueTargets = [];
+                targets.forEach((el) => {
+                    if (el instanceof Element && !uniqueTargets.includes(el))
+                        uniqueTargets.push(el);
+                });
+
+                for (const target of uniqueTargets) {
+                    dispatchDragEvent('dragenter', target, dataTransfer);
+                    dispatchDragEvent('dragover', target, dataTransfer);
+                    dispatchDragEvent('drop', target, dataTransfer);
+                }
+
+                const fileNames = files
+                    .map((file) => String(file?.name || '').trim())
+                    .filter(Boolean);
+                const textRoots = (() => {
+                    const roots = [];
+                    const preferred =
+                        targetInput?.closest?.('form') || targetInput?.parentElement || null;
+                    [preferred, rootEl, document.body].forEach((node) => {
+                        if (!(node instanceof Element)) return;
+                        if (!roots.includes(node)) roots.push(node);
+                    });
+                    return roots;
+                })();
+                const startedAt = Date.now();
+                const timeoutMs = 8000;
+                while (Date.now() - startedAt < timeoutMs) {
+                    const inputsNow = findFileInputs();
+                    if (inputsNow.some((input) => input?.files && input.files.length > 0)) {
+                        return {
+                            success: true,
+                            attached: files.length,
+                            method: 'drop',
+                            confirmed: true,
+                        };
+                    }
+                    if (fileNames.length > 0) {
+                        for (const root of textRoots) {
+                            const text = (root?.innerText || root?.textContent || '').trim();
+                            if (text && fileNames.some((name) => text.includes(name))) {
+                                return {
+                                    success: true,
+                                    attached: files.length,
+                                    method: 'drop',
+                                    confirmed: true,
+                                };
+                            }
+                        }
+                    }
+                    await sleep(200);
+                }
+
+                return {
+                    success: false,
+                    error: 'Drag/drop fallback did not confirm that files were attached.',
+                };
+            };
+
+            let inputs = findFileInputs();
+            if (inputs.length > 0) {
+                const inputResult = await attachViaInputs(inputs);
+                if (inputResult.success) return inputResult;
+                console.warn(
+                    '[SimpleInteraction INJECTED] File-input attach failed; trying drag/drop fallback.',
+                    inputResult.error
+                );
+            }
+
+            const dropResult = await attachViaDrop();
+            if (!dropResult.success) {
+                if (inputs.length === 0) {
+                    return {
+                        success: false,
+                        error: `No file input found on the page (including open shadow roots), and drag/drop fallback failed: ${dropResult.error || 'unknown error'}`,
+                    };
+                }
+                return dropResult;
+            }
+
+            // Drop may have caused a hidden file input to appear. Prefer setting it explicitly if possible.
+            inputs = findFileInputs();
+            if (inputs.some((input) => input?.files && input.files.length > 0)) {
+                return { success: true, attached: files.length, method: 'drop' };
+            }
+            if (inputs.length > 0) {
+                const retry = await attachViaInputs(inputs);
+                if (retry.success) return retry;
+                return retry;
+            }
+
+            return { success: true, attached: files.length, method: 'drop' };
+        }
+
+        const inputSelectors = {
+            chatgpt: [
+                '#prompt-textarea',
+                'textarea[data-testid="prompt-textarea"]',
+                'textarea[placeholder*="Message"]',
+                'textarea[data-id="root"]',
+                'textarea',
+            ],
+            gemini: [
+                // Gemini primarily uses a contenteditable div
+                'div.ql-editor[role="textbox"]', // Specific Gemini input
+                '.ql-editor.textarea', // Another common pattern
+                'div[contenteditable="true"][aria-label*="prompt"]',
+                'textarea[placeholder*="Enter a prompt"]', // Fallback if textarea is ever used
+                'textarea[placeholder*="Ask"]',
+                '[contenteditable="true"]', // General fallback
+            ],
+            claude: [
+                'textarea[data-testid="chat-input-ssr"]',
+                'textarea[placeholder*="Message" i]',
+                'textarea[aria-label*="Message" i]',
+                'textarea[placeholder*="Send" i]',
+                'textarea',
+                '.ProseMirror[contenteditable="true"]',
+                'div[contenteditable="true"][role="textbox"]',
+                'div[contenteditable="true"]',
+                '[contenteditable="true"]',
+            ],
+            grok: [
+                // Grok UI may use textarea or a contentEditable editor; prefer explicit roles/aria when present.
+                'textarea[aria-label*="message" i]',
+                'textarea[placeholder*="message" i]',
+                'textarea[placeholder*="ask" i]',
+                'textarea[placeholder*="chat" i]',
+                'textarea',
+                'div[contenteditable="true"][role="textbox"]',
+                '[contenteditable="true"][role="textbox"]',
+                '[contenteditable="true"]',
+                '[role="textbox"]',
+            ],
+        };
+
+        const currentInputSelectors = inputSelectors[llmType];
+        if (!currentInputSelectors) {
+            const errMsg = `[SimpleInteraction INJECTED] Unknown llmType for input selectors: ${llmType}`;
+            console.error(errMsg);
+            return { success: false, error: errMsg, details: { stage: 'find_input_selectors' } };
+        }
+
+        const pickBestVisibleElement = (selector) => {
+            let nodes = [];
+            try {
+                nodes = Array.from(document.querySelectorAll(selector));
+            } catch (error) {
+                nodes = [];
+            }
+            if (nodes.length === 0) return null;
+
+            let best = null;
+            let bestBottom = -Infinity;
+            for (const node of nodes) {
+                if (!(node instanceof HTMLElement)) continue;
+                const style = window.getComputedStyle(node);
+                if (!style || style.display === 'none' || style.visibility === 'hidden') continue;
+                const rect = node.getBoundingClientRect();
+                if (!rect || rect.width < 4 || rect.height < 4) continue;
+                if (rect.bottom < 0 || rect.right < 0) continue;
+                if (rect.top > window.innerHeight + 200) continue;
+                const bottom = Number.isFinite(rect.bottom) ? rect.bottom : 0;
+                if (bottom >= bestBottom) {
+                    bestBottom = bottom;
+                    best = node;
+                }
+            }
+            return best;
+        };
+
+        for (const selector of currentInputSelectors) {
+            inputElement = pickBestVisibleElement(selector);
+            if (inputElement) {
+                console.log(
+                    `[SimpleInteraction INJECTED] Found input for ${llmType} with: ${selector}`,
+                    inputElement
+                );
+                break;
+            }
+        }
+
+        if (!inputElement) {
+            const errMsg = `[SimpleInteraction INJECTED] No input element found for ${llmType} after trying all selectors.`;
+            console.error(errMsg);
+            return { success: false, error: errMsg, details: { stage: 'find_input_element' } };
+        }
+        console.log(
+            `[SimpleInteraction INJECTED] Successfully found input for ${llmType}:`,
+            inputElement
+        );
+        inputElement.focus(); // Focus the element first
+
+        if (attachmentPayloads.length > 0) {
+            console.log(
+                `[SimpleInteraction INJECTED] Attaching ${attachmentPayloads.length} file(s) for ${llmType}...`
+            );
+            const attachResult = await attachFilesToComposer(inputElement);
+            if (!attachResult.success) {
+                const errMsg = `[SimpleInteraction INJECTED] Attachment upload failed for ${llmType}: ${attachResult.error || 'unknown error'}`;
+                console.error(errMsg);
+                return { success: false, error: errMsg, details: { stage: 'attachments' } };
+            }
+            console.log(
+                `[SimpleInteraction INJECTED] Attached ${attachResult.attached} file(s) for ${llmType}.`
+            );
+        }
+
+        // --- Setting the prompt ---
+        if (prepareAttachmentsOnly) {
+            return { success: true, method: 'prepare_attachments' };
+        }
+
+        const dispatchInputEvents = (el, value) => {
+            if (!el) return;
+            const baseEventInit = { bubbles: true, composed: true };
+            try {
+                const data = typeof value === 'string' ? value.slice(-1) : '';
+                el.dispatchEvent(
+                    new InputEvent('input', { ...baseEventInit, inputType: 'insertText', data })
+                );
+            } catch (error) {
+                el.dispatchEvent(new Event('input', baseEventInit));
+            }
+            el.dispatchEvent(new Event('change', baseEventInit));
+        };
+
+        const setNativeValue = (el, value) => {
+            if (!el) return;
+            const stringValue = typeof value === 'string' ? value : String(value || '');
+            const proto =
+                el instanceof HTMLTextAreaElement
+                    ? window.HTMLTextAreaElement.prototype
+                    : el instanceof HTMLInputElement
+                      ? window.HTMLInputElement.prototype
+                      : null;
+            const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+            if (descriptor && typeof descriptor.set === 'function') {
+                descriptor.set.call(el, stringValue);
+            } else {
+                el.value = stringValue;
+            }
+        };
+
+        const normalizePromptForCompare = (value) =>
+            String(value || '')
+                .replace(/\s+/g, ' ')
+                .trim();
+
+        const selectContentEditable = (el, { collapseToEnd = false } = {}) => {
+            if (!el) return false;
+            try {
+                const selection = window.getSelection();
+                if (!selection) return false;
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                if (collapseToEnd) range.collapse(false);
+                selection.removeAllRanges();
+                selection.addRange(range);
+                return true;
+            } catch (error) {
+                return false;
+            }
+        };
+
+        const commitGrokEditorState = (el) => {
+            if (llmType !== 'grok') return;
+            if (!el || !(el.isContentEditable || el.contentEditable === 'true')) return;
+            const originalText = String(el.textContent || '');
+            try {
+                el.focus();
+                selectContentEditable(el, { collapseToEnd: true });
+                document.execCommand('insertText', false, ' ');
+                el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                document.execCommand('delete', false, null);
+                el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                // Ensure no accidental text drift.
+                if (String(el.textContent || '') !== originalText) {
+                    el.textContent = originalText;
+                    dispatchInputEvents(el, originalText);
+                }
+            } catch (error) {
+                // best effort
+            }
+        };
+
+        const setContentEditableValue = (el, value, { fast = false } = {}) => {
+            if (!el) return false;
+            if (fast) {
+                el.textContent = value;
+                dispatchInputEvents(el, value);
+                if (llmType === 'grok') commitGrokEditorState(el);
+                return true;
+            }
+            el.focus();
+            selectContentEditable(el);
+            const insertSuccess = document.execCommand('insertText', false, value);
+            el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            if (llmType === 'grok') {
+                try {
+                    const data = String(value || '').slice(-1);
+                    el.dispatchEvent(
+                        new InputEvent('beforeinput', {
+                            bubbles: true,
+                            composed: true,
+                            inputType: 'insertFromPaste',
+                            data,
+                        })
+                    );
+                } catch (error) {
+                    // fallback ignored
+                }
+                dispatchInputEvents(el, value);
+                commitGrokEditorState(el);
+            }
+            return insertSuccess;
+        };
+
+        const isContentEditable =
+            inputElement.isContentEditable || inputElement.contentEditable === 'true';
+        let usedFastContentEditable = false;
+
+        if (inputElement.tagName === 'TEXTAREA') {
+            console.log(
+                `[SimpleInteraction INJECTED] Setting prompt for TEXTAREA element (${llmType})`
+            );
+            setNativeValue(inputElement, promptText);
+            dispatchInputEvents(inputElement, promptText);
+            if (llmType === 'chatgpt' || llmType === 'claude') {
+                inputElement.dispatchEvent(
+                    new KeyboardEvent('keydown', {
+                        key: ' ',
+                        code: 'Space',
+                        keyCode: 32,
+                        which: 32,
+                        bubbles: true,
+                        composed: true,
+                    })
+                );
+                inputElement.dispatchEvent(
+                    new KeyboardEvent('keyup', {
+                        key: ' ',
+                        code: 'Space',
+                        keyCode: 32,
+                        which: 32,
+                        bubbles: true,
+                        composed: true,
+                    })
+                );
+                console.log(
+                    `[SimpleInteraction INJECTED] Dispatched extra key events for ${llmType} TEXTAREA.`
+                );
+            }
+        } else if ((llmType === 'gemini' && isContentEditable) || isContentEditable) {
+            // General contentEditable case
+            console.log(
+                `[SimpleInteraction INJECTED] Setting prompt for contentEditable element (${llmType})`
+            );
+            if (isLargePrompt) {
+                usedFastContentEditable = true;
+                setContentEditableValue(inputElement, promptText, { fast: true });
+            } else {
+                const insertSuccess = setContentEditableValue(inputElement, promptText, {
+                    fast: false,
+                });
+                console.log(
+                    `[SimpleInteraction INJECTED] Used document.execCommand('insertText'). Success: ${insertSuccess}.`
+                );
+            }
+        } else {
+            // Fallback for other input types (e.g. Gemini using a textarea which is rare)
+            console.log(
+                `[SimpleInteraction INJECTED] Setting prompt for standard input element (${llmType})`
+            );
+            setNativeValue(inputElement, promptText);
+            dispatchInputEvents(inputElement, promptText);
+        }
+
+        // Verification Step
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const expectedPrefix = promptText.substring(0, Math.min(promptText.length, 50));
+        let currentText = isContentEditable ? inputElement.textContent : inputElement.value;
+        const evaluatePrefixMatch = (candidateText) => {
+            if (!expectedPrefix) return true;
+            if (llmType !== 'grok') return String(candidateText || '').includes(expectedPrefix);
+            const currentNormalized = normalizePromptForCompare(candidateText);
+            const expectedNormalized = normalizePromptForCompare(expectedPrefix);
+            return Boolean(expectedNormalized && currentNormalized.includes(expectedNormalized));
+        };
+        let prefixMatches = evaluatePrefixMatch(currentText);
+        if (usedFastContentEditable && expectedPrefix && !prefixMatches) {
+            console.warn(
+                `[SimpleInteraction INJECTED] Fast contentEditable set may have failed for ${llmType}; retrying with execCommand.`
+            );
+            const retrySuccess = setContentEditableValue(inputElement, promptText, { fast: false });
+            console.log(
+                `[SimpleInteraction INJECTED] Retry with execCommand success: ${retrySuccess}.`
+            );
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            currentText = isContentEditable ? inputElement.textContent : inputElement.value;
+            prefixMatches = evaluatePrefixMatch(currentText);
+        }
+        console.log(
+            `[SimpleInteraction INJECTED] Text in input field for ${llmType} after setting: "${currentText.substring(0, 100)}..."`
+        );
+        if (expectedPrefix && !prefixMatches) {
+            console.warn(
+                `[SimpleInteraction INJECTED] WARNING: Prompt may not have been set correctly for ${llmType} (expectedLen=${promptText.length}, actualLen=${currentText.length}).`
+            );
+        }
+
+        // --- Send (wait for uploads/attachment processing) ---
+        const providerUiConfig = {
+            chatgpt: {
+                sendSelectors: [
+                    'button[data-testid="send-button"]',
+                    'button[data-testid="fruitjuice-send-button"]',
+                    'button[aria-label="Send message" i]',
+                    'button[type="submit"]',
+                ],
+                sendFallbackSelectors: ['button[aria-label*="send" i]', 'button[type="submit"]'],
+                stopSelectors: [
+                    'button[data-testid="stop-button"]',
+                    'button[data-testid="stop-generating-button"]',
+                    'button[aria-label*="stop" i]',
+                ],
+            },
+            gemini: {
+                sendSelectors: [
+                    'button[aria-label="Send message" i]',
+                    'button[data-testid="send-button"]',
+                    'button.send-button',
+                    'button.send-button-container button',
+                ],
+                sendFallbackSelectors: ['button[aria-label*="send" i]', 'button[type="submit"]'],
+                stopSelectors: ['button[aria-label*="stop" i]', 'button[data-testid*="stop" i]'],
+            },
+            grok: {
+                sendSelectors: [
+                    'button[aria-label="Send message" i]',
+                    'button[aria-label*="soumettre" i]',
+                    'button[aria-label*="submit" i]',
+                    'button[data-testid*="send" i]',
+                    'button[title*="soumettre" i]',
+                    'button[title*="submit" i]',
+                    'button[title*="send" i]',
+                    'button[type="submit"]',
+                ],
+                sendFallbackSelectors: [
+                    'button[aria-label*="soumettre" i]',
+                    'button[aria-label*="submit" i]',
+                    'button[aria-label*="send" i]',
+                    'button[type="submit"]',
+                ],
+                stopSelectors: [
+                    'button[aria-label*="stop" i]',
+                    'button[aria-label*="cancel" i]',
+                    'button[aria-label*="arrêter" i]',
+                    'button[aria-label*="annuler" i]',
+                    'button[title*="stop" i]',
+                    'button[title*="arrêter" i]',
+                    'button[title*="annuler" i]',
+                    'button[data-testid*="stop" i]',
+                ],
+                voiceSelectors: [
+                    'button[aria-label*="passer en mode vocal" i]',
+                    'button[aria-label*="mode vocal" i]',
+                    'button[aria-label*="voice mode" i]',
+                    'button[title*="mode vocal" i]',
+                    'button[title*="voice mode" i]',
+                ],
+            },
+            generic: {
+                sendSelectors: ['button[type="submit"]', 'button[aria-label*="send" i]'],
+                sendFallbackSelectors: ['button[aria-label*="send" i]', 'button[type="submit"]'],
+                stopSelectors: ['button[aria-label*="stop" i]', 'button[data-testid*="stop" i]'],
+                voiceSelectors: [],
+            },
+        };
+
+        const ui = providerUiConfig[llmType] || providerUiConfig.generic;
+
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        const resolveInputElement = () => {
+            if (inputElement && inputElement.isConnected) return inputElement;
+            const selectors = Array.isArray(currentInputSelectors) ? currentInputSelectors : [];
+            for (const selector of selectors) {
+                const candidate = document.querySelector(selector);
+                if (candidate) {
+                    inputElement = candidate;
+                    break;
+                }
+            }
+            return inputElement;
+        };
+
+        const getInputText = () => {
+            const el = resolveInputElement();
+            if (!el) return '';
+            if (el.isContentEditable || el.contentEditable === 'true') return el.textContent || '';
+            return el.value || '';
+        };
+
+        const isVisible = (el) => {
+            if (!el || !(el instanceof Element) || !el.isConnected) return false;
+            const style = window.getComputedStyle(el);
+            if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+            if (style.opacity === '0') return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 2 && rect.height > 2;
+        };
+
+        const isDisabledButton = (btn) => {
+            if (!btn) return true;
+            if (btn.disabled) return true;
+            const aria = btn.getAttribute && btn.getAttribute('aria-disabled');
+            if (typeof aria === 'string' && aria.toLowerCase() === 'true') return true;
+            if (btn.getAttribute && btn.getAttribute('disabled') !== null) return true;
+            return false;
+        };
+
+        const normalizeControlLabel = (value) =>
+            String(value || '')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .toLowerCase();
+
+        const getButtonControlLabel = (button) => {
+            if (!button) return '';
+            const attrs = [
+                button.getAttribute?.('aria-label') || '',
+                button.getAttribute?.('title') || '',
+                button.textContent || '',
+                button.getAttribute?.('data-testid') || '',
+            ];
+            return normalizeControlLabel(attrs.filter(Boolean).join(' '));
+        };
+
+        const classifyGrokControlButton = (button) => {
+            if (!button) return 'unknown';
+            const label = getButtonControlLabel(button);
+            const stopPatterns = [
+                /\bstop\b/i,
+                /\bcancel\b/i,
+                /\bannuler\b/i,
+                /\barreter\b/i,
+                /\barreter la reponse du modele\b/i,
+            ];
+            if (stopPatterns.some((re) => re.test(label))) return 'stop';
+
+            const voicePatterns = [
+                /\bpasser en mode vocal\b/i,
+                /\bmode vocal\b/i,
+                /\bvoice mode\b/i,
+            ];
+            if (voicePatterns.some((re) => re.test(label))) return 'voice';
+
+            const sendPatterns = [/\bsend\b/i, /\bsubmit\b/i, /\bsoumettre\b/i, /\benvoyer\b/i];
+            const typeAttr = normalizeControlLabel(button.getAttribute?.('type') || '');
+            if (sendPatterns.some((re) => re.test(label)) || typeAttr === 'submit') return 'send';
+
+            return 'unknown';
+        };
+
+        const resolveComposerRoot = () => {
+            const inputEl = resolveInputElement();
+            const root =
+                inputEl?.closest?.('form') ||
+                inputEl?.closest?.('fieldset') ||
+                inputEl?.closest?.('[role="form"]') ||
+                inputEl?.closest?.('main') ||
+                document.body;
+            return root && root.isConnected ? root : document.body;
+        };
+
+        const findButtons = (selectors, { allowDisabled = false } = {}) => {
+            const list = Array.isArray(selectors) ? selectors : [];
+            const matched = [];
+            const seen = new Set();
+            for (const selector of list) {
+                const roots = (() => {
+                    const root = resolveComposerRoot();
+                    return root === document.body ? [document.body] : [root, document.body];
+                })();
+                for (const root of roots) {
+                    let nodes = [];
+                    try {
+                        nodes = Array.from(root.querySelectorAll(selector));
+                    } catch (error) {
+                        continue;
+                    }
+                    for (const node of nodes) {
+                        if (!(node instanceof HTMLElement)) continue;
+                        if (seen.has(node)) continue;
+                        if (!isVisible(node)) continue;
+                        if (!allowDisabled && isDisabledButton(node)) continue;
+                        seen.add(node);
+                        matched.push(node);
+                    }
+                }
+            }
+            return matched;
+        };
+
+        const findFirstButton = (selectors, { allowDisabled = false } = {}) => {
+            const matches = findButtons(selectors, { allowDisabled });
+            return matches[0] || null;
+        };
+
+        const findGrokControlButton = (targetRole, { allowDisabled = true } = {}) => {
+            if (llmType !== 'grok') return null;
+            const roots = (() => {
+                const root = resolveComposerRoot();
+                return root === document.body ? [document.body] : [root, document.body];
+            })();
+            const seen = new Set();
+            for (const root of roots) {
+                let buttons = [];
+                try {
+                    buttons = Array.from(root.querySelectorAll('button'));
+                } catch (error) {
+                    buttons = [];
+                }
+                for (const button of buttons) {
+                    if (!(button instanceof HTMLElement)) continue;
+                    if (seen.has(button)) continue;
+                    seen.add(button);
+                    if (!isVisible(button)) continue;
+                    if (!allowDisabled && isDisabledButton(button)) continue;
+                    const role = classifyGrokControlButton(button);
+                    if (role === targetRole) return button;
+                }
+            }
+            return null;
+        };
+
+        const findSendButton = ({ allowDisabled = false, includeFallback = false } = {}) => {
+            const selectors = includeFallback
+                ? [...ui.sendSelectors, ...ui.sendFallbackSelectors]
+                : ui.sendSelectors;
+            const direct = findFirstButton(selectors, { allowDisabled });
+            if (llmType !== 'grok') return direct;
+            if (direct) {
+                const role = classifyGrokControlButton(direct);
+                if (role === 'send' || role === 'unknown') return direct;
+            }
+            return findGrokControlButton('send', { allowDisabled });
+        };
+
+        const findStopButton = () => {
+            if (llmType === 'grok') return findGrokControlButton('stop', { allowDisabled: true });
+            return findFirstButton(ui.stopSelectors, { allowDisabled: true });
+        };
+
+        const findVoiceButton = () => {
+            if (llmType === 'grok') return findGrokControlButton('voice', { allowDisabled: true });
+            return findFirstButton(ui.voiceSelectors, { allowDisabled: true });
+        };
+
+        const findNearestSubmitButton = ({ allowDisabled = false } = {}) => {
+            const root = resolveComposerRoot();
+            const selectors = [
+                'button[type="submit"]',
+                'button[aria-label*="soumettre" i]',
+                'button[aria-label*="submit" i]',
+                'button[aria-label*="send" i]',
+                'button[title*="soumettre" i]',
+                'button[title*="submit" i]',
+                'button[title*="send" i]',
+            ];
+            const candidates = [];
+            const seen = new Set();
+            for (const sel of selectors) {
+                let nodes = [];
+                try {
+                    nodes = Array.from(root.querySelectorAll(sel));
+                } catch (error) {
+                    nodes = [];
+                }
+                for (const node of nodes) {
+                    if (!(node instanceof HTMLElement)) continue;
+                    if (seen.has(node)) continue;
+                    seen.add(node);
+                    if (!isVisible(node)) continue;
+                    if (!allowDisabled && isDisabledButton(node)) continue;
+                    candidates.push(node);
+                }
+            }
+            if (!candidates.length) return null;
+            let best = candidates[0];
+            let bestBottom = -Infinity;
+            for (const node of candidates) {
+                const rect = node.getBoundingClientRect();
+                const bottom = Number.isFinite(rect.bottom) ? rect.bottom : 0;
+                if (bottom >= bestBottom) {
+                    best = node;
+                    bestBottom = bottom;
+                }
+            }
+            return best;
+        };
+
+        const describeVisibleComposerButtons = () => {
+            const root = resolveComposerRoot();
+            let buttons = [];
+            try {
+                buttons = Array.from(root.querySelectorAll('button'));
+            } catch (error) {
+                buttons = [];
+            }
+            return buttons
+                .filter((btn) => btn instanceof HTMLElement && isVisible(btn))
+                .slice(0, 12)
+                .map((btn) => {
+                    const role = llmType === 'grok' ? classifyGrokControlButton(btn) : 'unknown';
+                    const rect = btn.getBoundingClientRect();
+                    return {
+                        role,
+                        disabled: isDisabledButton(btn),
+                        label: getButtonControlLabel(btn).slice(0, 80),
+                        bottom: Math.round(Number.isFinite(rect.bottom) ? rect.bottom : 0),
+                        type: String(btn.getAttribute('type') || ''),
+                    };
+                });
+        };
+
+        const submitViaComposerForm = () => {
+            const inputEl = resolveInputElement();
+            const form = inputEl?.closest?.('form');
+            if (!form || typeof form.requestSubmit !== 'function') return false;
+            try {
+                form.requestSubmit();
+                return true;
+            } catch (error) {
+                return false;
+            }
+        };
+
+        const captureSendAckBaseline = () => {
+            const draftText = getInputText().trim();
+            const sendButton = findSendButton({ allowDisabled: true, includeFallback: true });
+            const stopButton = findStopButton();
+            const voiceButton = findVoiceButton();
+            return {
+                draftLen: draftText.length,
+                sendVisible: Boolean(sendButton && isVisible(sendButton)),
+                sendEnabled: Boolean(
+                    sendButton && isVisible(sendButton) && !isDisabledButton(sendButton)
+                ),
+                stopVisible: Boolean(stopButton && isVisible(stopButton)),
+                voiceVisible: Boolean(voiceButton && isVisible(voiceButton)),
+                sendRole: sendButton ? classifyGrokControlButton(sendButton) : null,
+                sendLabel: sendButton ? getButtonControlLabel(sendButton) : '',
+            };
+        };
+
+        let lastGrokNudgeAt = 0;
+        const waitForSendReady = async ({ timeoutMs, stableMs = 350, pollMs = 200 } = {}) => {
+            const startedAt = Date.now();
+            let stableSince = 0;
+            while (Date.now() - startedAt < timeoutMs) {
+                let btn = findSendButton({ allowDisabled: false, includeFallback: false });
+                if (!btn && llmType === 'grok') {
+                    btn = findNearestSubmitButton({ allowDisabled: false });
+                }
+                if (btn) {
+                    if (!stableSince) stableSince = Date.now();
+                    if (Date.now() - stableSince >= stableMs) return btn;
+                } else {
+                    stableSince = 0;
+                    if (llmType === 'grok') {
+                        const inputValue = getInputText().trim();
+                        const now = Date.now();
+                        if (inputValue && now - lastGrokNudgeAt >= 600) {
+                            const inputEl = resolveInputElement();
+                            commitGrokEditorState(inputEl);
+                            lastGrokNudgeAt = now;
+                        }
+                    }
+                }
+                await sleep(pollMs);
+            }
+            const disabledCandidate =
+                findSendButton({ allowDisabled: true, includeFallback: true }) ||
+                (llmType === 'grok' ? findNearestSubmitButton({ allowDisabled: true }) : null);
+            const candidateRole =
+                llmType === 'grok' && disabledCandidate
+                    ? classifyGrokControlButton(disabledCandidate)
+                    : null;
+            const hint = disabledCandidate
+                ? `found disabled send button (${disabledCandidate.tagName.toLowerCase()}${candidateRole ? ` role=${candidateRole}` : ''})`
+                : 'send button not found';
+            if (llmType === 'grok') {
+                console.warn(
+                    '[SimpleInteraction INJECTED] Grok button snapshot at send-ready timeout:',
+                    describeVisibleComposerButtons()
+                );
+            }
+            throw new Error(`Timed out waiting for Send to become ready (${hint}).`);
+        };
+
+        const waitForSendAcknowledged = async ({
+            timeoutMs = 10000,
+            pollMs = 150,
+            baseline = null,
+        } = {}) => {
+            const startedAt = Date.now();
+
+            if (llmType !== 'grok') {
+                while (Date.now() - startedAt < timeoutMs) {
+                    const current = getInputText().trim();
+                    if (!current) return { ok: true, reason: 'input_cleared' };
+                    const stopBtn = findStopButton();
+                    if (stopBtn && isVisible(stopBtn) && !isDisabledButton(stopBtn)) {
+                        return { ok: true, reason: 'stop_visible' };
+                    }
+                    await sleep(pollMs);
+                }
+                return { ok: false, reason: 'timeout_no_signal' };
+            }
+
+            const before = baseline || captureSendAckBaseline();
+            let sawStop = Boolean(before.stopVisible);
+            const strongSignals = new Set();
+            const secondarySignals = new Set();
+
+            while (Date.now() - startedAt < timeoutMs) {
+                const current = getInputText().trim();
+                const currentLen = current.length;
+                const stopBtn = findStopButton();
+                const voiceBtn = findVoiceButton();
+                const sendBtn =
+                    findSendButton({ allowDisabled: true, includeFallback: true }) ||
+                    findNearestSubmitButton({ allowDisabled: true });
+                const sendVisible = Boolean(sendBtn && isVisible(sendBtn));
+                const sendDisabled = Boolean(sendBtn && isDisabledButton(sendBtn));
+
+                if (stopBtn && isVisible(stopBtn) && !isDisabledButton(stopBtn)) {
+                    sawStop = true;
+                    strongSignals.add('stop_visible');
+                }
+
+                if (sawStop && voiceBtn && isVisible(voiceBtn)) {
+                    strongSignals.add('voice_after_stop');
+                }
+
+                if (before.draftLen > 0 && currentLen === 0) {
+                    secondarySignals.add('draft_cleared');
+                } else if (
+                    before.draftLen >= 10 &&
+                    currentLen <= Math.max(2, Math.floor(before.draftLen * 0.3))
+                ) {
+                    secondarySignals.add('draft_shrunk');
+                }
+
+                if (before.sendVisible && !sendVisible) {
+                    secondarySignals.add('submit_hidden');
+                } else if (before.sendEnabled && sendVisible && sendDisabled) {
+                    secondarySignals.add('submit_disabled');
+                }
+
+                if (strongSignals.size >= 1 || secondarySignals.size >= 2) {
+                    const reason =
+                        strongSignals.size >= 1
+                            ? [...strongSignals].join('+')
+                            : [...secondarySignals].join('+');
+                    console.log(
+                        `[SimpleInteraction INJECTED] Grok send acknowledged (reason=${reason}; strong=${[...strongSignals].join(',') || 'none'}; secondary=${[...secondarySignals].join(',') || 'none'}).`
+                    );
+                    return {
+                        ok: true,
+                        reason,
+                        strongSignals: [...strongSignals],
+                        secondarySignals: [...secondarySignals],
+                    };
+                }
+
+                await sleep(pollMs);
+            }
+
+            const timeoutReason = `timeout strong=${[...strongSignals].join(',') || 'none'} secondary=${[...secondarySignals].join(',') || 'none'}`;
+            return {
+                ok: false,
+                reason: timeoutReason,
+                strongSignals: [...strongSignals],
+                secondarySignals: [...secondarySignals],
+            };
+        };
+
+        const clickSendButton = (btn) => {
+            if (!btn) return;
+            btn.dispatchEvent(
+                new MouseEvent('mousedown', { bubbles: true, composed: true, cancelable: true })
+            );
+            btn.dispatchEvent(
+                new MouseEvent('mouseup', { bubbles: true, composed: true, cancelable: true })
+            );
+            btn.click();
+        };
+
+        const pressEnterToSend = () => {
+            const el = resolveInputElement();
+            if (!el) return;
+            el.dispatchEvent(
+                new KeyboardEvent('keydown', {
+                    key: 'Enter',
+                    code: 'Enter',
+                    keyCode: 13,
+                    which: 13,
+                    bubbles: true,
+                    composed: true,
+                })
+            );
+            el.dispatchEvent(
+                new KeyboardEvent('keyup', {
+                    key: 'Enter',
+                    code: 'Enter',
+                    keyCode: 13,
+                    which: 13,
+                    bubbles: true,
+                    composed: true,
+                })
+            );
+        };
+
+        const pressModifierEnterToSend = (modifier) => {
+            const el = resolveInputElement();
+            if (!el) return;
+            const eventInit = {
+                key: 'Enter',
+                code: 'Enter',
+                keyCode: 13,
+                which: 13,
+                bubbles: true,
+                composed: true,
+                ctrlKey: modifier === 'ctrl',
+                metaKey: modifier === 'meta',
+            };
+            el.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+            el.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+        };
+
+        const hasAttachments = attachmentPayloads.length > 0;
+        const readyTimeoutMs = hasAttachments ? 120000 : isLargePrompt ? 20000 : 6000;
+        const maxAttempts = hasAttachments ? 3 : isLargePrompt ? 3 : 2;
+        const disabledCandidate = (() => {
+            const candidate =
+                findSendButton({ allowDisabled: true, includeFallback: true }) ||
+                (llmType === 'grok' ? findNearestSubmitButton({ allowDisabled: true }) : null);
+            return Boolean(candidate && isVisible(candidate) && isDisabledButton(candidate));
+        })();
+        const shouldWaitForReadyFirst = hasAttachments || isLargePrompt || disabledCandidate;
+        const initialWaitMs = isLargePrompt ? 150 : 75;
+        let lastAckReason = '';
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            if (shouldWaitForReadyFirst || attempt > 1) {
+                console.log(
+                    `[SimpleInteraction INJECTED] Waiting for Send to be ready for ${llmType} (attempt ${attempt}/${maxAttempts})...`
+                );
+                await waitForSendReady({ timeoutMs: readyTimeoutMs });
+            } else {
+                // Allow the UI to enable the Send button after we set the prompt.
+                await sleep(initialWaitMs);
+            }
+
+            const ackBaseline = llmType === 'grok' ? captureSendAckBaseline() : null;
+            if (llmType === 'grok' && ackBaseline) {
+                console.log(
+                    `[SimpleInteraction INJECTED] Grok controls before send (attempt ${attempt}): sendRole=${ackBaseline.sendRole || 'none'}, sendVisible=${ackBaseline.sendVisible}, sendEnabled=${ackBaseline.sendEnabled}, stopVisible=${ackBaseline.stopVisible}, voiceVisible=${ackBaseline.voiceVisible}.`
+                );
+            }
+
+            let button = findSendButton({ allowDisabled: false, includeFallback: true });
+            if (!button && llmType === 'grok') {
+                button = findNearestSubmitButton({ allowDisabled: false });
+            }
+            if (button) {
+                const controlType = llmType === 'grok' ? classifyGrokControlButton(button) : 'send';
+                console.log(
+                    `[SimpleInteraction INJECTED] Clicking Send for ${llmType} (attempt ${attempt}, control=${controlType}).`,
+                    button
+                );
+                clickSendButton(button);
+            } else {
+                const submitted = submitViaComposerForm();
+                if (submitted) {
+                    console.warn(
+                        `[SimpleInteraction INJECTED] Send button not found for ${llmType}; submitted nearest form (attempt ${attempt}).`
+                    );
+                } else {
+                    console.warn(
+                        `[SimpleInteraction INJECTED] Send button not found for ${llmType}; attempting Enter/modifier fallbacks (attempt ${attempt}).`
+                    );
+                }
+                pressEnterToSend();
+                pressModifierEnterToSend('meta');
+                pressModifierEnterToSend('ctrl');
+                if (llmType === 'grok') {
+                    console.warn(
+                        '[SimpleInteraction INJECTED] Grok button snapshot before ack wait:',
+                        describeVisibleComposerButtons()
+                    );
+                }
+            }
+
+            const acknowledged = await waitForSendAcknowledged({
+                timeoutMs: isLargePrompt ? 12000 : 10000,
+                baseline: ackBaseline,
+            });
+            if (acknowledged.ok) {
+                return {
+                    success: true,
+                    method: button ? `button_click_for_${llmType}` : `enter_key_for_${llmType}`,
+                    details: {
+                        stage: 'send',
+                        attempts: attempt,
+                        ackReason: acknowledged.reason,
+                    },
+                };
+            }
+            lastAckReason = acknowledged.reason || '';
+            console.warn(
+                `[SimpleInteraction INJECTED] Send not acknowledged for ${llmType} (attempt ${attempt}, reason=${lastAckReason || 'none'}).`
+            );
+        }
+
+        const errMsg = `[SimpleInteraction INJECTED] Failed to send message for ${llmType}: no acknowledgement after ${maxAttempts} attempt(s).`;
+        console.error(errMsg);
+        return {
+            success: false,
+            error: errMsg,
+            details: {
+                stage: 'send_not_acknowledged',
+                ackReason: lastAckReason || null,
+            },
+        };
+    } catch (error) {
+        const errMsg = `[SimpleInteraction INJECTED] Error during interaction with ${llmType}: ${error.message} (Stack: ${error.stack})`;
+        console.error(errMsg, error);
+        return {
+            success: false,
+            error: errMsg,
+            details: { stage: 'main_catch_block', errorMessage: error.message },
+        };
+    }
+}
+
+async function checkConnectionStatus({ profileIds = [] } = {}) {
+    const status = {};
+    const profileStatus = {};
+    const providers = getSupportedProviderKeys();
+    if (providers.length === 0) {
+        status.chatgpt = false;
+        status.gemini = false;
+        return { status, profileStatus };
+    }
+    providers.forEach((provider) => {
+        status[provider] = false;
+    });
+
+    console.log('[MLC Background] Starting connection status check...');
+
+    let profilesState = null;
+    try {
+        profilesState = await loadTabProfiles();
+    } catch (error) {
+        console.error('[MLC Background] Error loading tab profiles for connection check:', error);
+        console.log('[MLC Background] Final connection status:', status);
+        return { status, profileStatus };
+    }
+
+    for (const provider of providers) {
+        try {
+            const defaultProfileId = profilesState.defaults?.[provider];
+            const profile = defaultProfileId
+                ? findProfileById(profilesState, defaultProfileId)
+                : null;
+            if (!profile || !Number.isFinite(profile.tabId)) {
+                console.log(`[MLC Background] No default ${formatLLMLabel(provider)} profile/tab`);
+                status[provider] = false;
+                continue;
+            }
+
+            const validation = await validateTabForProvider(profile.tabId, provider);
+            if (!validation.ok) {
+                status[provider] = false;
+                continue;
+            }
+
+            const pingOk = await pingTab(profile.tabId, provider);
+            status[provider] = pingOk;
+            console.log(
+                `[MLC Background] ${formatLLMLabel(provider)} default profile responsive:`,
+                pingOk ? profile.tabId : 'No'
+            );
+        } catch (error) {
+            console.warn(
+                `[MLC Background] Error checking ${formatLLMLabel(provider)} connection:`,
+                error?.message || error
+            );
+            status[provider] = false;
+        }
+    }
+
+    const requestedProfileIds = Array.isArray(profileIds)
+        ? profileIds.map((id) => String(id || '').trim()).filter(Boolean)
+        : [];
+    if (requestedProfileIds.length > 0) {
+        const unique = [...new Set(requestedProfileIds)];
+        await Promise.all(
+            unique.map(async (profileId) => {
+                try {
+                    const profile = findProfileById(profilesState, profileId);
+                    if (!profile || !Number.isFinite(profile.tabId)) {
+                        profileStatus[profileId] = false;
+                        return;
+                    }
+                    const provider = normalizeProviderKey(profile.provider);
+                    if (!provider || !isSupportedProviderKey(provider)) {
+                        profileStatus[profileId] = false;
+                        return;
+                    }
+                    const validation = await validateTabForProvider(profile.tabId, provider);
+                    if (!validation.ok) {
+                        profileStatus[profileId] = false;
+                        return;
+                    }
+                    profileStatus[profileId] = await pingTab(profile.tabId, provider);
+                } catch (error) {
+                    profileStatus[profileId] = false;
+                }
+            })
+        );
+    }
+
+    console.log('[MLC Background] Final connection status:', status);
+    return { status, profileStatus };
+}

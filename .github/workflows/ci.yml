@@ -1,32 +1,79 @@
 name: CI
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
+    pull_request:
+    push:
+        branches:
+            - main
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    validate:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '20'
+                  cache: npm
 
-      - name: Syntax check
-        run: |
-          node --check background.js
-          node --check sidepanel.js
-          node --check contentScript.js
-          node --check historyStore.js
+            - name: Install dependencies
+              run: npm ci
 
-      - name: Run tests
-        run: npm test
+            - name: Build runtime from src
+              run: npm run build:src
 
-      - name: Build variant package
-        run: npm run build:variant
+            - name: Lint
+              run: npm run lint
+
+            - name: Format check
+              run: npm run format:check
+
+            - name: Unit tests
+              run: npm run test:unit
+
+            - name: Integration tests
+              run: npm run test:integration
+
+            - name: Install Playwright browser
+              run: npx playwright install --with-deps chromium
+
+            - name: E2E smoke
+              run: npm run test:e2e:smoke
+
+            - name: Build release artifact
+              run: npm run build:release
+
+            - name: Verify release artifact policy
+              run: npm run verify:release-artifact -- ".dist/release"
+
+            - name: Upload PR artifact
+              if: github.event_name == 'pull_request'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: pr-extension-release-zip
+                  path: release/*.zip
+
+            - name: PR summary comment
+              if: github.event_name == 'pull_request'
+              uses: actions/github-script@v7
+              with:
+                  script: |
+                      const runId = context.runId;
+                      const repo = context.repo;
+                      const artifactUrl = `https://github.com/${repo.owner}/${repo.repo}/actions/runs/${runId}`;
+                      const body = [
+                        'CI checks passed for this PR.',
+                        '',
+                        `Release-candidate artifact: ${artifactUrl}`,
+                        '',
+                        'Validation included lint, format, unit, integration, e2e smoke, release build, and artifact policy verification.'
+                      ].join('\n');
+                      await github.rest.issues.createComment({
+                        owner: repo.owner,
+                        repo: repo.repo,
+                        issue_number: context.issue.number,
+                        body
+                      });

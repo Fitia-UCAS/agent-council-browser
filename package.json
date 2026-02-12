@@ -1,18 +1,34 @@
 {
-  "name": "multi-llm-coder",
-  "version": "0.1.0",
-  "description": "Send prompts to multiple LLM web UIs (ChatGPT, Gemini, Claude, Grok) simultaneously and compare responses side-by-side",
-  "main": "background.js",
-  "scripts": {
-    "test": "node tests/test-capture-heuristics.js && node tests/test-debate-prompt-utils.js && node tests/test-manifest.js && node tests/test-selectors.js",
-    "build:variant": "bash scripts/dev/build-extension-variant.sh",
-    "build:release": "bash scripts/release/build-release-artifact.sh",
-    "build:variant:all-local-worktrees": "bash scripts/dev/build-all-local-worktrees-variants.sh",
-    "brand:in-place": "bash scripts/dev/build-extension-variant.sh --in-place",
-    "brand:all-worktrees": "bash scripts/dev/apply-worktree-branding.sh",
-    "icons:ensure": "bash scripts/dev/ensure-variant-icons.sh",
-    "hooks:enable": "bash scripts/dev/enable-git-hooks.sh"
-  },
-  "author": "Multi-LLM Coder Team",
-  "license": "ISC"
+    "name": "multi-llm-coder",
+    "version": "0.1.0",
+    "description": "Send prompts to multiple LLM web UIs (ChatGPT, Gemini, Claude, Grok) simultaneously and compare responses side-by-side",
+    "main": "background.js",
+    "scripts": {
+        "build:src": "node scripts/build/build-from-src.mjs --mode=dev",
+        "build:src:release": "node scripts/build/build-from-src.mjs --mode=release",
+        "lint": "eslint --no-error-on-unmatched-pattern \"src/**/*.js\" \"scripts/**/*.js\" \"scripts/**/*.mjs\" \"tests/**/*.js\"",
+        "format": "prettier --write \"README.md\" \"CONTRIBUTING.md\" \"SECURITY.md\" \"CODE_OF_CONDUCT.md\" \"package.json\" \"package-lock.json\" \"eslint.config.js\" \"playwright.config.js\" \"vitest.config.js\" \"docs/**/*.md\" \".github/**/*.{yml,yaml,md}\" \"scripts/**/*.mjs\" \"src/**/*.js\" \"src/**/*.css\" \"src/**/*.json\" \"tests/unit/**/*.js\" \"tests/e2e/**/*.js\"",
+        "format:check": "prettier --check \"README.md\" \"CONTRIBUTING.md\" \"SECURITY.md\" \"CODE_OF_CONDUCT.md\" \"package.json\" \"package-lock.json\" \"eslint.config.js\" \"playwright.config.js\" \"vitest.config.js\" \"docs/**/*.md\" \".github/**/*.{yml,yaml,md}\" \"scripts/**/*.mjs\" \"src/**/*.js\" \"src/**/*.css\" \"src/**/*.json\" \"tests/unit/**/*.js\" \"tests/e2e/**/*.js\"",
+        "test": "npm run test:integration",
+        "test:unit": "vitest run tests/unit",
+        "test:integration": "npm run build:src && node tests/test-capture-heuristics.js && node tests/test-debate-prompt-utils.js && node tests/test-manifest.js",
+        "test:e2e:smoke": "npm run build:src && playwright test --config=playwright.config.js tests/e2e/smoke.spec.js",
+        "verify:release-artifact": "bash scripts/release/verify-release-artifact.sh",
+        "build:variant": "npm run build:src && bash scripts/dev/build-extension-variant.sh",
+        "build:release": "bash scripts/release/build-release-artifact.sh",
+        "build:variant:all-local-worktrees": "bash scripts/dev/build-all-local-worktrees-variants.sh",
+        "brand:in-place": "npm run build:src && bash scripts/dev/build-extension-variant.sh --in-place",
+        "brand:all-worktrees": "bash scripts/dev/apply-worktree-branding.sh",
+        "icons:ensure": "bash scripts/dev/ensure-variant-icons.sh",
+        "hooks:enable": "bash scripts/dev/enable-git-hooks.sh"
+    },
+    "author": "Multi-LLM Coder Team",
+    "license": "MIT",
+    "devDependencies": {
+        "@playwright/test": "^1.50.1",
+        "esbuild": "^0.25.0",
+        "eslint": "^9.20.1",
+        "prettier": "^3.5.2",
+        "vitest": "^2.1.8"
+    }
 }
