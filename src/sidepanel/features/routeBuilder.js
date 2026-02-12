@@ -66,6 +66,18 @@
             });
         }
 
+        const defaultCountByProvider = {};
+        agents.forEach((agent) => {
+            if (!agent?.provider) return;
+            const selection = normalizeProfileSelection(agent.profileId);
+            if (selection !== 'default') return;
+            defaultCountByProvider[agent.provider] =
+                (defaultCountByProvider[agent.provider] || 0) + 1;
+            if (defaultCountByProvider[agent.provider] > 1) {
+                agent.profileId = null;
+            }
+        });
+
         const agentCountsByProvider = {};
         agents.forEach((agent) => {
             if (!agent?.provider) return;
