@@ -41,5 +41,6 @@ debate_prompts.json
 sidepanel.html
 sidepanel.js
 styles.css
+!src/sidepanel/styles.css
 runtime/
 assets/
