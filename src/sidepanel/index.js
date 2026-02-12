@@ -134,6 +134,91 @@ const ATTACHMENTS_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 let attachmentsModalResolver = null;
 let passphrasePrompt = null;
 let sessionWatchdogInterval = null;
+let materialSymbolFallbackObserver = null;
+let materialSymbolFallbackEnabled = false;
+let materialSymbolFallbackScheduled = false;
+
+const MATERIAL_SYMBOL_FALLBACKS = {
+    menu: '☰',
+    add: '+',
+    settings: '⚙',
+    attach_file: '📎',
+    expand_more: '▾',
+    close: '✕',
+    lock_open: '🔓',
+    lock: '🔒',
+    drag_indicator: '⋮⋮',
+};
+
+function hasMaterialSymbolFont() {
+    const fonts = document?.fonts;
+    if (!fonts || typeof fonts.check !== 'function') return false;
+    try {
+        return (
+            fonts.check('20px "Material Symbols Rounded"') ||
+            fonts.check('20px "Material Symbols Outlined"') ||
+            fonts.check('20px "Material Icons"')
+        );
+    } catch {
+        return false;
+    }
+}
+
+function applyMaterialSymbolFallback(root = document) {
+    if (!materialSymbolFallbackEnabled) return;
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+
+    const nodes = root.querySelectorAll('.material-symbols-rounded');
+    nodes.forEach((node) => {
+        const raw = String(node.textContent || '').trim();
+        if (!raw) return;
+
+        const fallback = MATERIAL_SYMBOL_FALLBACKS[raw];
+        if (!fallback) return;
+
+        if (!node.dataset.mlcSymbolRaw) {
+            node.dataset.mlcSymbolRaw = raw;
+        }
+        node.textContent = fallback;
+        node.classList.add('material-symbol-fallback');
+        node.setAttribute('data-symbol-name', raw);
+    });
+}
+
+function scheduleMaterialSymbolFallback() {
+    if (!materialSymbolFallbackEnabled) return;
+    if (materialSymbolFallbackScheduled) return;
+    materialSymbolFallbackScheduled = true;
+    window.requestAnimationFrame(() => {
+        materialSymbolFallbackScheduled = false;
+        applyMaterialSymbolFallback(document);
+    });
+}
+
+function ensureMaterialSymbolFallbackObserver() {
+    if (!materialSymbolFallbackEnabled) return;
+    if (materialSymbolFallbackObserver) return;
+    if (!document?.body || typeof MutationObserver !== 'function') return;
+
+    materialSymbolFallbackObserver = new MutationObserver(() => {
+        scheduleMaterialSymbolFallback();
+    });
+
+    materialSymbolFallbackObserver.observe(document.body, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+    });
+}
+
+function initMaterialSymbolFallback() {
+    // `document.fonts.check()` is not reliable for ligature fonts in extension pages:
+    // it can return true while ligatures still render as raw words (menu/settings/...).
+    // Force the glyph fallback path to guarantee visible icons on all hosts.
+    materialSymbolFallbackEnabled = true;
+    scheduleMaterialSymbolFallback();
+    ensureMaterialSymbolFallbackObserver();
+}
 
 function storageGet(keys) {
     return new Promise((resolve) => {
@@ -1316,6 +1401,8 @@ function handleRouteChipDragEnd() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+    initMaterialSymbolFallback();
+
     elements.promptInput = document.getElementById('prompt-input');
     elements.sendButton = document.getElementById('send-button');
     elements.charCount = document.getElementById('char-count');
