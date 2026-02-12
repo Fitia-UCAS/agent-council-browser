@@ -1,50 +1,80 @@
 <!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Multi-LLM Debate</title>
-    <link rel="stylesheet" href="assets/fonts.css">
-    <link rel="stylesheet" href="styles.css">
-</head>
-<body>
-    <div class="app">
-        <header class="topbar">
-            <div class="topbar-left">
-                <button class="icon-button" id="chats-button" type="button" aria-label="Chats">
-                    <span class="material-symbols-rounded">menu</span>
-                </button>
-                <button class="icon-button" id="new-chat-button" type="button" aria-label="New chat" title="New chat">
-                    <span class="material-symbols-rounded">add</span>
-                </button>
-                <button class="icon-button" id="chat-lock-button" type="button" aria-label="Protect chat" title="Protect chat" hidden>
-                    <span class="material-symbols-rounded" id="chat-lock-icon">lock_open</span>
-                </button>
-                <div class="topbar-title">Multi-LLM</div>
-            </div>
-            <div class="topbar-right">
-                <button class="provider-pill" id="providers-button" type="button" aria-label="Providers">Providers</button>
-                <button class="icon-button" id="settings-button" type="button" aria-label="Settings" title="Settings">
-                    <span class="material-symbols-rounded">settings</span>
-                </button>
-            </div>
-        </header>
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Multi-LLM Debate</title>
+        <link rel="stylesheet" href="assets/fonts.css" />
+        <link rel="stylesheet" href="styles.css" />
+    </head>
+    <body>
+        <div class="app">
+            <header class="topbar">
+                <div class="topbar-left">
+                    <button class="icon-button" id="chats-button" type="button" aria-label="Chats">
+                        <span class="material-symbols-rounded">menu</span>
+                    </button>
+                    <button
+                        class="icon-button"
+                        id="new-chat-button"
+                        type="button"
+                        aria-label="New chat"
+                        title="New chat"
+                    >
+                        <span class="material-symbols-rounded">add</span>
+                    </button>
+                    <button
+                        class="icon-button"
+                        id="chat-lock-button"
+                        type="button"
+                        aria-label="Protect chat"
+                        title="Protect chat"
+                        hidden
+                    >
+                        <span class="material-symbols-rounded" id="chat-lock-icon">lock_open</span>
+                    </button>
+                    <div class="topbar-title">Multi-LLM</div>
+                </div>
+                <div class="topbar-right">
+                    <button
+                        class="provider-pill"
+                        id="providers-button"
+                        type="button"
+                        aria-label="Providers"
+                    >
+                        Providers
+                    </button>
+                    <button
+                        class="icon-button"
+                        id="settings-button"
+                        type="button"
+                        aria-label="Settings"
+                        title="Settings"
+                    >
+                        <span class="material-symbols-rounded">settings</span>
+                    </button>
+                </div>
+            </header>
 
-        <div class="session-banner" id="session-banner" hidden>
-            <div class="session-banner-text" id="session-status">Idle</div>
-            <div class="session-banner-actions paused-actions" id="paused-actions" hidden>
-                <button class="ghost-button" id="paused-focus" type="button">Focus tab</button>
-                <button class="ghost-button" id="paused-rebind" type="button">Reconnect</button>
-                <button class="ghost-button" id="resume-session" type="button">Resume</button>
+            <div class="session-banner" id="session-banner" hidden>
+                <div class="session-banner-text" id="session-status">Idle</div>
+                <div class="session-banner-actions paused-actions" id="paused-actions" hidden>
+                    <button class="ghost-button" id="paused-focus" type="button">Focus tab</button>
+                    <button class="ghost-button" id="paused-rebind" type="button">Reconnect</button>
+                    <button class="ghost-button" id="resume-session" type="button">Resume</button>
+                </div>
             </div>
-        </div>
 
-        <main class="timeline" id="timeline">
+            <main class="timeline" id="timeline">
                 <div class="empty-state" id="empty-state">
                     <div class="empty-title">New chat</div>
-                    <div class="empty-subtitle">Choose where to send your message. We’ll connect only when needed.</div>
+                    <div class="empty-subtitle">
+                        Choose where to send your message. We’ll connect only when needed.
+                    </div>
                     <div class="empty-actions">
-                        <button class="primary-button" id="empty-open-route" type="button">Choose agents</button>
+                        <button class="primary-button" id="empty-open-route" type="button">
+                            Choose agents
+                        </button>
                     </div>
                 </div>
             </main>
@@ -52,35 +82,68 @@
             <footer class="composer">
                 <label class="sr-only" for="prompt-input">Prompt</label>
                 <div class="composer-surface composer-run-settings" id="composer-run-settings">
-                        <textarea id="prompt-input" rows="3" placeholder="Send a message..."></textarea>
-                        <div class="composer-hint" id="composer-hint" hidden></div>
+                    <textarea id="prompt-input" rows="3" placeholder="Send a message..."></textarea>
+                    <div class="composer-hint" id="composer-hint" hidden></div>
 
-                        <div class="attachment-list" id="attachment-list" hidden></div>
+                    <div class="attachment-list" id="attachment-list" hidden></div>
 
                     <div class="composer-toolbar">
-                        <input id="attachment-input" type="file" multiple hidden>
-                        <button class="icon-button composer-toolbar-icon" id="attachment-button" type="button" aria-label="Attach files" title="Attach files">
+                        <input id="attachment-input" type="file" multiple hidden />
+                        <button
+                            class="icon-button composer-toolbar-icon"
+                            id="attachment-button"
+                            type="button"
+                            aria-label="Attach files"
+                            title="Attach files"
+                        >
                             <span class="material-symbols-rounded">attach_file</span>
                         </button>
-                        <div class="composer-attachments-summary" id="attachment-summary" hidden>No attachments</div>
-                        <button class="ghost-button danger composer-attachments-clear" id="attachment-clear" type="button" hidden>Clear</button>
+                        <div class="composer-attachments-summary" id="attachment-summary" hidden>
+                            No attachments
+                        </div>
+                        <button
+                            class="ghost-button danger composer-attachments-clear"
+                            id="attachment-clear"
+                            type="button"
+                            hidden
+                        >
+                            Clear
+                        </button>
 
                         <div class="composer-toolbar-spacer"></div>
-                        <button class="composer-route-button route-pill" id="route-button" type="button" aria-haspopup="dialog" aria-expanded="false">
+                        <button
+                            class="composer-route-button route-pill"
+                            id="route-button"
+                            type="button"
+                            aria-haspopup="dialog"
+                            aria-expanded="false"
+                        >
                             <span class="route-pill-text" id="route-pill-text">Select agents…</span>
                             <span class="material-symbols-rounded">expand_more</span>
                         </button>
-                        <button class="primary-button" id="send-button" type="button" disabled>Send</button>
+                        <button class="primary-button" id="send-button" type="button" disabled>
+                            Send
+                        </button>
                     </div>
 
-                    <div class="composer-meta">
-                        <span id="char-count">0</span> chars
-                    </div>
+                    <div class="composer-meta"><span id="char-count">0</span> chars</div>
 
-                    <div class="route-popover" id="route-popover" role="dialog" aria-label="Route builder" aria-hidden="true" hidden>
+                    <div
+                        class="route-popover"
+                        id="route-popover"
+                        role="dialog"
+                        aria-label="Route builder"
+                        aria-hidden="true"
+                        hidden
+                    >
                         <div class="route-popover-header">
                             <div class="route-popover-title">Route</div>
-                            <button class="icon-button route-popover-close" id="route-close" type="button" aria-label="Close route builder">
+                            <button
+                                class="icon-button route-popover-close"
+                                id="route-close"
+                                type="button"
+                                aria-label="Close route builder"
+                            >
                                 <span class="material-symbols-rounded">close</span>
                             </button>
                         </div>
@@ -88,42 +151,102 @@
                             <div class="route-section">
                                 <div class="route-section-title">Presets</div>
                                 <div class="route-presets">
-                                    <button class="ghost-button route-preset" id="route-preset-single" type="button">Single</button>
-                                    <button class="ghost-button route-preset" id="route-preset-compare" type="button">Compare</button>
-                                    <button class="ghost-button route-preset" id="route-preset-debate" type="button">Debate</button>
+                                    <button
+                                        class="ghost-button route-preset"
+                                        id="route-preset-single"
+                                        type="button"
+                                    >
+                                        Single
+                                    </button>
+                                    <button
+                                        class="ghost-button route-preset"
+                                        id="route-preset-compare"
+                                        type="button"
+                                    >
+                                        Compare
+                                    </button>
+                                    <button
+                                        class="ghost-button route-preset"
+                                        id="route-preset-debate"
+                                        type="button"
+                                    >
+                                        Debate
+                                    </button>
                                 </div>
                             </div>
 
                             <div class="route-section">
                                 <div class="route-section-title">Agents</div>
                                 <div class="route-selected" id="route-selected"></div>
-                                <div class="route-help" id="route-selected-help">Agents are order-only. Use New tab in Providers to add/repair tabs, then drag to reorder.</div>
+                                <div class="route-help" id="route-selected-help">
+                                    Agents are order-only. Use New tab in Providers to add/repair
+                                    tabs, then drag to reorder.
+                                </div>
                             </div>
 
                             <div class="route-section" id="route-mode-section" hidden>
                                 <div class="route-section-title">Mode</div>
                                 <div class="route-modes" role="group" aria-label="Route mode">
-                                    <button class="route-mode" id="route-mode-parallel" type="button">Parallel</button>
-                                    <button class="route-mode" id="route-mode-debate" type="button">Debate</button>
+                                    <button
+                                        class="route-mode"
+                                        id="route-mode-parallel"
+                                        type="button"
+                                    >
+                                        Parallel
+                                    </button>
+                                    <button class="route-mode" id="route-mode-debate" type="button">
+                                        Debate
+                                    </button>
                                 </div>
-                                <div class="route-debate-settings" id="route-debate-settings" hidden>
+                                <div
+                                    class="route-debate-settings"
+                                    id="route-debate-settings"
+                                    hidden
+                                >
                                     <label class="field route-rounds-field">
                                         <span class="field-label">Rounds</span>
-                                        <input id="route-rounds" type="number" min="1" max="12" value="3">
+                                        <input
+                                            id="route-rounds"
+                                            type="number"
+                                            min="1"
+                                            max="12"
+                                            value="3"
+                                        />
                                     </label>
-                                    <button class="ghost-button route-swap" id="route-swap" type="button" title="Swap order">Swap order</button>
+                                    <button
+                                        class="ghost-button route-swap"
+                                        id="route-swap"
+                                        type="button"
+                                        title="Swap order"
+                                    >
+                                        Swap order
+                                    </button>
                                 </div>
                             </div>
 
                             <div class="route-section">
                                 <div class="route-section-title">Providers</div>
-                                <button class="secondary-button route-connect-all" id="route-connect-all" type="button">Connect all</button>
+                                <button
+                                    class="secondary-button route-connect-all"
+                                    id="route-connect-all"
+                                    type="button"
+                                >
+                                    Connect all
+                                </button>
                                 <div class="route-provider-list" id="route-provider-list"></div>
                             </div>
 
                             <div class="route-footer">
-                                <button class="ghost-button" id="route-manage-providers" type="button">Settings</button>
-                        <button class="primary-button" id="route-done" type="button">Done</button>
+                                <button
+                                    class="ghost-button"
+                                    id="route-manage-providers"
+                                    type="button"
+                                >
+                                    Settings
+                                </button>
+                                <button class="primary-button" id="route-done" type="button">
+                                    Done
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -131,187 +254,417 @@
             </footer>
         </div>
 
-    <div class="drawer-backdrop" id="chats-backdrop" hidden></div>
-    <aside class="drawer drawer-left" id="chats-drawer" aria-hidden="true">
-        <div class="drawer-header">
-            <div class="drawer-title">Chats</div>
-            <button class="icon-button" id="close-chats" type="button" aria-label="Close chats">
-                <span class="material-symbols-rounded">close</span>
-            </button>
-        </div>
-        <div class="drawer-body">
-            <button class="drawer-primary" id="drawer-new-chat" type="button">
-                <span class="material-symbols-rounded">add</span>
-                <span>New chat</span>
-            </button>
-            <div class="chat-list" id="chat-list"></div>
-        </div>
-    </aside>
+        <div class="drawer-backdrop" id="chats-backdrop" hidden></div>
+        <aside class="drawer drawer-left" id="chats-drawer" aria-hidden="true">
+            <div class="drawer-header">
+                <div class="drawer-title">Chats</div>
+                <button class="icon-button" id="close-chats" type="button" aria-label="Close chats">
+                    <span class="material-symbols-rounded">close</span>
+                </button>
+            </div>
+            <div class="drawer-body">
+                <button class="drawer-primary" id="drawer-new-chat" type="button">
+                    <span class="material-symbols-rounded">add</span>
+                    <span>New chat</span>
+                </button>
+                <div class="chat-list" id="chat-list"></div>
+            </div>
+        </aside>
 
-    <div class="drawer-backdrop" id="settings-backdrop" hidden></div>
-    <aside class="drawer drawer-right" id="settings-drawer" aria-hidden="true">
-        <div class="drawer-header">
-            <div class="drawer-title">Settings</div>
-            <button class="icon-button" id="close-settings" type="button" aria-label="Close settings">
-                <span class="material-symbols-rounded">close</span>
-            </button>
-        </div>
-        <div class="drawer-body drawer-scroll">
-            <section class="drawer-section security-section">
-                <div class="drawer-section-title">Security</div>
-                <div class="security-overview">
-                    <div class="security-overview-head">
-                        <div class="security-overview-title">Passphrase protection</div>
-                        <div class="security-badge is-off" id="history-badge">Not set</div>
+        <div class="drawer-backdrop" id="settings-backdrop" hidden></div>
+        <aside class="drawer drawer-right" id="settings-drawer" aria-hidden="true">
+            <div class="drawer-header">
+                <div class="drawer-title">Settings</div>
+                <button
+                    class="icon-button"
+                    id="close-settings"
+                    type="button"
+                    aria-label="Close settings"
+                >
+                    <span class="material-symbols-rounded">close</span>
+                </button>
+            </div>
+            <div class="drawer-body drawer-scroll">
+                <section class="drawer-section">
+                    <div class="drawer-section-title">Conversation</div>
+                    <div class="prompt-note">
+                        Control how the live transcript behaves while providers are responding.
                     </div>
-                    <div class="prompt-note security-overview-text" id="history-overview-text">
-                        History is always saved on this device. Add a passphrase to protect specific chats.
+                    <div class="settings-actions settings-actions-start">
+                        <label class="inline-toggle">
+                            <input type="checkbox" id="auto-scroll" checked />
+                            <span>Auto-scroll transcript</span>
+                        </label>
                     </div>
+                </section>
+
+                <section class="drawer-section">
+                    <div class="drawer-section-title">Templates</div>
+                    <div class="prompt-note">
+                        Customize debate instructions with guided fields first. Advanced mode is
+                        available for full template control.
+                    </div>
+                    <div
+                        class="prompt-mode-switch"
+                        role="tablist"
+                        aria-label="Template editor mode"
+                    >
+                        <button
+                            class="route-mode is-active"
+                            id="prompt-mode-guided"
+                            type="button"
+                            role="tab"
+                            aria-selected="true"
+                        >
+                            Guided
+                        </button>
+                        <button
+                            class="route-mode"
+                            id="prompt-mode-advanced"
+                            type="button"
+                            role="tab"
+                            aria-selected="false"
+                        >
+                            Advanced
+                        </button>
+                    </div>
+                    <div class="template-preset-block" id="prompt-guided-presets">
+                        <div class="template-preset-title">Presets</div>
+                        <div class="template-preset-list">
+                            <button
+                                class="ghost-button template-preset-button"
+                                id="prompt-preset-balanced"
+                                type="button"
+                                data-preset="balanced"
+                            >
+                                Balanced critique
+                            </button>
+                            <button
+                                class="ghost-button template-preset-button"
+                                id="prompt-preset-concise"
+                                type="button"
+                                data-preset="concise"
+                            >
+                                Concise refinement
+                            </button>
+                            <button
+                                class="ghost-button template-preset-button"
+                                id="prompt-preset-final"
+                                type="button"
+                                data-preset="final_only"
+                            >
+                                Final-only answer
+                            </button>
+                        </div>
+                    </div>
+                    <div class="template-token-block" id="prompt-token-block">
+                        <div class="template-preset-title">Insert variable</div>
+                        <div class="template-token-list">
+                            <button
+                                class="ghost-button template-token"
+                                type="button"
+                                data-token="{other_llm}"
+                            >
+                                {other_llm}
+                            </button>
+                            <button
+                                class="ghost-button template-token"
+                                type="button"
+                                data-token="{round}"
+                            >
+                                {round}
+                            </button>
+                            <button
+                                class="ghost-button template-token"
+                                type="button"
+                                data-token="{rounds}"
+                            >
+                                {rounds}
+                            </button>
+                            <button
+                                class="ghost-button template-token"
+                                type="button"
+                                data-token="{other_answer}"
+                            >
+                                {other_answer}
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="prompt-template-fields" id="prompt-template-fields">
+                        <label class="field">
+                            <span class="field-label">Opening instruction</span>
+                            <textarea
+                                id="prompt-initial"
+                                class="prompt-template"
+                                rows="4"
+                                spellcheck="false"
+                                placeholder="Context and debate rules for the first turn."
+                            ></textarea>
+                            <div class="field-help">Used to prime turn 1 and turn 2 context.</div>
+                        </label>
+                        <div class="template-usage-preview">
+                            Used in: <code>debate.header</code> on opening turns.
+                        </div>
+
+                        <label class="field">
+                            <span class="field-label">During rounds</span>
+                            <textarea
+                                id="prompt-intermediary"
+                                class="prompt-template"
+                                rows="4"
+                                spellcheck="false"
+                                placeholder="How each agent should critique and improve in intermediate rounds."
+                            ></textarea>
+                            <div class="field-help">
+                                Default for non-final turns after the opener.
+                            </div>
+                        </label>
+                        <div class="template-usage-preview">
+                            Used in: <code>turn2/turn3+ {intermediary_message}</code>.
+                        </div>
+
+                        <label class="field">
+                            <span class="field-label">Final answer instruction</span>
+                            <textarea
+                                id="prompt-final"
+                                class="prompt-template"
+                                rows="4"
+                                spellcheck="false"
+                                placeholder="How the final turn should answer the user."
+                            ></textarea>
+                            <div class="field-help">Applied only on the last turn of the run.</div>
+                        </label>
+                        <div class="template-usage-preview">
+                            Used in: <code>turn == total_turns</code>.
+                        </div>
+                    </div>
+
+                    <details class="prompt-advanced" id="prompt-advanced-panel">
+                        <summary class="prompt-advanced-summary">
+                            <span>Advanced template editor (raw JSON)</span>
+                            <span class="material-symbols-rounded">expand_more</span>
+                        </summary>
+                        <div class="prompt-advanced-body">
+                            <div class="field-help">
+                                Edit full debate template JSON for power-user control.
+                            </div>
+                            <textarea
+                                id="prompt-advanced-json"
+                                class="prompt-editor"
+                                rows="10"
+                                spellcheck="false"
+                                placeholder='{"schemaVersion":1,"debate":{...}}'
+                            ></textarea>
+                            <div class="field-help" id="prompt-advanced-help">
+                                Guided fields remain the primary editor; advanced JSON is optional.
+                            </div>
+                        </div>
+                    </details>
+
+                    <div class="settings-actions prompt-actions">
+                        <button class="ghost-button" id="prompt-load" type="button">
+                            Load current
+                        </button>
+                        <button class="ghost-button" id="prompt-save" type="button">Save</button>
+                        <button class="ghost-button" id="prompt-reset" type="button">
+                            Reset to default
+                        </button>
+                    </div>
+                    <div class="prompt-status" id="prompt-status">Not loaded</div>
+                </section>
+
+                <section class="drawer-section security-section">
+                    <div class="drawer-section-title">Security</div>
+                    <div class="security-overview">
+                        <div class="security-overview-head">
+                            <div class="security-overview-title">Passphrase protection</div>
+                            <div class="security-badge is-off" id="history-badge">Not set</div>
+                        </div>
+                        <div class="prompt-note security-overview-text" id="history-overview-text">
+                            History is always local on this device. Enable a passphrase for
+                            protected chats.
+                        </div>
+                    </div>
+                    <div
+                        class="settings-actions security-primary-actions"
+                        id="history-primary-actions"
+                    >
+                        <button class="ghost-button" id="history-configure" type="button">
+                            Set passphrase…
+                        </button>
+                        <button class="ghost-button" id="history-unlock" type="button">
+                            Unlock protected chats
+                        </button>
+                        <button class="ghost-button" id="history-lock" type="button">
+                            Lock protected chats
+                        </button>
+                    </div>
+                    <label class="inline-toggle security-mode-toggle" id="history-lock-new-row">
+                        <input type="checkbox" id="history-lock-new" />
+                        <span>Require passphrase for new chats</span>
+                    </label>
+                    <div class="field-help security-help" id="history-lock-new-help">
+                        If disabled, new chats stay readable while existing protected chats remain
+                        locked.
+                    </div>
+                    <details class="drawer-details" id="history-advanced" hidden>
+                        <summary class="drawer-details-summary">
+                            <span>Danger zone</span>
+                            <span class="material-symbols-rounded">expand_more</span>
+                        </summary>
+                        <div class="drawer-details-body security-danger-body">
+                            <div class="field-help security-help">
+                                Irreversible actions. Use only when you intentionally want to purge
+                                stored data.
+                            </div>
+                            <div class="settings-actions security-danger-actions">
+                                <button
+                                    class="ghost-button danger"
+                                    id="history-reset-protection"
+                                    type="button"
+                                >
+                                    Forget passphrase (delete protected chats)…
+                                </button>
+                                <button
+                                    class="ghost-button danger"
+                                    id="history-clear-all"
+                                    type="button"
+                                >
+                                    Delete all chats on this device…
+                                </button>
+                            </div>
+                        </div>
+                    </details>
+                    <div class="prompt-status" id="history-status" aria-live="polite">
+                        Passphrase: checking…
+                    </div>
+                </section>
+            </div>
+        </aside>
+
+        <div class="drawer-backdrop" id="passphrase-backdrop" hidden></div>
+        <div
+            class="modal"
+            id="passphrase-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="passphrase-title"
+            aria-hidden="true"
+            hidden
+        >
+            <div class="modal-header">
+                <div class="modal-title" id="passphrase-title">Unlock history</div>
+                <button
+                    class="icon-button"
+                    id="passphrase-close"
+                    type="button"
+                    aria-label="Close passphrase prompt"
+                >
+                    <span class="material-symbols-rounded">close</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="prompt-note" id="passphrase-note">
+                    Enter your passphrase to unlock encrypted history.
                 </div>
-                <div class="settings-actions security-primary-actions" id="history-primary-actions">
-                    <button class="ghost-button" id="history-configure" type="button">Set passphrase…</button>
-                    <button class="ghost-button" id="history-unlock" type="button">Unlock protected chats</button>
-                    <button class="ghost-button" id="history-lock" type="button">Lock protected chats</button>
-                </div>
-                <label class="inline-toggle security-mode-toggle" id="history-lock-new-row">
-                    <input type="checkbox" id="history-lock-new">
-                    <span>Require passphrase for new chats</span>
+                <label class="field">
+                    <span class="field-label">Passphrase</span>
+                    <input
+                        id="passphrase-input"
+                        type="password"
+                        autocomplete="current-password"
+                        placeholder="Passphrase"
+                    />
                 </label>
-                <div class="field-help security-help" id="history-lock-new-help">
-                    When this is off, new chats are readable without a passphrase. Previously protected chats stay locked until you unlock.
-                </div>
-                <details class="drawer-details" id="history-advanced" hidden>
-                    <summary class="drawer-details-summary">
-                        <span>Danger zone</span>
-                        <span class="material-symbols-rounded">expand_more</span>
-                    </summary>
-                    <div class="drawer-details-body security-danger-body">
-                        <div class="field-help security-help">
-                            These actions are irreversible. Use only if you want to permanently remove protected data.
-                        </div>
-                        <div class="settings-actions security-danger-actions">
-                            <button class="ghost-button danger" id="history-reset-protection" type="button">Forget passphrase (delete protected chats)…</button>
-                            <button class="ghost-button danger" id="history-clear-all" type="button">Delete all chats on this device…</button>
-                        </div>
-                    </div>
-                </details>
-                <div class="prompt-status" id="history-status" aria-live="polite">Passphrase: checking…</div>
-            </section>
-
-            <section class="drawer-section">
-                <div class="drawer-section-title">Transcript</div>
-                <div class="settings-actions">
-                    <label class="inline-toggle">
-                        <input type="checkbox" id="auto-scroll" checked>
-                        <span>Auto-scroll transcript</span>
-                    </label>
-                </div>
-            </section>
-
-            <section class="drawer-section">
-                <div class="drawer-section-title">Templates</div>
-                <div class="prompt-note">
-                    Customize how each agent is instructed (saved locally in this extension). Templates support placeholders like
-                    <code>{other_llm}</code>, <code>{round}</code>, <code>{rounds}</code>, and <code>{other_answer}</code>.
-                </div>
-
-                <div class="prompt-template-fields">
-                    <label class="field">
-                        <span class="field-label">Initial message</span>
-                        <textarea id="prompt-initial" class="prompt-template" rows="4" spellcheck="false" placeholder="Shown for iteration 1 (both models)."></textarea>
-                        <div class="field-help">Used on turns 1–2 (iteration 1 context).</div>
-                    </label>
-
-                    <label class="field">
-                        <span class="field-label">Intermediary message</span>
-                        <textarea id="prompt-intermediary" class="prompt-template" rows="4" spellcheck="false" placeholder="Shown for intermediary turns."></textarea>
-                        <div class="field-help">Used for turns 2..N-1 by default.</div>
-                    </label>
-
-                    <label class="field">
-                        <span class="field-label">Final message</span>
-                        <textarea id="prompt-final" class="prompt-template" rows="4" spellcheck="false" placeholder="Shown only on the last turn."></textarea>
-                        <div class="field-help">Used only when <code>turn == total_turns</code>.</div>
-                    </label>
-                </div>
-                <div class="settings-actions prompt-actions">
-                    <button class="ghost-button" id="prompt-load" type="button">Load current</button>
-                    <button class="ghost-button" id="prompt-save" type="button">Save</button>
-                    <button class="ghost-button" id="prompt-reset" type="button">Reset to default</button>
-                </div>
-                <div class="prompt-status" id="prompt-status">Not loaded</div>
-            </section>
-        </div>
-    </aside>
-
-    <div class="drawer-backdrop" id="passphrase-backdrop" hidden></div>
-    <div class="modal" id="passphrase-modal" role="dialog" aria-modal="true" aria-labelledby="passphrase-title" aria-hidden="true" hidden>
-        <div class="modal-header">
-            <div class="modal-title" id="passphrase-title">Unlock history</div>
-            <button class="icon-button" id="passphrase-close" type="button" aria-label="Close passphrase prompt">
-                <span class="material-symbols-rounded">close</span>
-            </button>
-        </div>
-        <div class="modal-body">
-            <div class="prompt-note" id="passphrase-note">Enter your passphrase to unlock encrypted history.</div>
-            <label class="field">
-                <span class="field-label">Passphrase</span>
-                <input id="passphrase-input" type="password" autocomplete="current-password" placeholder="Passphrase">
-            </label>
-            <label class="field" id="passphrase-confirm-field" hidden>
-                <span class="field-label">Confirm</span>
-                <input id="passphrase-confirm" type="password" autocomplete="new-password" placeholder="Confirm passphrase">
-            </label>
-            <div class="prompt-status is-error" id="passphrase-error" aria-live="assertive" hidden></div>
-        </div>
-        <div class="modal-actions">
-            <button class="ghost-button" id="passphrase-cancel" type="button">Cancel</button>
-            <button class="primary-button" id="passphrase-submit" type="button">Unlock</button>
-        </div>
-    </div>
-
-    <div class="modal-backdrop" id="modal-backdrop" hidden></div>
-    <div class="modal-backdrop" id="schema-reset-backdrop" hidden></div>
-    <div class="modal" id="schema-reset-modal" role="dialog" aria-modal="true" aria-labelledby="schema-reset-title" hidden>
-        <div class="modal-header">
-            <div class="modal-title" id="schema-reset-title">Upgrade required</div>
-        </div>
-        <div class="modal-body">
-            <div class="modal-text">
-                This version requires a one-time local data reset to complete the v3 architecture upgrade.
-                Existing local chats, session state, and saved tab mappings from older versions will be cleared.
+                <label class="field" id="passphrase-confirm-field" hidden>
+                    <span class="field-label">Confirm</span>
+                    <input
+                        id="passphrase-confirm"
+                        type="password"
+                        autocomplete="new-password"
+                        placeholder="Confirm passphrase"
+                    />
+                </label>
+                <div
+                    class="prompt-status is-error"
+                    id="passphrase-error"
+                    aria-live="assertive"
+                    hidden
+                ></div>
+            </div>
+            <div class="modal-actions">
+                <button class="ghost-button" id="passphrase-cancel" type="button">Cancel</button>
+                <button class="primary-button" id="passphrase-submit" type="button">Unlock</button>
             </div>
         </div>
-        <div class="modal-actions">
-            <button class="ghost-button danger" id="schema-reset-confirm" type="button">Reset and continue</button>
-        </div>
-    </div>
-    <div class="modal" id="attachments-modal" role="dialog" aria-modal="true" aria-labelledby="attachments-modal-title" hidden>
-        <div class="modal-header">
-            <div class="modal-title" id="attachments-modal-title">Attachments</div>
-            <button class="icon-button" id="attachments-modal-close" type="button" aria-label="Close attachment notice">
-                <span class="material-symbols-rounded">close</span>
-            </button>
-        </div>
-        <div class="modal-body">
-            <div class="modal-text" id="attachments-modal-text"></div>
-        </div>
-        <div class="modal-actions">
-            <button class="ghost-button" id="attachments-modal-cancel" type="button">Cancel</button>
-            <button class="primary-button" id="attachments-modal-ok" type="button">OK</button>
-        </div>
-    </div>
 
-    <script src="runtime/protocolV3.js"></script>
-    <script src="runtime/sidepanel/actions.js"></script>
-    <script src="runtime/sidepanel/reducer.js"></script>
-    <script src="runtime/sidepanel/store.js"></script>
-    <script src="runtime/sidepanel/routeBuilder.js"></script>
-    <script src="runtime/sidepanel/transcriptView.js"></script>
-    <script src="runtime/sidepanel/services/backgroundClient.js"></script>
-    <script src="runtime/sidepanel/controllers/sessionController.js"></script>
-    <script src="runtime/sidepanel/controllers/historyController.js"></script>
-    <script src="runtime/sidepanel/controllers/schemaController.js"></script>
-    <script src="sidepanel.js"></script>
-</body>
+        <div class="modal-backdrop" id="modal-backdrop" hidden></div>
+        <div class="modal-backdrop" id="schema-reset-backdrop" hidden></div>
+        <div
+            class="modal"
+            id="schema-reset-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="schema-reset-title"
+            hidden
+        >
+            <div class="modal-header">
+                <div class="modal-title" id="schema-reset-title">Upgrade required</div>
+            </div>
+            <div class="modal-body">
+                <div class="modal-text">
+                    This version requires a one-time local data reset to complete the v3
+                    architecture upgrade. Existing local chats, session state, and saved tab
+                    mappings from older versions will be cleared.
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="ghost-button danger" id="schema-reset-confirm" type="button">
+                    Reset and continue
+                </button>
+            </div>
+        </div>
+        <div
+            class="modal"
+            id="attachments-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="attachments-modal-title"
+            hidden
+        >
+            <div class="modal-header">
+                <div class="modal-title" id="attachments-modal-title">Attachments</div>
+                <button
+                    class="icon-button"
+                    id="attachments-modal-close"
+                    type="button"
+                    aria-label="Close attachment notice"
+                >
+                    <span class="material-symbols-rounded">close</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-text" id="attachments-modal-text"></div>
+            </div>
+            <div class="modal-actions">
+                <button class="ghost-button" id="attachments-modal-cancel" type="button">
+                    Cancel
+                </button>
+                <button class="primary-button" id="attachments-modal-ok" type="button">OK</button>
+            </div>
+        </div>
+
+        <script src="runtime/protocolV3.js"></script>
+        <script src="runtime/sidepanel/actions.js"></script>
+        <script src="runtime/sidepanel/reducer.js"></script>
+        <script src="runtime/sidepanel/store.js"></script>
+        <script src="runtime/sidepanel/routeBuilder.js"></script>
+        <script src="runtime/sidepanel/transcriptView.js"></script>
+        <script src="runtime/sidepanel/services/backgroundClient.js"></script>
+        <script src="runtime/sidepanel/controllers/sessionController.js"></script>
+        <script src="runtime/sidepanel/controllers/historyController.js"></script>
+        <script src="runtime/sidepanel/controllers/schemaController.js"></script>
+        <script src="sidepanel.js"></script>
+    </body>
 </html>

@@ -219,8 +219,15 @@
                           .replace(/\s+/g, ' ')
                           .trim();
 
+        const roleKey = String(message.role || message.llm || 'system')
+            .trim()
+            .toLowerCase();
         const container = doc.createElement('div');
-        container.className = `message ${message.role || message.llm || 'system'}`;
+        container.className = `message ${roleKey || 'system'}`;
+        container.dataset.provider = roleKey || 'system';
+        if (roleKey && roleKey !== 'user' && roleKey !== 'system') {
+            container.classList.add('assistant');
+        }
 
         const meta = doc.createElement('div');
         meta.className = 'message-meta';
@@ -230,6 +237,7 @@
         role.textContent = formatRoleLabel(message.role || message.llm || 'system');
 
         const label = doc.createElement('span');
+        label.className = 'message-label';
         const agent = normalizeInlineText(message.agentLabel || '');
         const round = message.roundIndex ? `Round ${message.roundIndex}` : null;
         const turn = message.turnIndex ? `Turn ${message.turnIndex}` : null;

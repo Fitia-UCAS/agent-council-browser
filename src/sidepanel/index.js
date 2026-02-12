@@ -93,6 +93,9 @@ const initialState = {
     attachments: [],
     attachmentsLoading: false,
     attachmentsWarning: '',
+    pendingTranscriptEntries: [],
+    uiPrefs: null,
+    lastTemplateFocusId: 'prompt-intermediary',
 };
 const uiReducer = sidepanelReducerApi ? sidepanelReducerApi.reducer : null;
 const uiStore = sidepanelStoreApi ? sidepanelStoreApi.createUiStore(initialState, uiReducer) : null;
@@ -126,6 +129,41 @@ const HISTORY_PAGE_SIZE = 60;
 
 const ROUTE_STORAGE_KEY_V1 = 'mlc_last_route_v1';
 const ROUTE_STORAGE_KEY_V2 = 'mlc_last_route_v2';
+const UI_PREFS_STORAGE_KEY = 'mlc_ui_preferences_v1';
+const TEMPLATE_MODE_GUIDED = 'guided';
+const TEMPLATE_MODE_ADVANCED = 'advanced';
+const TEMPLATE_PRESET_CUSTOM = 'custom';
+const TEMPLATE_PRESETS = {
+    balanced: {
+        header: `You will participate in a multi-agent debate with {other_llm} over {rounds} iterations to produce the most accurate answer for the user.
+
+Guidelines:
+- Be precise and objective.
+- Critique constructively and improve the answer each round.
+- Call out uncertainty briefly when needed.`,
+        intermediary_message: `Improve the answer for iteration {round}/{rounds}:
+- Short critique of gaps
+- Revised answer with concrete fixes`,
+        final_message: 'Provide your final best answer for the user. Output only the final answer.',
+    },
+    concise: {
+        header: `You are in a focused debate with {other_llm} for {rounds} iterations.
+Prioritize factual correctness and brevity.`,
+        intermediary_message: `Iteration {round}/{rounds}: list only essential corrections, then provide a tighter revised answer.`,
+        final_message: 'Return a concise final answer only. No critique section.',
+    },
+    final_only: {
+        header: `You will refine with {other_llm} over {rounds} iterations and converge on one final high-quality answer.`,
+        intermediary_message:
+            'Use this round to validate facts and improve structure. Keep internal critique minimal.',
+        final_message:
+            'Provide only the final polished answer to the user. No process or critique.',
+    },
+};
+const DEFAULT_UI_PREFS = Object.freeze({
+    templateEditorMode: TEMPLATE_MODE_GUIDED,
+    templatePreset: TEMPLATE_PRESET_CUSTOM,
+});
 
 const ATTACHMENTS_MAX_FILES = 10;
 const ATTACHMENTS_MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -252,6 +290,35 @@ function storageSet(items) {
             resolve();
         }
     });
+}
+
+function normalizeUiPrefs(input) {
+    const raw = input && typeof input === 'object' ? input : {};
+    const mode =
+        raw.templateEditorMode === TEMPLATE_MODE_ADVANCED
+            ? TEMPLATE_MODE_ADVANCED
+            : TEMPLATE_MODE_GUIDED;
+    const preset = Object.prototype.hasOwnProperty.call(TEMPLATE_PRESETS, raw.templatePreset)
+        ? raw.templatePreset
+        : TEMPLATE_PRESET_CUSTOM;
+    return {
+        templateEditorMode: mode,
+        templatePreset: preset,
+    };
+}
+
+async function loadUiPreferences() {
+    const data = await storageGet([UI_PREFS_STORAGE_KEY]);
+    const prefs = normalizeUiPrefs(data?.[UI_PREFS_STORAGE_KEY]);
+    state.uiPrefs = prefs;
+    return prefs;
+}
+
+function persistUiPreferences(nextPrefs) {
+    const prefs = normalizeUiPrefs(nextPrefs);
+    state.uiPrefs = prefs;
+    storageSet({ [UI_PREFS_STORAGE_KEY]: prefs });
+    return prefs;
 }
 
 function cacheSession(session) {
@@ -1406,7 +1473,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.promptInput = document.getElementById('prompt-input');
     elements.sendButton = document.getElementById('send-button');
     elements.charCount = document.getElementById('char-count');
-    elements.refreshProfiles = document.getElementById('refresh-profiles');
     elements.autoScroll = document.getElementById('auto-scroll');
     elements.timeline = document.getElementById('timeline');
     elements.emptyState = document.getElementById('empty-state');
@@ -1443,11 +1509,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.attachmentClear = document.getElementById('attachment-clear');
     elements.attachmentList = document.getElementById('attachment-list');
 
-    elements.connectionsList = document.getElementById('connections-list');
-    elements.connectionLabelByProvider = {};
-    elements.connectionFocusButtonByProvider = {};
-    elements.profileListByProvider = {};
-
     elements.chatsButton = document.getElementById('chats-button');
     elements.newChatButton = document.getElementById('new-chat-button');
     elements.chatLockButton = document.getElementById('chat-lock-button');
@@ -1475,6 +1536,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.promptSaveButton = document.getElementById('prompt-save');
     elements.promptResetButton = document.getElementById('prompt-reset');
     elements.promptStatus = document.getElementById('prompt-status');
+    elements.promptModeGuidedButton = document.getElementById('prompt-mode-guided');
+    elements.promptModeAdvancedButton = document.getElementById('prompt-mode-advanced');
+    elements.promptTemplateFields = document.getElementById('prompt-template-fields');
+    elements.promptGuidedPresets = document.getElementById('prompt-guided-presets');
+    elements.promptTokenBlock = document.getElementById('prompt-token-block');
+    elements.promptPresetButtons = Array.from(
+        document.querySelectorAll('.template-preset-button[data-preset]')
+    );
+    elements.promptTokenButtons = Array.from(
+        document.querySelectorAll('.template-token[data-token]')
+    );
+    elements.promptAdvancedPanel = document.getElementById('prompt-advanced-panel');
+    elements.promptAdvancedJson = document.getElementById('prompt-advanced-json');
+    elements.promptAdvancedHelp = document.getElementById('prompt-advanced-help');
 
     elements.historyConfigureButton = document.getElementById('history-configure');
     elements.historyUnlockButton = document.getElementById('history-unlock');
@@ -1513,8 +1588,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.attachmentsModalClose = document.getElementById('attachments-modal-close');
 
     bindEvents();
-    ensureProviderMaps();
-    renderProviderSettingsUi();
+    await loadUiPreferences();
+    updatePromptEditorUi();
     await loadRoutePreference();
     renderRouteUi();
     scheduleRouteConnectionStatusCheck();
@@ -1586,10 +1661,6 @@ function bindEvents() {
             const id = removeButton.dataset.attachmentId;
             if (id) removeAttachment(id);
         });
-    }
-
-    if (elements.refreshProfiles) {
-        elements.refreshProfiles.addEventListener('click', requestProfiles);
     }
 
     if (elements.routeButton) {
@@ -1724,14 +1795,6 @@ function bindEvents() {
         });
     }
 
-    if (elements.connectionsList) {
-        elements.connectionsList.addEventListener('click', handleConnectionsListClick);
-    }
-
-    if (elements.profileColumns) {
-        elements.profileColumns.addEventListener('click', handleProfileListClick);
-    }
-
     if (elements.resumeButton) {
         elements.resumeButton.addEventListener('click', resumeSession);
     }
@@ -1756,8 +1819,88 @@ function bindEvents() {
         elements.promptResetButton.addEventListener('click', resetPromptTemplates);
     }
 
-    if (elements.promptJsonSaveButton) {
-        elements.promptJsonSaveButton.addEventListener('click', savePromptTemplatesJson);
+    if (elements.promptModeGuidedButton) {
+        elements.promptModeGuidedButton.addEventListener('click', () => {
+            setTemplateEditorMode(TEMPLATE_MODE_GUIDED);
+        });
+    }
+
+    if (elements.promptModeAdvancedButton) {
+        elements.promptModeAdvancedButton.addEventListener('click', () => {
+            setTemplateEditorMode(TEMPLATE_MODE_ADVANCED);
+        });
+    }
+
+    if (Array.isArray(elements.promptPresetButtons)) {
+        elements.promptPresetButtons.forEach((button) => {
+            button.addEventListener('click', () => {
+                applyPromptPreset(button.dataset.preset || '');
+            });
+        });
+    }
+
+    if (Array.isArray(elements.promptTokenButtons)) {
+        elements.promptTokenButtons.forEach((button) => {
+            button.addEventListener('click', () => {
+                insertTemplateToken(button.dataset.token || '');
+            });
+        });
+    }
+
+    if (elements.promptInitial) {
+        elements.promptInitial.addEventListener('focus', () => setTemplateFocus('prompt-initial'));
+        elements.promptInitial.addEventListener('input', () => {
+            setTemplatePresetSelection(detectTemplatePreset(getPromptGuidedValues()), {
+                persist: false,
+            });
+            syncAdvancedPromptEditor(
+                buildPromptConfigFromGuided(
+                    state.promptConfig && typeof state.promptConfig === 'object'
+                        ? state.promptConfig
+                        : {}
+                )
+            );
+        });
+    }
+    if (elements.promptIntermediary) {
+        elements.promptIntermediary.addEventListener('focus', () =>
+            setTemplateFocus('prompt-intermediary')
+        );
+        elements.promptIntermediary.addEventListener('input', () => {
+            setTemplatePresetSelection(detectTemplatePreset(getPromptGuidedValues()), {
+                persist: false,
+            });
+            syncAdvancedPromptEditor(
+                buildPromptConfigFromGuided(
+                    state.promptConfig && typeof state.promptConfig === 'object'
+                        ? state.promptConfig
+                        : {}
+                )
+            );
+        });
+    }
+    if (elements.promptFinal) {
+        elements.promptFinal.addEventListener('focus', () => setTemplateFocus('prompt-final'));
+        elements.promptFinal.addEventListener('input', () => {
+            setTemplatePresetSelection(detectTemplatePreset(getPromptGuidedValues()), {
+                persist: false,
+            });
+            syncAdvancedPromptEditor(
+                buildPromptConfigFromGuided(
+                    state.promptConfig && typeof state.promptConfig === 'object'
+                        ? state.promptConfig
+                        : {}
+                )
+            );
+        });
+    }
+    if (elements.promptAdvancedJson) {
+        elements.promptAdvancedJson.addEventListener('focus', () =>
+            setTemplateFocus('prompt-advanced-json')
+        );
+        elements.promptAdvancedJson.addEventListener('input', () => {
+            setTemplatePresetSelection(TEMPLATE_PRESET_CUSTOM, { persist: false });
+        });
     }
 
     if (elements.chatLockButton) {
@@ -2535,20 +2678,189 @@ function setPromptStatus(text, isError = false) {
     elements.promptStatus.classList.toggle('is-error', Boolean(isError));
 }
 
-function getIntermediaryPlaceholderWarning(config) {
-    const debate = config?.debate && typeof config.debate === 'object' ? config.debate : {};
-    const templates = [
-        ['turn2', debate.turn2],
-        ['turn3plus_first', debate.turn3plus_first],
-        ['turn3plus_second', debate.turn3plus_second],
-    ];
-    const missing = templates
-        .filter(
-            ([, value]) => typeof value !== 'string' || !value.includes('{intermediary_message}')
+function getTemplateEditorMode() {
+    return state.uiPrefs?.templateEditorMode === TEMPLATE_MODE_ADVANCED
+        ? TEMPLATE_MODE_ADVANCED
+        : TEMPLATE_MODE_GUIDED;
+}
+
+function normalizeTemplatePresetId(value) {
+    if (Object.prototype.hasOwnProperty.call(TEMPLATE_PRESETS, value)) return value;
+    return TEMPLATE_PRESET_CUSTOM;
+}
+
+function getPromptGuidedValues() {
+    return {
+        header: String(elements.promptInitial?.value || '').trim(),
+        intermediary_message: String(elements.promptIntermediary?.value || '').trim(),
+        final_message: String(elements.promptFinal?.value || '').trim(),
+    };
+}
+
+function detectTemplatePreset(values) {
+    const candidate = values && typeof values === 'object' ? values : {};
+    const header = String(candidate.header || '').trim();
+    const intermediary = String(candidate.intermediary_message || '').trim();
+    const finalMessage = String(candidate.final_message || '').trim();
+    const presetId = Object.keys(TEMPLATE_PRESETS).find((id) => {
+        const preset = TEMPLATE_PRESETS[id];
+        return (
+            String(preset.header || '').trim() === header &&
+            String(preset.intermediary_message || '').trim() === intermediary &&
+            String(preset.final_message || '').trim() === finalMessage
+        );
+    });
+    return normalizeTemplatePresetId(presetId || TEMPLATE_PRESET_CUSTOM);
+}
+
+function setTemplatePresetSelection(presetId, { persist = false } = {}) {
+    const nextPreset = normalizeTemplatePresetId(presetId);
+    const current = normalizeUiPrefs(state.uiPrefs || DEFAULT_UI_PREFS);
+    const nextPrefs = { ...current, templatePreset: nextPreset };
+    if (persist) {
+        persistUiPreferences(nextPrefs);
+    } else {
+        state.uiPrefs = nextPrefs;
+    }
+    updatePromptEditorUi();
+}
+
+function setTemplateEditorMode(mode, { persist = true } = {}) {
+    const nextMode =
+        mode === TEMPLATE_MODE_ADVANCED ? TEMPLATE_MODE_ADVANCED : TEMPLATE_MODE_GUIDED;
+    const current = normalizeUiPrefs(state.uiPrefs || DEFAULT_UI_PREFS);
+    const nextPrefs = { ...current, templateEditorMode: nextMode };
+    if (persist) {
+        persistUiPreferences(nextPrefs);
+    } else {
+        state.uiPrefs = nextPrefs;
+    }
+    updatePromptEditorUi();
+}
+
+function updatePromptEditorUi() {
+    const mode = getTemplateEditorMode();
+    const prefs = normalizeUiPrefs(state.uiPrefs || DEFAULT_UI_PREFS);
+
+    if (elements.promptModeGuidedButton) {
+        const active = mode === TEMPLATE_MODE_GUIDED;
+        elements.promptModeGuidedButton.classList.toggle('is-active', active);
+        elements.promptModeGuidedButton.setAttribute('aria-selected', active ? 'true' : 'false');
+    }
+    if (elements.promptModeAdvancedButton) {
+        const active = mode === TEMPLATE_MODE_ADVANCED;
+        elements.promptModeAdvancedButton.classList.toggle('is-active', active);
+        elements.promptModeAdvancedButton.setAttribute('aria-selected', active ? 'true' : 'false');
+    }
+
+    if (elements.promptTemplateFields) {
+        elements.promptTemplateFields.hidden = mode === TEMPLATE_MODE_ADVANCED;
+    }
+    if (elements.promptGuidedPresets) {
+        elements.promptGuidedPresets.hidden = mode === TEMPLATE_MODE_ADVANCED;
+    }
+    if (elements.promptTokenBlock) {
+        elements.promptTokenBlock.hidden = mode === TEMPLATE_MODE_ADVANCED;
+    }
+    if (elements.promptAdvancedPanel) {
+        elements.promptAdvancedPanel.open = mode === TEMPLATE_MODE_ADVANCED;
+    }
+
+    if (Array.isArray(elements.promptPresetButtons)) {
+        elements.promptPresetButtons.forEach((button) => {
+            const presetId = normalizeTemplatePresetId(button?.dataset?.preset || '');
+            button.classList.toggle('is-active', prefs.templatePreset === presetId);
+        });
+    }
+}
+
+function syncAdvancedPromptEditor(config) {
+    if (!elements.promptAdvancedJson) return;
+    const safe = config && typeof config === 'object' ? config : {};
+    elements.promptAdvancedJson.value = `${JSON.stringify(safe, null, 2)}\n`;
+}
+
+function setTemplateFocus(templateId) {
+    state.lastTemplateFocusId = templateId || 'prompt-intermediary';
+}
+
+function getTemplateFocusElement() {
+    if (getTemplateEditorMode() === TEMPLATE_MODE_ADVANCED && elements.promptAdvancedJson) {
+        return elements.promptAdvancedJson;
+    }
+    const focusId = state.lastTemplateFocusId || 'prompt-intermediary';
+    if (focusId === 'prompt-initial') return elements.promptInitial || null;
+    if (focusId === 'prompt-final') return elements.promptFinal || null;
+    if (focusId === 'prompt-intermediary') return elements.promptIntermediary || null;
+    return elements.promptIntermediary || elements.promptInitial || elements.promptFinal || null;
+}
+
+function insertTemplateToken(token) {
+    const safeToken = String(token || '').trim();
+    if (!safeToken) return;
+    const field = getTemplateFocusElement();
+    if (!field) return;
+
+    const value = String(field.value || '');
+    const start = Number.isFinite(field.selectionStart) ? field.selectionStart : value.length;
+    const end = Number.isFinite(field.selectionEnd) ? field.selectionEnd : value.length;
+    field.value = `${value.slice(0, start)}${safeToken}${value.slice(end)}`;
+    if (typeof field.setSelectionRange === 'function') {
+        const caret = start + safeToken.length;
+        field.setSelectionRange(caret, caret);
+    }
+    field.focus();
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    setPromptStatus(`Inserted ${safeToken}.`);
+}
+
+function applyPromptPreset(presetId) {
+    const normalizedPreset = normalizeTemplatePresetId(presetId);
+    const preset = TEMPLATE_PRESETS[normalizedPreset];
+    if (!preset) return;
+    if (elements.promptInitial) elements.promptInitial.value = preset.header;
+    if (elements.promptIntermediary)
+        elements.promptIntermediary.value = preset.intermediary_message;
+    if (elements.promptFinal) elements.promptFinal.value = preset.final_message;
+    syncAdvancedPromptEditor(
+        buildPromptConfigFromGuided(
+            state.promptConfig && typeof state.promptConfig === 'object' ? state.promptConfig : {}
         )
-        .map(([key]) => key);
-    if (missing.length === 0) return null;
-    return `Note: your templates (${missing.join(', ')}) do not include {intermediary_message}; the intermediary/final fields may have no effect unless you reset to defaults.`;
+    );
+    setTemplatePresetSelection(normalizedPreset, { persist: true });
+    setPromptStatus('Preset applied. Review and click Save to persist.');
+}
+
+function buildPromptConfigFromGuided(baseConfig) {
+    const config = baseConfig && typeof baseConfig === 'object' ? baseConfig : {};
+    const baseDebate = config.debate && typeof config.debate === 'object' ? config.debate : {};
+    const guided = getPromptGuidedValues();
+    return {
+        ...config,
+        schemaVersion: 1,
+        debate: {
+            ...baseDebate,
+            header: guided.header,
+            intermediary_message: guided.intermediary_message,
+            final_message: guided.final_message,
+        },
+    };
+}
+
+function parsePromptConfigFromAdvancedEditor() {
+    const raw = String(elements.promptAdvancedJson?.value || '').trim();
+    if (!raw) throw new Error('Advanced JSON is empty.');
+    let parsed = null;
+    try {
+        parsed = JSON.parse(raw);
+    } catch (error) {
+        throw new Error('Advanced JSON is invalid.');
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Advanced JSON must be an object.');
+    }
+    if (!parsed.schemaVersion) parsed.schemaVersion = 1;
+    return parsed;
 }
 
 function loadPromptTemplates() {
@@ -2570,33 +2882,35 @@ function loadPromptTemplates() {
         if (elements.promptIntermediary)
             elements.promptIntermediary.value = debate.intermediary_message || '';
         if (elements.promptFinal) elements.promptFinal.value = debate.final_message || '';
+        syncAdvancedPromptEditor(state.promptConfig);
 
-        const sourceLabel =
+        const detectedPreset = detectTemplatePreset(getPromptGuidedValues());
+        setTemplatePresetSelection(detectedPreset, { persist: true });
+        updatePromptEditorUi();
+
+        setPromptStatus(
             response.source === 'override'
-                ? 'Editing custom prompts.'
-                : 'Editing defaults (no override saved).';
-        const warning = getIntermediaryPlaceholderWarning(state.promptConfig);
-        setPromptStatus(warning ? `${sourceLabel}\n${warning}` : sourceLabel);
+                ? 'Loaded custom templates.'
+                : 'Loaded default templates (no override saved).'
+        );
     });
 }
 
 function savePromptTemplates() {
     const baseConfig =
         state.promptConfig && typeof state.promptConfig === 'object' ? state.promptConfig : {};
-    const baseDebate =
-        baseConfig.debate && typeof baseConfig.debate === 'object' ? baseConfig.debate : {};
+    let nextConfig = null;
 
-    const nextConfig = {
-        ...baseConfig,
-        schemaVersion: 1,
-        debate: {
-            ...baseDebate,
-            header: elements.promptInitial?.value ?? baseDebate.header ?? '',
-            intermediary_message:
-                elements.promptIntermediary?.value ?? baseDebate.intermediary_message ?? '',
-            final_message: elements.promptFinal?.value ?? baseDebate.final_message ?? '',
-        },
-    };
+    if (getTemplateEditorMode() === TEMPLATE_MODE_ADVANCED) {
+        try {
+            nextConfig = parsePromptConfigFromAdvancedEditor();
+        } catch (error) {
+            setPromptStatus(`Error: ${error?.message || 'Invalid advanced JSON.'}`, true);
+            return;
+        }
+    } else {
+        nextConfig = buildPromptConfigFromGuided(baseConfig);
+    }
 
     sendMessage({ type: 'SET_DEBATE_PROMPTS', config: nextConfig }, (response) => {
         if (!response || response.ok === false) {
@@ -2615,9 +2929,11 @@ function savePromptTemplates() {
         if (elements.promptIntermediary)
             elements.promptIntermediary.value = debate.intermediary_message || '';
         if (elements.promptFinal) elements.promptFinal.value = debate.final_message || '';
+        syncAdvancedPromptEditor(state.promptConfig);
 
-        const warning = getIntermediaryPlaceholderWarning(state.promptConfig);
-        setPromptStatus(warning ? `Saved custom prompts.\n${warning}` : 'Saved custom prompts.');
+        const detectedPreset = detectTemplatePreset(getPromptGuidedValues());
+        setTemplatePresetSelection(detectedPreset, { persist: true });
+        setPromptStatus('Saved templates.');
     });
 }
 
@@ -3125,7 +3441,6 @@ function setSessionState({ running, paused }) {
 
     if (elements.routeButton) elements.routeButton.disabled = locked;
     if (locked && isRoutePopoverOpen()) closeRoutePopover();
-    if (elements.refreshProfiles) elements.refreshProfiles.disabled = locked;
     if (elements.attachmentButton)
         elements.attachmentButton.disabled = locked || state.attachmentsLoading;
     if (elements.attachmentInput)
@@ -3171,7 +3486,6 @@ function requestProviderCapabilities() {
         if (!response || response.ok === false) return;
         state.providerCapabilities = response.capabilities || null;
         ensureProviderMaps();
-        renderProviderSettingsUi();
         renderRouteUi();
         updateAttachmentsUi();
         updateSendState();
@@ -3764,124 +4078,6 @@ function connectAllProviders() {
     }
 }
 
-function handleConnectionsListClick(event) {
-    const button = event.target.closest('button');
-    if (!button) return;
-    const action = button.dataset.action;
-    const provider = normalizeProviderId(button.dataset.provider);
-    if (!action || !provider) return;
-
-    if (action === 'connect-provider') {
-        connectProvider(provider);
-        return;
-    }
-    if (action === 'focus-provider') {
-        focusProvider(provider);
-    }
-}
-
-function renderProviderSettingsUi() {
-    ensureProviderMaps();
-    const providers = getSupportedProviders();
-
-    if (
-        elements.connectionLabelByProvider &&
-        typeof elements.connectionLabelByProvider === 'object'
-    ) {
-        elements.connectionLabelByProvider = {};
-    } else {
-        elements.connectionLabelByProvider = {};
-    }
-    if (
-        elements.connectionFocusButtonByProvider &&
-        typeof elements.connectionFocusButtonByProvider === 'object'
-    ) {
-        elements.connectionFocusButtonByProvider = {};
-    } else {
-        elements.connectionFocusButtonByProvider = {};
-    }
-    if (elements.profileListByProvider && typeof elements.profileListByProvider === 'object') {
-        elements.profileListByProvider = {};
-    } else {
-        elements.profileListByProvider = {};
-    }
-
-    if (elements.connectionsList) {
-        elements.connectionsList.innerHTML = '';
-        providers.forEach((provider) => {
-            const row = document.createElement('div');
-            row.className = 'connection-row';
-            row.dataset.provider = provider;
-
-            const meta = document.createElement('div');
-            meta.className = 'connection-meta';
-
-            const name = document.createElement('div');
-            name.className = 'connection-name';
-            name.textContent = formatProviderLabel(provider);
-
-            const status = document.createElement('div');
-            status.className = 'connection-status';
-            status.textContent = 'Checking…';
-
-            meta.appendChild(name);
-            meta.appendChild(status);
-
-            const actions = document.createElement('div');
-            actions.className = 'connection-actions';
-
-            const connect = document.createElement('button');
-            connect.className = 'ghost-button';
-            connect.type = 'button';
-            connect.textContent = 'Connect';
-            connect.dataset.action = 'connect-provider';
-            connect.dataset.provider = provider;
-
-            const focus = document.createElement('button');
-            focus.className = 'ghost-button';
-            focus.type = 'button';
-            focus.textContent = 'Focus';
-            focus.dataset.action = 'focus-provider';
-            focus.dataset.provider = provider;
-
-            actions.appendChild(connect);
-            actions.appendChild(focus);
-
-            row.appendChild(meta);
-            row.appendChild(actions);
-            elements.connectionsList.appendChild(row);
-
-            elements.connectionLabelByProvider[provider] = status;
-            elements.connectionFocusButtonByProvider[provider] = focus;
-        });
-    }
-
-    if (elements.profileColumns) {
-        elements.profileColumns.innerHTML = '';
-        providers.forEach((provider) => {
-            const column = document.createElement('section');
-            column.className = 'profile-column';
-
-            const title = document.createElement('div');
-            title.className = 'profile-column-title';
-            title.textContent = `${formatProviderLabel(provider)} connections`;
-
-            const list = document.createElement('div');
-            list.className = 'profile-list';
-            list.dataset.provider = provider;
-
-            column.appendChild(title);
-            column.appendChild(list);
-            elements.profileColumns.appendChild(column);
-
-            elements.profileListByProvider[provider] = list;
-        });
-    }
-
-    renderProfileLists();
-    updateProviderUi();
-}
-
 function updateProviderUi() {
     ensureProviderMaps();
     const providers = getSupportedProviders();
@@ -3891,36 +4087,9 @@ function updateProviderUi() {
     providers.forEach((provider) => {
         const ready = isProviderReady(provider);
         const connecting = Boolean(state.connecting?.[provider]);
-        const profile = getDefaultProfile(provider);
-        const modelHint = profile?.modelHint ? ` • ${profile.modelHint}` : '';
 
         if (ready) readyCount += 1;
         if (connecting) connectingCount += 1;
-
-        let labelText = 'Not connected';
-        if (connecting) {
-            labelText = 'Connecting…';
-        } else if (profile?.inUseBySessionId) {
-            labelText = 'In use';
-        } else if (ready) {
-            labelText = `Connected${modelHint}`;
-        } else if (profile?.status === 'wrong_host') {
-            labelText = 'Wrong host';
-        } else if (profile?.status === 'unknown') {
-            labelText = 'Loading…';
-        } else if (profile?.status === 'ok') {
-            labelText = 'Waiting…';
-        }
-
-        const labelEl = elements.connectionLabelByProvider?.[provider];
-        if (labelEl) {
-            labelEl.textContent = labelText;
-        }
-
-        const focusButton = elements.connectionFocusButtonByProvider?.[provider];
-        if (focusButton) {
-            focusButton.disabled = !profile?.tabId;
-        }
     });
 
     if (elements.providersButton) {
@@ -4329,6 +4498,7 @@ async function startSession() {
 
 function stopSession() {
     if (!state.running && !state.paused) return;
+    clearPendingTranscriptEntries();
     setSessionStatus('Stopping session...');
     if (!state.sessionId) {
         state.stopRequested = true;
@@ -4358,7 +4528,6 @@ function handleBackgroundMessage(message) {
         case 'PROVIDER_CAPABILITIES':
             state.providerCapabilities = message.capabilities || null;
             ensureProviderMaps();
-            renderProviderSettingsUi();
             renderRouteUi();
             updateAttachmentsUi();
             updateSendState();
@@ -4412,6 +4581,7 @@ function handleBackgroundMessage(message) {
                         ? message.profileIds
                         : state.sessionProfiles;
                 ensureProviderMaps();
+                clearPendingTranscriptEntries();
                 setSessionState({ running: true, paused: false });
                 setSessionStatus(`Running round 1 of ${message.rounds}`);
                 if (message.chatId && message.chatId !== state.activeChatId) {
@@ -4534,194 +4704,9 @@ function handleProfileList(message) {
             state.defaults[provider] = null;
         }
     });
-    if (
-        elements.profileColumns &&
-        (!elements.profileListByProvider ||
-            Object.keys(elements.profileListByProvider).length === 0)
-    ) {
-        renderProviderSettingsUi();
-    }
-    renderProfileLists();
     updateProviderUi();
     updateSendState();
     scheduleRouteConnectionStatusCheck();
-}
-
-function renderProfileLists() {
-    const providers = getSupportedProviders();
-    providers.forEach((provider) => {
-        renderProfileList(elements.profileListByProvider?.[provider] || null, provider);
-    });
-}
-
-function renderProfileList(container, provider) {
-    if (!container) return;
-    container.innerHTML = '';
-    const profiles = getProfilesForProvider(provider);
-    if (profiles.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'profile-empty';
-        empty.textContent = `No ${formatProviderLabel(provider)} profiles yet.`;
-        container.appendChild(empty);
-        return;
-    }
-
-    profiles.forEach((profile) => {
-        container.appendChild(buildProfileCard(profile));
-    });
-}
-
-function buildProfileCard(profile) {
-    const card = document.createElement('div');
-    card.className = `profile-card status-${profile.status || 'unknown'}`;
-    card.dataset.profileId = profile.profileId;
-
-    const header = document.createElement('div');
-    header.className = 'profile-header';
-
-    const title = document.createElement('div');
-    title.className = 'profile-title';
-    title.textContent = profile.label || `${formatProviderLabel(profile.provider)} profile`;
-
-    const status = document.createElement('div');
-    status.className = `status-pill status-${profile.status || 'unknown'}`;
-    status.textContent = formatStatusLabel(profile.status);
-
-    header.appendChild(title);
-    header.appendChild(status);
-
-    const badges = document.createElement('div');
-    badges.className = 'profile-badges';
-
-    if (state.defaults[profile.provider] === profile.profileId) {
-        const badge = document.createElement('span');
-        badge.className = 'badge badge-default';
-        badge.textContent = 'Default';
-        badges.appendChild(badge);
-    }
-    if (profile.inUseBySessionId) {
-        const badge = document.createElement('span');
-        badge.className = 'badge badge-active';
-        badge.textContent = 'In use';
-        badges.appendChild(badge);
-    }
-
-    const meta = document.createElement('div');
-    meta.className = 'profile-meta';
-    const tabFullLabel = (profile.lastKnownTitle || profile.lastKnownUrl || '').trim();
-    meta.appendChild(buildMetaLine('Tab', formatProfileTabLabel(profile), tabFullLabel));
-    if (profile.modelHint) {
-        const modelHint = normalizeInlineText(profile.modelHint);
-        meta.appendChild(buildMetaLine('Model', `${modelHint} (best effort)`, modelHint));
-    }
-    if (profile.windowId !== null && profile.windowId !== undefined) {
-        meta.appendChild(buildMetaLine('Window', String(profile.windowId)));
-    }
-
-    const actions = document.createElement('div');
-    actions.className = 'profile-actions-row';
-    actions.appendChild(buildActionButton('Focus', 'focus', !profile.tabId));
-    actions.appendChild(buildActionButton('Set default', 'default'));
-    actions.appendChild(buildActionButton('Rename', 'rename'));
-    actions.appendChild(buildActionButton('Rebind', 'rebind'));
-    actions.appendChild(buildActionButton('Remove', 'remove', false, true));
-
-    card.appendChild(header);
-    if (badges.childNodes.length) {
-        card.appendChild(badges);
-    }
-    card.appendChild(meta);
-    card.appendChild(actions);
-    return card;
-}
-
-function buildMetaLine(label, value, title = '') {
-    const line = document.createElement('div');
-    line.className = 'profile-meta-line';
-    const strong = document.createElement('span');
-    strong.className = 'profile-meta-label';
-    strong.textContent = `${label}:`;
-    const text = document.createElement('span');
-    text.className = 'profile-meta-value';
-    text.textContent = value;
-    const tooltip = title ? String(title) : String(value || '');
-    if (tooltip) {
-        text.title = tooltip;
-    }
-    line.appendChild(strong);
-    line.appendChild(text);
-    return line;
-}
-
-function buildActionButton(label, action, disabled = false, danger = false) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = `ghost-button${danger ? ' danger' : ''}`;
-    button.textContent = label;
-    button.dataset.action = action;
-    button.disabled = disabled;
-    return button;
-}
-
-function handleProfileListClick(event) {
-    const button = event.target.closest('button');
-    if (!button || !button.dataset.action) return;
-    const card = button.closest('[data-profile-id]');
-    if (!card) return;
-    const profile = getProfileById(card.dataset.profileId);
-    if (!profile) return;
-
-    switch (button.dataset.action) {
-        case 'focus':
-            if (profile.tabId) {
-                sendMessage({ type: 'FOCUS_TAB', tabId: profile.tabId }, handleActionResponse);
-            }
-            break;
-        case 'default':
-            sendMessage(
-                {
-                    type: 'SET_DEFAULT_PROFILE',
-                    provider: profile.provider,
-                    profileId: profile.profileId,
-                },
-                handleActionResponse
-            );
-            break;
-        case 'rename': {
-            const nextLabel = window.prompt('Rename profile', profile.label || '');
-            if (!nextLabel || nextLabel.trim() === profile.label) return;
-            sendMessage(
-                {
-                    type: 'UPDATE_TAB_PROFILE',
-                    profileId: profile.profileId,
-                    patch: { label: nextLabel.trim() },
-                },
-                handleActionResponse
-            );
-            break;
-        }
-        case 'rebind':
-            sendMessage(
-                {
-                    type: 'CREATE_PROFILE_FROM_ACTIVE_TAB',
-                    provider: profile.provider,
-                    profileId: profile.profileId,
-                },
-                handleActionResponse
-            );
-            break;
-        case 'remove': {
-            const confirmed = window.confirm(`Remove profile "${profile.label}"?`);
-            if (!confirmed) return;
-            sendMessage(
-                { type: 'DELETE_TAB_PROFILE', profileId: profile.profileId },
-                handleActionResponse
-            );
-            break;
-        }
-        default:
-            break;
-    }
 }
 
 function updatePausedActions() {
@@ -4783,6 +4768,7 @@ function handleConnectionStatus(message) {
 
 function hydrateSession(session) {
     if (!session || (!session.isActive && !session.isPaused)) {
+        clearPendingTranscriptEntries();
         setSessionState({ running: false, paused: false });
         state.sessionId = null;
         resetSessionProfiles();
@@ -4818,6 +4804,7 @@ function hydrateSession(session) {
     }
 
     if (session.isPaused) {
+        clearPendingTranscriptEntries();
         setSessionState({ running: false, paused: true });
         const label = normalizeInlineText(state.pausedAgentLabel || '');
         setSessionStatus(
@@ -4830,6 +4817,31 @@ function hydrateSession(session) {
                 ? `Resumed round ${session.roundIndex || 1} of ${session.rounds}`
                 : 'Idle'
         );
+
+        const participantList = Array.isArray(session.participants) ? session.participants : [];
+        const waitingAgentIds = Array.isArray(session.waitingFor)
+            ? session.waitingFor.map((id) => String(id || '').trim()).filter(Boolean)
+            : [String(session.waitingFor || '').trim()].filter(Boolean);
+        if (waitingAgentIds.length > 0) {
+            const waitingProviders = waitingAgentIds
+                .map((agentId) => {
+                    const participant = participantList.find(
+                        (item) => String(item?.agentId || '').trim() === agentId
+                    );
+                    return normalizeProviderId(participant?.provider || '');
+                })
+                .filter(Boolean);
+            setPendingTranscriptEntries(
+                buildPendingEntriesFromProgress({
+                    waitingFor: waitingProviders,
+                    waitingForAgentIds,
+                    roundIndex: Number.isFinite(session.roundIndex) ? session.roundIndex : null,
+                    totalRounds: Number.isFinite(session.rounds) ? session.rounds : null,
+                })
+            );
+        } else {
+            clearPendingTranscriptEntries();
+        }
     }
 
     if (session.chatId && session.chatId !== state.activeChatId) {
@@ -4837,8 +4849,187 @@ function hydrateSession(session) {
     }
 }
 
+function buildPendingEntriesFromProgress(message) {
+    if (!message || typeof message !== 'object') return [];
+    const roundIndex = Number.isFinite(message.roundIndex) ? message.roundIndex : null;
+    const totalRounds = Number.isFinite(message.totalRounds)
+        ? message.totalRounds
+        : Number.isFinite(message.rounds)
+          ? message.rounds
+          : null;
+
+    const waitingProviders = Array.isArray(message.waitingFor)
+        ? message.waitingFor
+              .map((provider) => normalizeProviderId(provider) || null)
+              .filter(Boolean)
+        : [normalizeProviderId(message.waitingFor) || null].filter(Boolean);
+    const waitingAgentIds = Array.isArray(message.waitingForAgentIds)
+        ? message.waitingForAgentIds.map((id) => String(id || '').trim()).filter(Boolean)
+        : [String(message.waitingForAgentId || '').trim()].filter(Boolean);
+    const explicitLabel = normalizeInlineText(message.waitingForLabel || '');
+
+    const route = state.route || getDefaultRoute();
+    const entries = [];
+
+    if (waitingAgentIds.length > 0) {
+        waitingAgentIds.forEach((agentId, index) => {
+            const routeAgent = getRouteAgentById(route, agentId);
+            const provider =
+                normalizeProviderId(routeAgent?.provider) ||
+                waitingProviders[index] ||
+                waitingProviders[0] ||
+                null;
+            const label = routeAgent
+                ? formatRouteAgentLabel(routeAgent)
+                : explicitLabel || formatProviderLabel(provider || 'provider');
+            entries.push({
+                agentId,
+                provider,
+                label,
+                roundIndex,
+                totalRounds,
+            });
+        });
+    } else if (waitingProviders.length > 0) {
+        waitingProviders.forEach((provider, index) => {
+            const label =
+                waitingProviders.length === 1 && explicitLabel
+                    ? explicitLabel
+                    : formatProviderLabel(provider || `provider_${index + 1}`);
+            entries.push({
+                agentId: null,
+                provider,
+                label,
+                roundIndex,
+                totalRounds,
+            });
+        });
+    } else if (explicitLabel) {
+        entries.push({
+            agentId: null,
+            provider: null,
+            label: explicitLabel,
+            roundIndex,
+            totalRounds,
+        });
+    }
+
+    const seen = new Set();
+    return entries.filter((entry, index) => {
+        const key = entry.agentId
+            ? `agent:${entry.agentId}`
+            : `label:${entry.label.toLowerCase()}::${entry.provider || 'none'}::${index}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function buildPendingTranscriptElement(entry) {
+    const container = document.createElement('div');
+    container.className = 'message pending is-pending';
+    if (entry?.agentId) {
+        container.dataset.pendingAgentId = entry.agentId;
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'message-meta';
+
+    const role = document.createElement('span');
+    role.className = 'message-role';
+    role.textContent = entry?.provider ? formatProviderLabel(entry.provider) : 'Agent';
+
+    const detail = document.createElement('span');
+    const roundText =
+        Number.isFinite(entry?.roundIndex) && Number.isFinite(entry?.totalRounds)
+            ? `Round ${entry.roundIndex}/${entry.totalRounds}`
+            : null;
+    detail.textContent = [normalizeInlineText(entry?.label || ''), roundText]
+        .filter(Boolean)
+        .join(' | ');
+
+    const content = document.createElement('div');
+    content.className = 'message-content pending-content';
+
+    const thinking = document.createElement('span');
+    thinking.className = 'pending-copy';
+    thinking.textContent = 'Thinking';
+
+    const dots = document.createElement('span');
+    dots.className = 'pending-dots';
+    dots.setAttribute('aria-hidden', 'true');
+    for (let i = 0; i < 3; i += 1) {
+        const dot = document.createElement('span');
+        dot.className = 'pending-dot';
+        dots.appendChild(dot);
+    }
+
+    content.appendChild(thinking);
+    content.appendChild(dots);
+    meta.appendChild(role);
+    meta.appendChild(detail);
+    container.appendChild(meta);
+    container.appendChild(content);
+    return container;
+}
+
+function renderPendingTranscriptEntries() {
+    if (!elements.timeline) return;
+    elements.timeline.querySelectorAll('.message.is-pending').forEach((node) => node.remove());
+
+    const pendingEntries = Array.isArray(state.pendingTranscriptEntries)
+        ? state.pendingTranscriptEntries
+        : [];
+    if (pendingEntries.length === 0) return;
+
+    if (elements.emptyState && elements.timeline.contains(elements.emptyState)) {
+        elements.emptyState.remove();
+    }
+
+    const fragment = document.createDocumentFragment();
+    pendingEntries.forEach((entry) => {
+        fragment.appendChild(buildPendingTranscriptElement(entry));
+    });
+    elements.timeline.appendChild(fragment);
+    if (state.autoScroll) {
+        elements.timeline.scrollTop = elements.timeline.scrollHeight;
+    }
+}
+
+function setPendingTranscriptEntries(entries) {
+    state.pendingTranscriptEntries = Array.isArray(entries) ? entries : [];
+    renderPendingTranscriptEntries();
+}
+
+function clearPendingTranscriptEntries() {
+    state.pendingTranscriptEntries = [];
+    if (!elements.timeline) return;
+    elements.timeline.querySelectorAll('.message.is-pending').forEach((node) => node.remove());
+}
+
+function consumePendingEntryForMessage(message) {
+    const pendingEntries = Array.isArray(state.pendingTranscriptEntries)
+        ? state.pendingTranscriptEntries
+        : [];
+    if (pendingEntries.length === 0) return;
+
+    const agentId = String(message?.agentId || '').trim();
+    let nextEntries = pendingEntries;
+
+    if (agentId) {
+        nextEntries = pendingEntries.filter((entry) => entry?.agentId !== agentId);
+    } else {
+        nextEntries = pendingEntries.slice(1);
+    }
+
+    if (nextEntries.length === pendingEntries.length) return;
+    state.pendingTranscriptEntries = nextEntries;
+    renderPendingTranscriptEntries();
+}
+
 function handleProgress(message) {
     if (!message) return;
+    setPendingTranscriptEntries(buildPendingEntriesFromProgress(message));
     const explicitLabel = String(message.waitingForLabel || '').trim();
     const waitingFor =
         explicitLabel ||
@@ -4855,6 +5046,7 @@ function handleProgress(message) {
 }
 
 function handleSessionPaused(message) {
+    clearPendingTranscriptEntries();
     state.paused = true;
     state.pausedProvider = message.provider || null;
     state.pausedAgentId = message.agentId || null;
@@ -4878,6 +5070,7 @@ function handleSessionResumed() {
 }
 
 function handleSessionEnded(message) {
+    clearPendingTranscriptEntries();
     setSessionState({ running: false, paused: false });
     setSessionStatus(message?.reason || 'Session completed');
     state.sessionId = null;
@@ -4891,6 +5084,7 @@ function handleSessionEnded(message) {
 }
 
 function handleSessionError(message) {
+    clearPendingTranscriptEntries();
     setSessionState({ running: false, paused: false });
     setSessionStatus(`Error: ${message?.error || 'Unknown error'}`);
     state.sessionId = null;
@@ -4903,6 +5097,7 @@ function handleSessionError(message) {
 }
 
 function clearTranscript() {
+    clearPendingTranscriptEntries();
     if (!elements.timeline) return;
     elements.timeline.innerHTML = '';
     if (elements.emptyState) {
@@ -5224,8 +5419,15 @@ function buildMessageElement(message) {
             normalizeInlineText,
         });
     }
+    const roleKey = String(message.role || message.llm || 'system')
+        .trim()
+        .toLowerCase();
     const container = document.createElement('div');
-    container.className = `message ${message.role || message.llm || 'system'}`;
+    container.className = `message ${roleKey || 'system'}`;
+    container.dataset.provider = roleKey || 'system';
+    if (roleKey && roleKey !== 'user' && roleKey !== 'system') {
+        container.classList.add('assistant');
+    }
 
     const meta = document.createElement('div');
     meta.className = 'message-meta';
@@ -5235,6 +5437,7 @@ function buildMessageElement(message) {
     role.textContent = formatRoleLabel(message.role || message.llm || 'system');
 
     const label = document.createElement('span');
+    label.className = 'message-label';
     const agent = normalizeInlineText(message.agentLabel || '');
     const round = message.roundIndex ? `Round ${message.roundIndex}` : null;
     const turn = message.turnIndex ? `Turn ${message.turnIndex}` : null;
@@ -5286,6 +5489,7 @@ function prependMessages(messages) {
 
 function addMessage(message) {
     if (!elements.timeline) return;
+    consumePendingEntryForMessage(message);
 
     if (elements.emptyState && elements.timeline.contains(elements.emptyState)) {
         elements.emptyState.remove();
@@ -5332,25 +5536,4 @@ function getProfilesForProvider(provider) {
 function getProfileById(profileId) {
     if (!profileId) return null;
     return state.profiles.find((profile) => profile.profileId === profileId) || null;
-}
-
-function formatProfileTabLabel(profile) {
-    if (!profile.tabId) return 'Unbound';
-    const title = (profile.lastKnownTitle || profile.lastKnownUrl || '').trim();
-    if (!title) return `Tab ${profile.tabId}`;
-    return title.length > 52 ? `${title.slice(0, 49)}...` : title;
-}
-
-function formatStatusLabel(status) {
-    switch (status) {
-        case 'ok':
-            return 'OK';
-        case 'offline':
-            return 'Offline';
-        case 'wrong_host':
-            return 'Wrong host';
-        case 'unknown':
-        default:
-            return 'Unknown';
-    }
 }
