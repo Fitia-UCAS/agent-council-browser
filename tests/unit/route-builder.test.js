@@ -58,6 +58,22 @@ describe('Route builder module', () => {
         expect(api.getRouteRequiredProviders(route)).toEqual(['chatgpt']);
     });
 
+    test('sanitizeRoute promotes single to parallel when multiple agents exist', () => {
+        const api = loadRouteBuilder();
+        const route = api.sanitizeRoute({
+            kind: 'single',
+            agents: [
+                { id: 'a1', provider: 'grok', profileId: 'default' },
+                { id: 'a2', provider: 'chatgpt', profileId: 'default' },
+            ],
+            rounds: 3,
+        });
+        expect(route.kind).toBe('parallel');
+        expect(route.agents).toHaveLength(2);
+        expect(route.agents[0].provider).toBe('grok');
+        expect(route.agents[1].provider).toBe('chatgpt');
+    });
+
     test('sanitizeRoute keeps only one default slot per provider', () => {
         const api = loadRouteBuilder();
         const route = api.sanitizeRoute({
