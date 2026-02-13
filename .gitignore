@@ -11,6 +11,7 @@ build/
 .variant-icons/
 variant-icons/
 worktrees/
+worktress/
 classic.json
 classic.jsonp
 ext/
