@@ -398,12 +398,14 @@ Current force‑capture thresholds:
 
 - ChatGPT: ~45s stable (and ~60s stable when extracted text looks like a sources-only/reference list)
 - Gemini: ~15s stable
+- Grok: ~22s stable
 - Hidden tabs: force-capture + timeout thresholds are increased to avoid premature capture under background throttling.
 
 ### Generating detection
 
 - ChatGPT: presence of stop button (`data-testid*="stop"` / aria-label/title Stop/Arrêter/Annuler; best effort). Visibility uses computed style + bounding rect (not `offsetParent`) because fixed/overlay UI can break `offsetParent`.
 - Gemini: stop icon/button, progress spinners, or disabled send button heuristics.
+- Grok: stop/voice/send control-state transitions (`stop -> voice/send`) plus spinner fallback.
 
 ### Extraction logic
 
@@ -431,6 +433,13 @@ Current force‑capture thresholds:
 ```
 [Gemini returned an image output; no text was captured. Proceeding with debate.]
 ```
+
+**Grok**:
+
+- Primary extraction is assistant-scoped: it first resolves the latest assistant row and prefers `.response-content-markdown` nodes inside that row.
+- Composer filtering remains active, but explicit `.response-content-markdown` content is not rejected solely for overlapping the composer lane.
+- Transcript-tail fallback is emergency-only; it no longer prefers the last chunk over the full cleaned transcript slice.
+- Sanitization strips leading prompt/scaffold echoes (including concatenated forms like `Please Grok answer.There is...`) before emit.
 
 ### Capture message types
 

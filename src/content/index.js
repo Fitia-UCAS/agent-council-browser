@@ -19,7 +19,7 @@
         providerFromRegistry?.id ||
         (isChatGPT ? 'chatgpt' : isGemini ? 'gemini' : isClaude ? 'claude' : 'grok');
     const providerCaptureProfile = captureProviders[currentLLM] || null;
-    const CONTENT_SCRIPT_BUILD = 'grok-capture-r5-2026-02-08';
+    const CONTENT_SCRIPT_BUILD = 'grok-capture-r7-2026-02-13';
 
     console.log(
         `[MLC ContentScript] Initializing for ${currentLLM} (build=${CONTENT_SCRIPT_BUILD}).`
@@ -1300,20 +1300,68 @@
         return text;
     }
 
+    function stripLeadingGrokPromptArtifacts(value) {
+        const original = String(value || '').trim();
+        let text = original;
+        if (!text) return '';
+
+        const stripLeadingPunctuation = (input) =>
+            String(input || '')
+                .replace(/^[\s"'`([{<:;,.\-–—!?|\\/]+/u, '')
+                .trim();
+
+        const previewRaw = String(captureState.promptPreview || '').trim();
+        if (previewRaw) {
+            const normalizedPreview = normalizePromptScaffoldText(previewRaw);
+            const normalizedText = normalizePromptScaffoldText(text);
+            if (normalizedPreview && normalizedText.startsWith(normalizedPreview)) {
+                text = stripLeadingPunctuation(text.slice(previewRaw.length));
+            }
+        }
+
+        const scaffoldPrefixPatterns = [
+            /^(?:conversation\s+so\s+far:?\s*)+/i,
+            /^(?:here'?s\s+a\s+new\s+message\s+from\s+the\s+user:?\s*)+/i,
+            /^(?:user:?\s*)+/i,
+            /^(?:please\s+grok\s+answer(?:\.+)?\s*)+/i,
+        ];
+        let previous = '';
+        while (text && text !== previous) {
+            previous = text;
+            for (const pattern of scaffoldPrefixPatterns) {
+                text = text.replace(pattern, '');
+            }
+            text = stripLeadingPunctuation(text);
+        }
+
+        if (text && text !== original) {
+            captureDebug('Grok leading prompt/scaffold stripped', {
+                beforeLen: original.length,
+                afterLen: text.length,
+                preview: text.slice(0, 120),
+            });
+        }
+
+        return text;
+    }
+
     function sanitizeGrokTranscriptCandidate(text, { allowShort = false } = {}) {
-        const raw = String(text || '').trim();
+        const raw = stripLeadingGrokPromptArtifacts(String(text || '').trim());
         if (!raw) return '';
 
         const lines = raw
             .split(/\r?\n/)
             .map((line) => stripGrokUiFooterArtifacts(line))
+            .map((line, index) => (index === 0 ? stripLeadingGrokPromptArtifacts(line) : line))
             .map((line) => line.trim())
             .filter(Boolean)
             .filter((line) => !isGrokControlOnlyText(line))
             .filter((line) => !isGrokPromptScaffoldLine(line));
         if (!lines.length) return '';
 
-        const sanitized = stripGrokUiFooterArtifacts(lines.join('\n').trim());
+        const sanitized = stripLeadingGrokPromptArtifacts(
+            stripGrokUiFooterArtifacts(lines.join('\n').trim())
+        );
         if (!sanitized) return '';
         if (isGrokControlOnlyText(sanitized)) return '';
         if (looksLikePromptEcho(sanitized)) return '';
@@ -1762,11 +1810,28 @@
             '[data-testid*="message" i]',
             '[data-testid*="chat-message" i]',
             '[data-testid*="conversation" i] [data-testid*="message" i]',
+            '.response-content-markdown',
+            '[class*="response-content-markdown" i]',
             '.markdown',
             '.prose',
             '[class*="markdown" i]',
             '[class*="prose" i]',
         ];
+        const responseContentSelectors = [
+            '.response-content-markdown',
+            '[class*="response-content-markdown" i]',
+        ];
+        const assistantRootSelector = [
+            '[data-testid*="assistant" i]',
+            '[data-role*="assistant" i]',
+            '[data-author*="assistant" i]',
+            '[data-message-author-role="assistant"]',
+            'article',
+            '[role="article"]',
+            '[class*="assistant" i]',
+            '[class*="message" i]',
+            '[class*="response" i]',
+        ].join(', ');
 
         const candidates = [];
         const seenNodes = new Set();
@@ -1779,6 +1844,28 @@
             composerZoneOverlap: 0,
             userMessage: 0,
             empty: 0,
+        };
+        const responseContentSelectorList = responseContentSelectors.join(', ');
+
+        const describeNode = (node) => {
+            if (!node || !(node instanceof Element)) return 'unknown';
+            const tag = String(node.tagName || '').toLowerCase();
+            const id = node.id ? `#${node.id}` : '';
+            const className = String(node.className || '')
+                .split(/\s+/)
+                .filter(Boolean)
+                .slice(0, 4)
+                .join('.');
+            return `${tag}${id}${className ? `.${className}` : ''}`;
+        };
+
+        const isResponseContentNode = (node) => {
+            if (!node || !(node instanceof Element)) return false;
+            try {
+                return node.matches(responseContentSelectorList);
+            } catch (error) {
+                return false;
+            }
         };
 
         const overlapsComposerZone = (candidate) => {
@@ -1794,6 +1881,151 @@
             // Anything overlapping the composer lane is likely draft/editor UI, not assistant output.
             return rect.bottom >= composerTop - 4;
         };
+
+        const collectScopedAssistantResponseCandidates = () => {
+            const entries = [];
+            const seen = new Set();
+            for (const root of roots) {
+                for (const selector of responseContentSelectors) {
+                    let nodes = [];
+                    try {
+                        nodes = Array.from(root.querySelectorAll(selector));
+                    } catch (error) {
+                        nodes = [];
+                    }
+                    for (const node of nodes) {
+                        if (!node || seen.has(node)) continue;
+                        seen.add(node);
+                        if (inputEl && (node === inputEl || inputEl.contains(node))) continue;
+                        if (
+                            composerRoot &&
+                            (composerRoot.contains(node) || node.contains(composerRoot))
+                        ) {
+                            rejectionCounts.composerOverlap += 1;
+                            captureDebug('Grok candidate rejected: composer_overlap', {
+                                selector,
+                                reason: 'inside_composer_scoped',
+                            });
+                            continue;
+                        }
+
+                        let assistantRoot = null;
+                        try {
+                            assistantRoot = node.closest(assistantRootSelector);
+                        } catch (error) {
+                            assistantRoot = null;
+                        }
+                        if (!assistantRoot) assistantRoot = node.parentElement;
+                        if (!assistantRoot || isGrokUserMessage(assistantRoot)) {
+                            rejectionCounts.userMessage += 1;
+                            continue;
+                        }
+                        if (
+                            composerRoot &&
+                            (composerRoot.contains(assistantRoot) ||
+                                assistantRoot.contains(composerRoot))
+                        ) {
+                            rejectionCounts.composerOverlap += 1;
+                            captureDebug('Grok candidate rejected: composer_overlap', {
+                                selector,
+                                reason: 'assistant_root_overlaps_composer',
+                            });
+                            continue;
+                        }
+
+                        const rawText = (node.innerText || node.textContent || '').trim();
+                        const text = sanitizeGrokTranscriptCandidate(rawText, { allowShort: true });
+                        if (!text) {
+                            rejectionCounts.empty += 1;
+                            continue;
+                        }
+                        if (looksLikePromptEcho(text)) {
+                            sawPromptEcho = true;
+                            rejectionCounts.promptEcho += 1;
+                            continue;
+                        }
+                        if (isGrokControlOnlyText(text)) {
+                            rejectionCounts.controlOnly += 1;
+                            continue;
+                        }
+
+                        const normalized = normalizeCaptureCandidateText(text);
+                        if (!normalized || seenText.has(normalized)) continue;
+                        seenText.add(normalized);
+
+                        let rect = null;
+                        try {
+                            rect = assistantRoot.getBoundingClientRect();
+                        } catch (error) {
+                            rect = null;
+                        }
+                        const bottom = rect && Number.isFinite(rect.bottom) ? rect.bottom : 0;
+                        entries.push({
+                            node,
+                            assistantRoot,
+                            selector,
+                            text,
+                            html: options.withHtml ? extractCleanHtmlFromNode(node) : '',
+                            bottom,
+                            shapeSignature: `assistant_scoped|${Math.round(bottom)}|${text.length}`,
+                        });
+                    }
+                }
+            }
+
+            entries.sort((a, b) => {
+                const aBottom = Number.isFinite(a.bottom) ? a.bottom : -Infinity;
+                const bBottom = Number.isFinite(b.bottom) ? b.bottom : -Infinity;
+                if (aBottom !== bBottom) return aBottom - bBottom;
+                if (a.node === b.node) return 0;
+                if (a.node && b.node && a.node.compareDocumentPosition) {
+                    const position = a.node.compareDocumentPosition(b.node);
+                    if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+                    if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+                }
+                return 0;
+            });
+            return entries;
+        };
+
+        const scopedResponseCandidates = collectScopedAssistantResponseCandidates();
+        if (scopedResponseCandidates.length) {
+            const scopedBest = scopedResponseCandidates[scopedResponseCandidates.length - 1];
+            const bestBottom = Number.isFinite(scopedBest.bottom)
+                ? Math.round(scopedBest.bottom)
+                : null;
+            const bestLen = scopedBest.text ? scopedBest.text.length : null;
+            captureDebug('Grok assistant root found', {
+                root: describeNode(scopedBest.assistantRoot),
+                rootBottom: bestBottom,
+                candidateCount: scopedResponseCandidates.length,
+            });
+            captureDebug('Grok response-content-markdown node selected', {
+                selector: scopedBest.selector,
+                node: describeNode(scopedBest.node),
+                textLen: bestLen,
+            });
+            captureDebug('Grok primary extraction length', {
+                textLen: bestLen,
+                source: 'assistant_response_markdown',
+            });
+            const scopedMeta = {
+                provider: 'grok',
+                source: 'assistant_response_markdown',
+                candidateCount: scopedResponseCandidates.length,
+                sawPromptEcho,
+                bestSelector: scopedBest.selector,
+                bestBottom,
+                bestLen,
+                bestShapeSignature: scopedBest.shapeSignature,
+                rejectionCounts,
+            };
+            const scopedResult = { text: scopedBest.text || '' };
+            if (options.withHtml) {
+                scopedResult.html = scopedBest.html || '';
+            }
+            return options.withMeta ? { ...scopedResult, meta: scopedMeta } : scopedResult;
+        }
 
         const buildCandidateFromRoot = (node, selector) => {
             if (!node || seenNodes.has(node)) return;
@@ -1850,7 +2082,7 @@
                     });
                     continue;
                 }
-                if (overlapsComposerZone(child)) {
+                if (!isResponseContentNode(child) && overlapsComposerZone(child)) {
                     rejectionCounts.composerZoneOverlap += 1;
                     captureDebug('Grok candidate rejected: composer_zone_overlap', {
                         selector,
@@ -2191,37 +2423,10 @@
                 : '';
         }
 
-        const chunks = [];
-        let current = [];
-        for (const line of rawLines) {
-            const trimmed = String(line || '').trim();
-            if (!trimmed) {
-                if (current.length) {
-                    chunks.push(current.join('\n').trim());
-                    current = [];
-                }
-                continue;
-            }
-            if (isGrokControlOnlyText(trimmed)) continue;
-            if (isGrokPromptScaffoldLine(trimmed)) continue;
-            current.push(trimmed);
-        }
-        if (current.length) chunks.push(current.join('\n').trim());
-
-        let chosenChunk = '';
-        for (let i = chunks.length - 1; i >= 0; i -= 1) {
-            const chunk = sanitizeGrokTranscriptCandidate(chunks[i], { allowShort: false });
-            if (!chunk) continue;
-            chosenChunk = chunk;
-            break;
-        }
-
-        const fallbackLines = lines.slice(Math.max(0, lines.length - 140));
-        const fallbackTail = sanitizeGrokTranscriptCandidate(fallbackLines.join('\n').trim(), {
+        const fullTranscript = sanitizeGrokTranscriptCandidate(lines.join('\n').trim(), {
             allowShort: false,
         });
-        const selected = chosenChunk || fallbackTail;
-        if (!selected) {
+        if (!fullTranscript) {
             return options.withMeta
                 ? {
                       text: '',
@@ -2230,14 +2435,15 @@
                           source: 'transcript_tail',
                           reason: 'filtered_or_low_quality',
                           lineCount: lines.length,
-                          chunkCount: chunks.length,
+                          chunkCount: 0,
                       },
                   }
                 : '';
         }
 
+        const MAX_CHARS = 20000;
         const bounded =
-            selected.length > 20000 ? selected.slice(selected.length - 20000) : selected;
+            fullTranscript.length > MAX_CHARS ? fullTranscript.slice(0, MAX_CHARS) : fullTranscript;
         const finalText = sanitizeGrokTranscriptCandidate(bounded, { allowShort: false });
         if (!finalText) {
             return options.withMeta
@@ -2248,7 +2454,7 @@
                           source: 'transcript_tail',
                           reason: 'low_quality_after_bound',
                           lineCount: lines.length,
-                          chunkCount: chunks.length,
+                          chunkCount: 0,
                       },
                   }
                 : '';
@@ -2261,8 +2467,10 @@
                     provider: 'grok',
                     source: 'transcript_tail',
                     lineCount: lines.length,
-                    chunkCount: chunks.length,
-                    usedChunk: Boolean(chosenChunk),
+                    chunkCount: 0,
+                    usedChunk: false,
+                    fullLen: fullTranscript.length,
+                    truncated: fullTranscript.length > MAX_CHARS,
                 },
             };
         }
@@ -2578,6 +2786,13 @@
             // Grok rich HTML frequently includes UI footer widgets; render as plain text only.
             resolved.html = '';
             resolved.contentHtml = '';
+            captureDebug('Grok full text length before emit', {
+                llm: currentLLM,
+                reason,
+                source,
+                textLen: text.length,
+                usesTranscriptTail: source.startsWith('transcript_tail'),
+            });
         }
         resolved.text = text;
         captureDebug('Capture emit', {
