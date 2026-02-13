@@ -63,6 +63,8 @@ Root causes:
    - Candidate roots that merely contained composer subtree were rejected too broadly.
 4. Grok UI footer leakage:
    - Footer controls/latency lines were appended near answer text and leaked into captured output.
+5. Debate scaffold/user-echo leakage:
+   - Some Grok responses started with echoed prompt scaffolding (`Conversation so far`, `Here's a new message from the user`, `Please Grok answer`) and could include previous turns (`user1/grok1/user2`) before the real answer.
 
 What we changed to fix it:
 
@@ -73,9 +75,15 @@ What we changed to fix it:
   - uses composer-zone geometry filtering,
   - does not blanket-reject wrappers only because they contain composer.
 - Transcript-tail fallback was hardened (scaffold/control filtering and quality gates).
+- Primary extraction was moved to assistant-row scoped nodes:
+  - resolve latest assistant row first,
+  - prefer `.response-content-markdown` inside that row.
+- Transcript-tail fallback now prefers cleaned full transcript text and no longer prefers the last chunk by default.
 - Grok footer artifacts are stripped from captured text:
   - latency tails (`NNNms`, `Ns`),
   - satisfaction prompts (`Are you satisfied ...` and FR variants).
+- Leading scaffold/prompt echoes are stripped before emit, including embedded/concatenated forms.
+- For debate wrappers, sanitizer can cut everything before the last scaffold marker and remove a repeated latest user line extracted from `promptPreview`.
 - Grok now emits plain text only for capture payloads to avoid rich-footer widget leakage.
 - Background now logs explicit empty-capture drops (`empty_content_after_capture`) instead of silently returning.
 
@@ -294,22 +302,22 @@ This is deliberately heuristic because Grok can change UI.
 
 Function: `extractGrokResponse({ withHtml, withMeta })`
 
-Strategy:
+Strategy (current):
 
-- search near `main` (fallback `body`) for candidate nodes using broad selectors:
-  - assistant/message/testid-like hooks, markdown/prose, `article`, etc.
-- exclude:
-  - the composer subtree (to avoid capturing the input itself),
-  - nodes that appear to be user messages (`isGrokUserMessage(...)`),
-  - nodes that are just prompt echoes (`looksLikePromptEcho(...)`).
-- composer overlap filtering is geometry-aware:
-  - reject nodes inside composer,
-  - reject candidate content that overlaps the composer zone,
-  - do not blanket-reject wrappers that merely contain composer subtree.
-- pick the best candidate using `CaptureUtils.chooseBestTextCandidate(..., { provider: 'grok' })`.
-- ship both:
-  - `text` (canonical, used for debate logic),
-  - `html` (optional, UI-only rendering), except Grok now emits plain text only to avoid footer widget leakage.
+1. assistant-scoped path first (deterministic):
+   - find the latest assistant row,
+   - inside that row, prefer `.response-content-markdown`,
+   - sanitize and use this candidate when valid.
+2. fallback selector pool (legacy/broad):
+   - scan near `main` (fallback `body`) using assistant/message/testid/markdown/prose selectors,
+   - rank with `CaptureUtils.chooseBestTextCandidate(..., { provider: 'grok' })`.
+3. exclusion rules:
+   - ignore composer subtree and user-message nodes (`isGrokUserMessage(...)`),
+   - reject control-only text and prompt-echo-only content,
+   - composer overlap filtering remains geometry-aware, but explicit `.response-content-markdown` content is not rejected solely for composer-lane overlap.
+4. payload:
+   - `text` is canonical for session logic,
+   - Grok payload is emitted as plain text (HTML disabled for Grok to avoid UI/footer leakage).
 
 ### 5.5 Emission + fallback hardening (important)
 
@@ -317,8 +325,27 @@ Strategy:
 - Grok transcript-tail fallback is gated to avoid false positives:
   - strips scaffold lines,
   - strips control/footer text,
-  - rejects low-quality short fragments.
+  - rejects low-quality short fragments,
+  - prefers cleaned full transcript slice instead of “last chunk only”.
+- Transcript-tail metadata includes source and truncation hints (`usedChunk`, `selectedSource`, `truncated`) for debugging.
 - Background now logs explicit empty-content drops (`empty_content_after_capture`) instead of silently returning.
+
+### 5.6 Debate scaffold echo stripping
+
+Problem pattern:
+
+- captured text starts with prompt wrapper/history (`Conversation so far ... user1/grok1/user2 ... Please Grok answer ...`) before the real `grok2` answer.
+
+Current sanitizer behavior:
+
+- strips leading prompt-preview overlaps,
+- strips scaffold markers even when concatenated inline (not only line-by-line),
+- can cut all prefix content up to the last scaffold marker,
+- strips repeated latest user-line prefix parsed from `promptPreview`.
+
+Result:
+
+- emitted Grok text starts at the first real answer sentence in normal path.
 
 ---
 
@@ -444,6 +471,16 @@ Enable capture debug (optional):
   - `localStorage.setItem('mlc_capture_debug', '1')`
 
 Reload Grok and retry to see capture decision logs.
+
+Useful Grok-specific debug lines after the latest fixes:
+
+- `Grok assistant root found`
+- `Grok response-content-markdown node selected`
+- `Grok primary extraction length`
+- `Grok scaffold marker cut`
+- `Grok leading user-echo stripped`
+- `Grok full text length before emit`
+- final `Capture emit` (check `source` is not `transcript_tail...` in normal path)
 
 If content script says “Response captured” but UI is still empty:
 
