@@ -440,6 +440,7 @@ Current force‑capture thresholds:
 - Composer filtering remains active, but explicit `.response-content-markdown` content is not rejected solely for overlapping the composer lane.
 - Transcript-tail fallback is emergency-only; it no longer prefers the last chunk over the full cleaned transcript slice.
 - Sanitization strips leading prompt/scaffold echoes (including concatenated forms like `Please Grok answer.There is...`) before emit.
+- When debate scaffold echoes are embedded at the start of the answer, sanitizer can cut everything up to the last scaffold marker (`Conversation so far` / `Here’s a new message...` / `Please Grok answer`) and drop a repeated latest user line.
 
 ### Capture message types
 

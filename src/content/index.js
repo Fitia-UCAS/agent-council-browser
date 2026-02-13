@@ -1300,6 +1300,52 @@
         return text;
     }
 
+    function escapeRegExp(value) {
+        return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function extractLatestUserMessageFromPromptPreview() {
+        const previewRaw = String(captureState.promptPreview || '').trim();
+        if (!previewRaw) return '';
+
+        const fromMarkerMatch = previewRaw.match(
+            /here'?s\s+a\s+new\s+message\s+from\s+the\s+user:\s*([\s\S]+)/i
+        );
+        if (fromMarkerMatch && fromMarkerMatch[1]) {
+            let extracted = String(fromMarkerMatch[1] || '');
+            const stopIdx = extracted.search(
+                /(?:\n|\r|^)\s*please\s+grok\s+answer(?:\.+)?\s*/i
+            );
+            if (stopIdx >= 0) extracted = extracted.slice(0, stopIdx);
+            extracted = extracted
+                .split(/\r?\n/)
+                .map((line) => line.trim())
+                .filter(Boolean)
+                .join(' ')
+                .trim();
+            if (extracted) return extracted.slice(0, 500);
+        }
+
+        const lines = previewRaw
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean);
+        if (!lines.length) return '';
+
+        let stopAt = lines.findIndex((line) => /please\s+grok\s+answer/i.test(line));
+        if (stopAt < 0) stopAt = lines.length;
+
+        for (let i = stopAt - 1; i >= 0; i -= 1) {
+            const line = lines[i];
+            if (!line) continue;
+            if (isGrokPromptScaffoldLine(line)) continue;
+            if (/^(conversation so far:|new messages since your last turn:)/i.test(line)) continue;
+            return line.slice(0, 500);
+        }
+
+        return '';
+    }
+
     function stripLeadingGrokPromptArtifacts(value) {
         const original = String(value || '').trim();
         let text = original;
@@ -1311,16 +1357,79 @@
                 .trim();
 
         const previewRaw = String(captureState.promptPreview || '').trim();
+        const previewNormalized = normalizePromptScaffoldText(previewRaw);
+        const previewHasDebateScaffold = Boolean(
+            previewNormalized &&
+                /(conversation so far:|new messages since your last turn:|here'?s a new message from the user:|please grok answer)/i.test(
+                    previewNormalized
+                )
+        );
+
         if (previewRaw) {
-            const normalizedPreview = normalizePromptScaffoldText(previewRaw);
             const normalizedText = normalizePromptScaffoldText(text);
-            if (normalizedPreview && normalizedText.startsWith(normalizedPreview)) {
+            if (previewNormalized && normalizedText.startsWith(previewNormalized)) {
                 text = stripLeadingPunctuation(text.slice(previewRaw.length));
+            }
+        }
+
+        if (previewHasDebateScaffold && text) {
+            const leadingWindow = text.slice(0, 2600);
+            const markerPatterns = [
+                /conversation\s+so\s+far:/gi,
+                /new\s+messages\s+since\s+your\s+last\s+turn:/gi,
+                /here'?s\s+a\s+new\s+message\s+from\s+the\s+user:/gi,
+                /please\s+grok\s+answer(?:\.+)?/gi,
+            ];
+            let cutoff = -1;
+            let markerUsed = '';
+            for (const re of markerPatterns) {
+                let match;
+                while ((match = re.exec(leadingWindow))) {
+                    const candidateCutoff = match.index + match[0].length;
+                    if (candidateCutoff > cutoff) {
+                        cutoff = candidateCutoff;
+                        markerUsed = match[0];
+                    }
+                }
+            }
+            if (cutoff > 0 && cutoff < text.length) {
+                const stripped = stripLeadingPunctuation(text.slice(cutoff));
+                if (stripped && stripped.length < text.length) {
+                    captureDebug('Grok scaffold marker cut', {
+                        marker: markerUsed,
+                        cutoff,
+                        beforeLen: text.length,
+                        afterLen: stripped.length,
+                    });
+                    text = stripped;
+                }
+            }
+        }
+
+        const latestUserMessage = extractLatestUserMessageFromPromptPreview();
+        if (latestUserMessage) {
+            const prefixRe = new RegExp(
+                `^${escapeRegExp(latestUserMessage).replace(/\s+/g, '\\s+')}`,
+                'i'
+            );
+            const prefixMatch = text.match(prefixRe);
+            if (prefixMatch && prefixMatch[0]) {
+                const stripped = stripLeadingPunctuation(text.slice(prefixMatch[0].length));
+                if (stripped && stripped.length < text.length) {
+                    captureDebug('Grok leading user-echo stripped', {
+                        removedLen: prefixMatch[0].length,
+                        beforeLen: text.length,
+                        afterLen: stripped.length,
+                        userPreview: latestUserMessage.slice(0, 120),
+                    });
+                    text = stripped;
+                }
             }
         }
 
         const scaffoldPrefixPatterns = [
             /^(?:conversation\s+so\s+far:?\s*)+/i,
+            /^(?:new\s+messages\s+since\s+your\s+last\s+turn:?\s*)+/i,
             /^(?:here'?s\s+a\s+new\s+message\s+from\s+the\s+user:?\s*)+/i,
             /^(?:user:?\s*)+/i,
             /^(?:please\s+grok\s+answer(?:\.+)?\s*)+/i,
