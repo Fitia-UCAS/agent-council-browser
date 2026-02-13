@@ -66,6 +66,18 @@
             });
         }
 
+        const defaultCountByProvider = {};
+        agents.forEach((agent) => {
+            if (!agent?.provider) return;
+            const selection = normalizeProfileSelection(agent.profileId);
+            if (selection !== 'default') return;
+            defaultCountByProvider[agent.provider] =
+                (defaultCountByProvider[agent.provider] || 0) + 1;
+            if (defaultCountByProvider[agent.provider] > 1) {
+                agent.profileId = null;
+            }
+        });
+
         const agentCountsByProvider = {};
         agents.forEach((agent) => {
             if (!agent?.provider) return;
@@ -79,50 +91,21 @@
             }
         });
 
-        const kindRaw = String(route.kind || route.mode || '')
+        const requestedKind = String(route.kind || route.mode || '')
             .trim()
             .toLowerCase();
-        let kind = 'single';
-        if (kindRaw === 'debate') kind = 'debate';
-        else if (kindRaw === 'parallel' || kindRaw === 'compare') kind = 'parallel';
 
         let rounds = Number.parseInt(route.rounds, 10);
-        if (!Number.isFinite(rounds)) rounds = kind === 'debate' ? 3 : 1;
+        if (!Number.isFinite(rounds)) rounds = 3;
         rounds = Math.max(1, Math.min(12, rounds));
 
-        if (kind === 'single') {
-            if (agents.length === 0) return null;
-            return {
-                kind: 'single',
-                rounds: 1,
-                agents: [agents[0]],
-            };
+        let kind = 'single';
+        if (agents.length >= 2) {
+            kind = requestedKind === 'debate' ? 'debate' : 'parallel';
         }
-        if (kind === 'parallel') {
-            if (agents.length < 2) {
-                if (agents.length === 0) return null;
-                return {
-                    kind: 'single',
-                    rounds: 1,
-                    agents: [agents[0]],
-                };
-            }
-            return {
-                kind: 'parallel',
-                rounds: 1,
-                agents,
-            };
-        }
-        if (agents.length < 2) {
-            if (agents.length === 0) return null;
-            return {
-                kind: 'single',
-                rounds: 1,
-                agents: [agents[0]],
-            };
-        }
+
         return {
-            kind: 'debate',
+            kind,
             rounds,
             agents,
         };

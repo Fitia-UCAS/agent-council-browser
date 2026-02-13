@@ -4,6 +4,10 @@ const routeBuilderApi =
     globalThis.MLCRouteBuilder && typeof globalThis.MLCRouteBuilder === 'object'
         ? globalThis.MLCRouteBuilder
         : null;
+const routeBindingApi =
+    globalThis.MLCRouteBinding && typeof globalThis.MLCRouteBinding === 'object'
+        ? globalThis.MLCRouteBinding
+        : null;
 const transcriptViewApi =
     globalThis.MLCTranscriptView && typeof globalThis.MLCTranscriptView === 'object'
         ? globalThis.MLCTranscriptView
@@ -451,6 +455,17 @@ function sanitizeRoute(input) {
         });
     }
 
+    const defaultCountByProvider = {};
+    agents.forEach((agent) => {
+        if (!agent?.provider) return;
+        const selection = normalizeProfileSelection(agent.profileId);
+        if (selection !== 'default') return;
+        defaultCountByProvider[agent.provider] = (defaultCountByProvider[agent.provider] || 0) + 1;
+        if (defaultCountByProvider[agent.provider] > 1) {
+            agent.profileId = null;
+        }
+    });
+
     // Back-compat: older routes used `profileId: null` while effectively meaning "Default".
     // We only auto-upgrade to Default when there's a single agent for that provider, so
     // multi-agent same-provider routes can still represent "unassigned" slots.
@@ -770,6 +785,70 @@ function getRouteAgentById(route, agentId) {
     return agents.find((agent) => agent?.id === agentId) || null;
 }
 
+function pickRouteAgentBindingIndex(provider, route, { targetAgentId = null } = {}) {
+    const normalizedProvider = normalizeProviderId(provider);
+    if (!normalizedProvider) return -1;
+    const sourceRoute = route || state.route || getDefaultRoute();
+    const agents = getRouteAgents(sourceRoute);
+    if (!Array.isArray(agents) || agents.length === 0) return -1;
+
+    const defaultProfileId = getEffectiveDefaultProfileId(normalizedProvider);
+    const profilesById = {};
+    (Array.isArray(state.profiles) ? state.profiles : []).forEach((profile) => {
+        const profileId = typeof profile?.profileId === 'string' ? profile.profileId : null;
+        if (!profileId) return;
+        profilesById[profileId] = profile;
+    });
+
+    if (
+        routeBindingApi &&
+        typeof routeBindingApi.pickRouteAgentIndexForNewTabBinding === 'function'
+    ) {
+        return routeBindingApi.pickRouteAgentIndexForNewTabBinding({
+            provider: normalizedProvider,
+            agents,
+            targetAgentId,
+            defaultProfileId,
+            profilesById,
+            profileConnectionStatus: state.profileConnectionStatus || {},
+        });
+    }
+
+    if (targetAgentId) {
+        const explicitIndex = agents.findIndex(
+            (agent) =>
+                agent?.id === targetAgentId && normalizeProviderId(agent?.provider) === normalizedProvider
+        );
+        if (explicitIndex >= 0) return explicitIndex;
+    }
+
+    for (let i = agents.length - 1; i >= 0; i -= 1) {
+        const agent = agents[i];
+        if (normalizeProviderId(agent?.provider) !== normalizedProvider) continue;
+        const selection = normalizeProfileSelection(agent?.profileId);
+        if (!selection) return i;
+        if (selection === 'default') {
+            if (!defaultProfileId) return i;
+            const profile = profilesById[defaultProfileId] || null;
+            if (!profile || !isProfileRoutable(profile, normalizedProvider)) return i;
+            if (getKnownProfileConnection(defaultProfileId) === false) return i;
+            continue;
+        }
+        const profile = profilesById[selection] || null;
+        if (!profile || !isProfileRoutable(profile, normalizedProvider)) return i;
+        if (getKnownProfileConnection(selection) === false) return i;
+    }
+    return -1;
+}
+
+function pickRouteAgentBindingId(provider, route, options = {}) {
+    const sourceRoute = route || state.route || getDefaultRoute();
+    const agents = getRouteAgents(sourceRoute);
+    const index = pickRouteAgentBindingIndex(provider, sourceRoute, options);
+    if (index < 0 || !agents[index]?.id) return null;
+    return agents[index].id;
+}
+
 function resolveAgentProfileId(agent) {
     const provider = normalizeProviderId(agent?.provider);
     if (!provider) return null;
@@ -846,7 +925,7 @@ function getRouteAgentConnectionInfo(agent) {
             canFocus: false,
             focusTabId: null,
             canReconnect: true,
-            reconnectLabel: selection === 'default' ? 'Connect' : 'Reconnect',
+            reconnectLabel: selection === 'default' ? 'New tab' : 'Reconnect',
         };
     }
 
@@ -906,7 +985,7 @@ function getRouteAgentConnectionInfo(agent) {
         canFocus,
         focusTabId: profile.tabId,
         canReconnect: true,
-        reconnectLabel: selection === 'default' ? 'Reconnect' : 'Reconnect tab',
+        reconnectLabel: selection === 'default' ? 'New tab' : 'Reconnect tab',
     };
 }
 
@@ -1329,21 +1408,6 @@ function renderRouteProviderList(route) {
         const actions = document.createElement('div');
         actions.className = 'route-provider-actions';
 
-        if (!connected) {
-            const connect = document.createElement('button');
-            connect.type = 'button';
-            connect.className = 'ghost-button';
-            connect.dataset.action = 'connect-provider';
-            connect.dataset.provider = provider;
-            connect.textContent = connecting
-                ? 'Connecting…'
-                : profile
-                  ? 'Reconnect default'
-                  : 'Connect';
-            connect.disabled = connecting;
-            actions.appendChild(connect);
-        }
-
         if (profile?.tabId) {
             const focus = document.createElement('button');
             focus.type = 'button';
@@ -1389,12 +1453,9 @@ function handleRouteProviderListClick(event) {
         focusProvider(provider);
         return;
     }
-    if (action === 'new-tab') {
-        openNewTabAndBindAgent(provider);
-        return;
-    }
-    if (action === 'connect-provider') {
-        connectProvider(provider);
+    if (action === 'new-tab' || action === 'connect-provider') {
+        const targetAgentId = pickRouteAgentBindingId(provider, state.route || getDefaultRoute());
+        openNewTabAndBindAgent(provider, { targetAgentId });
         return;
     }
 }
@@ -3833,13 +3894,8 @@ function reconnectRouteAgent(agentId) {
     const agent = getRouteAgentById(route, agentId);
     const provider = normalizeProviderId(agent?.provider);
     if (!agent || !provider) return;
-    const selection = normalizeProfileSelection(agent?.profileId);
 
     state.lastFocusedProvider = provider;
-    if (selection === 'default') {
-        connectProvider(provider);
-        return;
-    }
     openNewTabAndBindAgent(provider, { targetAgentId: agentId });
 }
 
@@ -3940,35 +3996,9 @@ async function openNewTabAndBindAgent(provider, { targetAgentId = null } = {}) {
             updateSendState();
             return;
         }
-        let targetIndex = -1;
-        if (targetAgentId) {
-            const index = agents.findIndex((agent) => agent?.id === targetAgentId);
-            if (index >= 0 && agents[index]?.provider === normalizedProvider) {
-                targetIndex = index;
-            }
-        }
-        if (targetIndex < 0) {
-            for (let i = agents.length - 1; i >= 0; i -= 1) {
-                const agent = agents[i];
-                if (agent?.provider !== normalizedProvider) continue;
-                const selection = normalizeProfileSelection(agent?.profileId);
-                if (!selection) {
-                    targetIndex = i;
-                    break;
-                }
-                if (selection === 'default') continue;
-                const profile = getProfileById(selection);
-                if (!profile || !isProfileRoutable(profile, normalizedProvider)) {
-                    targetIndex = i;
-                    break;
-                }
-                const knownConnected = getKnownProfileConnection(selection);
-                if (knownConnected === false) {
-                    targetIndex = i;
-                    break;
-                }
-            }
-        }
+        const targetIndex = pickRouteAgentBindingIndex(normalizedProvider, route, {
+            targetAgentId,
+        });
         if (targetIndex >= 0) {
             agents[targetIndex] = { ...agents[targetIndex], profileId: claimed.profile.profileId };
         } else {
