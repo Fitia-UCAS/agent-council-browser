@@ -1313,9 +1313,7 @@
         );
         if (fromMarkerMatch && fromMarkerMatch[1]) {
             let extracted = String(fromMarkerMatch[1] || '');
-            const stopIdx = extracted.search(
-                /(?:\n|\r|^)\s*please\s+grok\s+answer(?:\.+)?\s*/i
-            );
+            const stopIdx = extracted.search(/(?:\n|\r|^)\s*please\s+grok\s+answer(?:\.+)?\s*/i);
             if (stopIdx >= 0) extracted = extracted.slice(0, stopIdx);
             extracted = extracted
                 .split(/\r?\n/)
@@ -1360,9 +1358,9 @@
         const previewNormalized = normalizePromptScaffoldText(previewRaw);
         const previewHasDebateScaffold = Boolean(
             previewNormalized &&
-                /(conversation so far:|new messages since your last turn:|here'?s a new message from the user:|please grok answer)/i.test(
-                    previewNormalized
-                )
+            /(conversation so far:|new messages since your last turn:|here'?s a new message from the user:|please grok answer)/i.test(
+                previewNormalized
+            )
         );
 
         if (previewRaw) {
@@ -1480,6 +1478,131 @@
             if (wordCount < 6 && sanitized.length < 30) return '';
         }
         return sanitized;
+    }
+
+    function getGrokComparableLines(text) {
+        return String(text || '')
+            .split(/\r?\n/)
+            .map((line) => stripGrokUiFooterArtifacts(line))
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .filter((line) => !isGrokControlOnlyText(line))
+            .filter((line) => !isGrokPromptScaffoldLine(line));
+    }
+
+    function stripLeadingGrokBaseline(fullText, baselineText) {
+        const fullRaw = String(fullText || '').trim();
+        const baselineRaw = String(baselineText || '').trim();
+        if (!fullRaw || !baselineRaw) return '';
+        if (fullRaw === baselineRaw) return '';
+
+        if (fullRaw.startsWith(baselineRaw)) {
+            return String(fullRaw.slice(baselineRaw.length) || '').trim();
+        }
+
+        const fullLines = getGrokComparableLines(fullRaw);
+        const baselineLines = getGrokComparableLines(baselineRaw);
+        if (!fullLines.length || !baselineLines.length || fullLines.length <= baselineLines.length) {
+            return '';
+        }
+
+        const minRequiredPrefixLines =
+            baselineLines.length <= 2
+                ? baselineLines.length
+                : Math.max(2, Math.floor(Math.min(baselineLines.length, 10) * 0.6));
+        const maxStartOffset = Math.min(8, Math.max(0, fullLines.length - minRequiredPrefixLines));
+        let bestStart = -1;
+        let bestMatched = 0;
+        for (let start = 0; start <= maxStartOffset; start += 1) {
+            let matched = 0;
+            while (start + matched < fullLines.length && matched < baselineLines.length) {
+                const fullLineNorm = normalizeCaptureCandidateText(fullLines[start + matched]);
+                const baselineLineNorm = normalizeCaptureCandidateText(baselineLines[matched]);
+                if (!fullLineNorm || !baselineLineNorm || fullLineNorm !== baselineLineNorm) break;
+                matched += 1;
+            }
+            if (matched > bestMatched) {
+                bestMatched = matched;
+                bestStart = start;
+            }
+            if (matched === baselineLines.length) break;
+        }
+
+        if (
+            bestStart < 0 ||
+            bestMatched < minRequiredPrefixLines ||
+            fullLines.length <= bestStart + bestMatched
+        ) {
+            return '';
+        }
+
+        return fullLines.slice(bestStart + bestMatched).join('\n').trim();
+    }
+
+    function extractGrokIncrementalTranscriptText(
+        transcriptText,
+        { allowFullWhenNoBaseline = false } = {}
+    ) {
+        const rawTranscript = String(transcriptText || '').trim();
+        if (!rawTranscript) return '';
+
+        const baselines = [
+            String(captureState.grokBaselineTranscriptTail || '').trim(),
+            String(captureState.baselineText || '').trim(),
+        ].filter(Boolean);
+
+        let bestDeltaText = '';
+        let bestBaselineWeight = -1;
+        for (const baseline of baselines) {
+            const deltaRaw = stripLeadingGrokBaseline(rawTranscript, baseline);
+            if (!deltaRaw) continue;
+            const deltaSanitized = sanitizeGrokTranscriptCandidate(deltaRaw, { allowShort: true });
+            if (!deltaSanitized) continue;
+            const baselineWeight = normalizeCaptureCandidateText(baseline).length;
+            if (baselineWeight > bestBaselineWeight) {
+                bestBaselineWeight = baselineWeight;
+                bestDeltaText = deltaSanitized;
+            }
+        }
+
+        if (bestDeltaText) return bestDeltaText;
+        if (baselines.length > 0) return '';
+        if (!allowFullWhenNoBaseline) return '';
+        return sanitizeGrokTranscriptCandidate(rawTranscript, { allowShort: false });
+    }
+
+    function maybeTrimGrokIncrementalCandidate(
+        candidateText,
+        { allowFullWhenNoBaseline = false } = {}
+    ) {
+        const raw = String(candidateText || '').trim();
+        if (!raw) return { text: '', trimmed: false, reductionChars: 0 };
+
+        const baselines = [
+            String(captureState.grokBaselineTranscriptTail || '').trim(),
+            String(captureState.baselineText || '').trim(),
+        ].filter(Boolean);
+        const hasBaseline = baselines.length > 0;
+
+        const incremental = extractGrokIncrementalTranscriptText(raw, {
+            allowFullWhenNoBaseline,
+        });
+        if (!incremental) {
+            return { text: raw, trimmed: false, reductionChars: 0 };
+        }
+
+        const rawNorm = normalizeCaptureCandidateText(raw);
+        const incNorm = normalizeCaptureCandidateText(incremental);
+        if (!rawNorm || !incNorm || incNorm === rawNorm) {
+            return { text: raw, trimmed: false, reductionChars: 0 };
+        }
+
+        const reductionChars = Math.max(0, rawNorm.length - incNorm.length);
+        if (!hasBaseline) {
+            return { text: raw, trimmed: false, reductionChars: 0 };
+        }
+
+        return { text: incremental, trimmed: true, reductionChars };
     }
 
     function isClaudeUserMessage(node) {
@@ -2552,7 +2675,9 @@
 
         const MAX_CHARS = 20000;
         const bounded =
-            fullTranscript.length > MAX_CHARS ? fullTranscript.slice(0, MAX_CHARS) : fullTranscript;
+            fullTranscript.length > MAX_CHARS
+                ? fullTranscript.slice(fullTranscript.length - MAX_CHARS)
+                : fullTranscript;
         const finalText = sanitizeGrokTranscriptCandidate(bounded, { allowShort: false });
         if (!finalText) {
             return options.withMeta
@@ -2577,7 +2702,7 @@
                     source: 'transcript_tail',
                     lineCount: lines.length,
                     chunkCount: 0,
-                    usedChunk: false,
+                    usedChunk: fullTranscript.length > MAX_CHARS,
                     fullLen: fullTranscript.length,
                     truncated: fullTranscript.length > MAX_CHARS,
                 },
@@ -2829,8 +2954,8 @@
 
         if (!text && isGrok) {
             const fallback = extractGrokTranscriptTailText({ withMeta: true });
-            const fallbackText = sanitizeGrokTranscriptCandidate(fallback?.text || '', {
-                allowShort: false,
+            const fallbackText = extractGrokIncrementalTranscriptText(fallback?.text || '', {
+                allowFullWhenNoBaseline: true,
             });
             if (fallbackText) {
                 resolved = {
@@ -2846,6 +2971,30 @@
         }
 
         if (isGrok) {
+            const trimmedPrimary = maybeTrimGrokIncrementalCandidate(text, {
+                allowFullWhenNoBaseline: false,
+            });
+            if (trimmedPrimary.trimmed) {
+                text = trimmedPrimary.text;
+                resolved.text = text;
+                const currentSource = source || 'primary';
+                source = currentSource.includes('incremental')
+                    ? currentSource
+                    : `${currentSource}_incremental_trim`;
+                resolved.meta = {
+                    ...(resolved.meta || {}),
+                    source,
+                    incrementalTrimmed: true,
+                    incrementalTrimReductionChars: trimmedPrimary.reductionChars,
+                };
+                captureDebug('Grok primary capture trimmed to incremental answer', {
+                    llm: currentLLM,
+                    reason,
+                    source,
+                    reductionChars: trimmedPrimary.reductionChars,
+                    textLen: text.length,
+                });
+            }
             const shouldUseStrictTailGate = source.startsWith('transcript_tail');
             if (shouldUseStrictTailGate) {
                 const sanitizedTail = sanitizeGrokTranscriptCandidate(text, { allowShort: false });
@@ -2974,38 +3123,65 @@
                 ? captureState.grokBaselineCandidateCount
                 : null;
 
+        if (isGrok && text) {
+            const trimmedPrimary = maybeTrimGrokIncrementalCandidate(text, {
+                allowFullWhenNoBaseline: false,
+            });
+            if (trimmedPrimary.trimmed) {
+                text = trimmedPrimary.text;
+                extraction = {
+                    ...extraction,
+                    text,
+                    meta: {
+                        ...(extraction.meta || {}),
+                        source: `${(extraction.meta && extraction.meta.source) || 'primary'}_incremental_trim`,
+                        incrementalTrimmed: true,
+                        incrementalTrimReductionChars: trimmedPrimary.reductionChars,
+                    },
+                };
+                captureState.lastExtractionMeta = extraction.meta || null;
+                meta = captureState.lastExtractionMeta || {};
+                currentGrokBestBottom = Number.isFinite(meta.bestBottom)
+                    ? meta.bestBottom
+                    : currentGrokBestBottom;
+                currentGrokCandidateCount = Number.isFinite(meta.candidateCount)
+                    ? meta.candidateCount
+                    : currentGrokCandidateCount;
+                currentGrokShapeSignature =
+                    typeof meta.bestShapeSignature === 'string'
+                        ? meta.bestShapeSignature
+                        : currentGrokShapeSignature;
+                captureDebug('Grok primary extraction trimmed to incremental answer', {
+                    reductionChars: trimmedPrimary.reductionChars,
+                    textLen: text.length,
+                    source: extraction.meta?.source || 'primary_incremental_trim',
+                });
+            }
+        }
+
         const tryGrokFallbackExtraction = (reason) => {
             if (!isGrok) return false;
             const fallback = extractGrokTranscriptTailText({ withMeta: true });
             const fallbackText = String(fallback?.text || '').trim();
             if (!fallbackText) return false;
             if (isGrokControlOnlyText(fallbackText)) return false;
-
-            const fallbackNormalized = normalizeCaptureCandidateText(fallbackText);
-            if (!fallbackNormalized) return false;
-
-            const baselineTailNormalized = normalizeCaptureCandidateText(
-                captureState.grokBaselineTranscriptTail || ''
-            );
-            const baselinePrimaryNormalized = normalizeCaptureCandidateText(
-                captureState.baselineText || ''
-            );
-            const sameAsBaselineTail = Boolean(
-                baselineTailNormalized && fallbackNormalized === baselineTailNormalized
-            );
-            const sameAsBaselinePrimary = Boolean(
-                baselinePrimaryNormalized && fallbackNormalized === baselinePrimaryNormalized
-            );
-            const materiallyLongerThanTail = Boolean(
-                baselineTailNormalized &&
-                fallbackNormalized.startsWith(baselineTailNormalized) &&
-                fallbackNormalized.length > baselineTailNormalized.length + 120
-            );
-            if ((sameAsBaselineTail || sameAsBaselinePrimary) && !materiallyLongerThanTail)
+            const incrementalFallbackText = extractGrokIncrementalTranscriptText(fallbackText, {
+                allowFullWhenNoBaseline: true,
+            });
+            if (!incrementalFallbackText) {
+                captureDebug('Grok fallback rejected: no incremental transcript delta', {
+                    reason,
+                    fallbackTextLen: fallbackText.length,
+                    baselineTailLen: String(captureState.grokBaselineTranscriptTail || '').length,
+                    baselinePrimaryLen: String(captureState.baselineText || '').length,
+                });
                 return false;
+            }
+            const incrementalNormalized = normalizeCaptureCandidateText(incrementalFallbackText);
+            if (!incrementalNormalized) return false;
 
             extraction = {
-                text: fallbackText,
+                text: incrementalFallbackText,
                 meta: {
                     ...(fallback?.meta || {}),
                     bestBottom: Number.isFinite(currentGrokBestBottom)
@@ -3018,7 +3194,7 @@
                         : Number.isFinite(baselineGrokCandidateCount)
                           ? baselineGrokCandidateCount + 1
                           : 1,
-                    bestShapeSignature: `fallback:${reason}:${stableTextSignature(fallbackText)}`,
+                    bestShapeSignature: `fallback:${reason}:${stableTextSignature(incrementalFallbackText)}`,
                 },
             };
             text = extraction.text;

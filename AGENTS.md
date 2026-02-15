@@ -438,7 +438,8 @@ Current force‑capture thresholds:
 
 - Primary extraction is assistant-scoped: it first resolves the latest assistant row and prefers `.response-content-markdown` nodes inside that row.
 - Composer filtering remains active, but explicit `.response-content-markdown` content is not rejected solely for overlapping the composer lane.
-- Transcript-tail fallback is emergency-only; it no longer prefers the last chunk over the full cleaned transcript slice.
+- Primary and emit-time Grok capture now apply an incremental trim against the pre-turn baseline transcript, so captures keep only the new answer instead of re-emitting prior user/assistant turns.
+- Transcript-tail fallback remains emergency-only and now returns an incremental delta versus baseline (not the full transcript); when bounded it keeps the most recent tail slice.
 - Sanitization strips leading prompt/scaffold echoes (including concatenated forms like `Please Grok answer.There is...`) before emit.
 - When debate scaffold echoes are embedded at the start of the answer, sanitizer can cut everything up to the last scaffold marker (`Conversation so far` / `Here’s a new message...` / `Please Grok answer`) and drop a repeated latest user line.
 
