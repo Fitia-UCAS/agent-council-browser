@@ -78,7 +78,8 @@ What we changed to fix it:
 - Primary extraction was moved to assistant-row scoped nodes:
   - resolve latest assistant row first,
   - prefer `.response-content-markdown` inside that row.
-- Transcript-tail fallback now prefers cleaned full transcript text and no longer prefers the last chunk by default.
+- Grok capture now applies baseline-aware incremental trimming in both evaluation and emit paths, so only the current turn is emitted when prior turns are echoed in the candidate text.
+- Transcript-tail fallback now computes an incremental delta versus pre-turn baseline text; when bounded it keeps the most recent tail slice.
 - Grok footer artifacts are stripped from captured text:
   - latency tails (`NNNms`, `Ns`),
   - satisfaction prompts (`Are you satisfied ...` and FR variants).
@@ -315,18 +316,22 @@ Strategy (current):
    - ignore composer subtree and user-message nodes (`isGrokUserMessage(...)`),
    - reject control-only text and prompt-echo-only content,
    - composer overlap filtering remains geometry-aware, but explicit `.response-content-markdown` content is not rejected solely for composer-lane overlap.
-4. payload:
+4. incremental turn isolation:
+   - before capture stabilization and again before emit, Grok text is trimmed against baseline transcript/user-turn state,
+   - this strips replayed context so payload contains only the new assistant turn.
+5. payload:
    - `text` is canonical for session logic,
    - Grok payload is emitted as plain text (HTML disabled for Grok to avoid UI/footer leakage).
 
 ### 5.5 Emission + fallback hardening (important)
 
 - Capture decisions and emission now use the **same resolved extraction object** (no second fresh re-extract at emit time).
+- Grok primary extraction and emit path both run baseline-aware incremental trim; this is the main guardrail against captured `userN/assistantN` replay prefixes.
 - Grok transcript-tail fallback is gated to avoid false positives:
   - strips scaffold lines,
   - strips control/footer text,
   - rejects low-quality short fragments,
-  - prefers cleaned full transcript slice instead of “last chunk only”.
+  - computes delta vs pre-turn baseline and emits only incremental text.
 - Transcript-tail metadata includes source and truncation hints (`usedChunk`, `selectedSource`, `truncated`) for debugging.
 - Background now logs explicit empty-content drops (`empty_content_after_capture`) instead of silently returning.
 
