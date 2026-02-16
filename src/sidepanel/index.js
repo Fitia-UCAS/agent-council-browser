@@ -2306,7 +2306,8 @@ function updateHistoryUi() {
     const configured = Boolean(state.historyStatus?.configured);
     const unlocked = Boolean(state.historyStatus?.unlocked);
     const protectNewChats = Boolean(configured && state.historyStatus?.lockNewChatsByDefault);
-    const uiLocked = Boolean(state.running || state.paused);
+    // Keep security actions available when a run is paused so users can unlock/recover.
+    const uiLocked = Boolean(state.running);
 
     if (!configured) {
         setHistoryStatus('Passphrase: off. New chats are saved without encryption.');
