@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+    - name: Security Vulnerability (Private)
+      url: https://github.com/multi-llm-coder/extension/security/advisories/new
+      about: Use GitHub private advisory reporting. Do not post security issues publicly.
+    - name: Support and Maintenance Policy
+      url: https://github.com/multi-llm-coder/extension/blob/main/SUPPORT.md
+      about: Read support scope, maintenance policy, and contribution expectations.

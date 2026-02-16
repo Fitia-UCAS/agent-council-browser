@@ -40,6 +40,7 @@ Required checks for `main`:
 - e2e smoke
 - release build
 - artifact policy verification
+- PR hygiene check
 - Codex PR review check
 
 ## 4) Schema v3 reset-on-upgrade
@@ -50,7 +51,23 @@ v3 architecture intentionally uses reset-on-upgrade for legacy local state.
 - If legacy local schema is detected, user must run one-time reset.
 - Reset clears legacy local storage keys and old `mlc_history_v1` IndexedDB data.
 
-## 5) Chrome Web Store checklist
+## 5) Public policy pages (GitHub Pages)
+
+Serve docs from `/docs` so store/repo links are stable.
+
+1. GitHub -> `Settings` -> `Pages`
+2. Build and deployment -> `Deploy from a branch`
+3. Branch: `main`, Folder: `/docs`
+4. Publish docs index: `docs/index.md` with links to privacy/security/support pages.
+5. Reuse this Pages URL in README and Chrome Web Store listing.
+
+## 6) PR pipeline setup
+
+1. Install/authorize Codex GitHub App for this repository.
+2. Configure branch protection as documented in `docs/branch-protection.md`.
+3. Require CI + PR Hygiene + Codex review checks before merge.
+
+## 7) Chrome Web Store checklist
 
 - Publish from `release/*.zip` only.
 - Keep privacy and permission justification current (especially `debugger` for Claude flow).

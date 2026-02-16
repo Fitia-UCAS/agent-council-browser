@@ -10,6 +10,16 @@ It supports:
 2. **Compare (Parallel)**: send the same prompt to 2+ agents.
 3. **Debate**: multi-round round-robin across 2+ agents.
 
+## Policies and Docs
+
+- Privacy: `PRIVACY.md`
+- Security reporting: `SECURITY.md`
+- Support and maintenance: `SUPPORT.md`
+- Release readiness: `docs/production-readiness.md`
+- Release runbook: `docs/release-runbook.md`
+- Branch protection: `docs/branch-protection.md`
+- Docs index (for GitHub Pages): `docs/index.md`
+
 ## ✨ Features
 
 - **Multi-LLM Support**: Interact with Gemini, ChatGPT, Claude, and Grok.
@@ -190,6 +200,8 @@ If you encounter issues:
     - Extension version (if applicable, or commit hash).
     - Detailed steps to reproduce the issue.
     - Relevant console logs and screenshots.
+
+Support policy and maintenance expectations are documented in `SUPPORT.md`.
 
 ## 📦 Dependencies
 
