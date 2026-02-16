@@ -32,16 +32,16 @@ playwright-report/
 !scripts/build/**
 
 # Generated extension runtime artifacts (built from src/)
-manifest.json
-background.js
-contentScript.js
-historyStore.js
-captureUtils.js
-debatePromptUtils.js
-debate_prompts.json
-sidepanel.html
-sidepanel.js
-styles.css
+/manifest.json
+/background.js
+/contentScript.js
+/historyStore.js
+/captureUtils.js
+/debatePromptUtils.js
+/debate_prompts.json
+/sidepanel.html
+/sidepanel.js
+/styles.css
 !src/sidepanel/styles.css
-runtime/
-assets/
+/runtime/
+/assets/
