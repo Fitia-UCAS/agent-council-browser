@@ -1612,14 +1612,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.promptAdvancedJson = document.getElementById('prompt-advanced-json');
     elements.promptAdvancedHelp = document.getElementById('prompt-advanced-help');
 
-    elements.historyConfigureButton = document.getElementById('history-configure');
-    elements.historyUnlockButton = document.getElementById('history-unlock');
-    elements.historyLockButton = document.getElementById('history-lock');
+    elements.historyQuickBadge = document.getElementById('history-quick-badge');
+    elements.historyQuickText = document.getElementById('history-quick-text');
+    elements.historyQuickPrimary = document.getElementById('history-quick-primary');
+    elements.historyQuickLockNew = document.getElementById('history-quick-lock-new');
     elements.historyBadge = document.getElementById('history-badge');
     elements.historyOverviewText = document.getElementById('history-overview-text');
     elements.historyAdvanced = document.getElementById('history-advanced');
-    elements.historyLockNewRow = document.getElementById('history-lock-new-row');
-    elements.historyLockNew = document.getElementById('history-lock-new');
     elements.historyResetProtection = document.getElementById('history-reset-protection');
     elements.historyClearAll = document.getElementById('history-clear-all');
     elements.historyStatus = document.getElementById('history-status');
@@ -1632,7 +1631,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.passphraseConfirmField = document.getElementById('passphrase-confirm-field');
     elements.passphraseConfirm = document.getElementById('passphrase-confirm');
     elements.passphraseError = document.getElementById('passphrase-error');
+    elements.passphraseContinueHelp = document.getElementById('passphrase-continue-help');
     elements.passphraseCancel = document.getElementById('passphrase-cancel');
+    elements.passphraseContinueUnprotected = document.getElementById(
+        'passphrase-continue-unprotected'
+    );
     elements.passphraseClose = document.getElementById('passphrase-close');
     elements.passphraseSubmit = document.getElementById('passphrase-submit');
 
@@ -1968,20 +1971,12 @@ function bindEvents() {
         elements.chatLockButton.addEventListener('click', toggleActiveChatProtection);
     }
 
-    if (elements.historyConfigureButton) {
-        elements.historyConfigureButton.addEventListener('click', configureHistoryEncryption);
+    if (elements.historyQuickPrimary) {
+        elements.historyQuickPrimary.addEventListener('click', handleHistoryQuickPrimaryAction);
     }
 
-    if (elements.historyUnlockButton) {
-        elements.historyUnlockButton.addEventListener('click', unlockHistory);
-    }
-
-    if (elements.historyLockButton) {
-        elements.historyLockButton.addEventListener('click', lockHistory);
-    }
-
-    if (elements.historyLockNew) {
-        elements.historyLockNew.addEventListener('change', (event) => {
+    if (elements.historyQuickLockNew) {
+        elements.historyQuickLockNew.addEventListener('change', (event) => {
             setLockNewChatsByDefault(Boolean(event?.target?.checked));
         });
     }
@@ -2000,6 +1995,13 @@ function bindEvents() {
 
     if (elements.passphraseCancel) {
         elements.passphraseCancel.addEventListener('click', cancelPassphrasePrompt);
+    }
+
+    if (elements.passphraseContinueUnprotected) {
+        elements.passphraseContinueUnprotected.addEventListener(
+            'click',
+            submitContinueWithoutPassphrase
+        );
     }
 
     if (elements.passphraseBackdrop) {
@@ -2274,6 +2276,26 @@ function updateChatLockButton() {
     elements.chatLockButton.hidden = true;
 }
 
+function handleHistoryQuickPrimaryAction() {
+    const configured = Boolean(state.historyStatus?.configured);
+    const unlocked = Boolean(state.historyStatus?.unlocked);
+    if (!configured) {
+        configureHistoryEncryption().catch((error) => {
+            console.warn('Configure passphrase failed:', error);
+        });
+        return;
+    }
+    if (unlocked) {
+        lockHistory().catch((error) => {
+            console.warn('Lock history failed:', error);
+        });
+        return;
+    }
+    unlockHistory().catch((error) => {
+        console.warn('Unlock history failed:', error);
+    });
+}
+
 function setHistoryStatus(text, isError = false) {
     if (!elements.historyStatus) return;
     elements.historyStatus.textContent = text;
@@ -2325,25 +2347,52 @@ function updateHistoryUi() {
         setHistoryStatus('Passphrase: off for new chats. Protected chats are currently unlocked.');
     }
 
-    if (elements.historyBadge) {
+    const badgeText = !configured
+        ? 'Off'
+        : protectNewChats
+          ? unlocked
+              ? 'On (unlocked)'
+              : 'On (locked)'
+          : 'Paused';
+    const applyHistoryBadgeState = (badgeElement) => {
+        if (!badgeElement) return;
+        badgeElement.textContent = badgeText;
+        badgeElement.classList.toggle('is-off', !configured);
+        badgeElement.classList.toggle('is-locked', configured && protectNewChats && !unlocked);
+        badgeElement.classList.toggle('is-unlocked', configured && protectNewChats && unlocked);
+        badgeElement.classList.toggle('is-paused', configured && !protectNewChats);
+    };
+    applyHistoryBadgeState(elements.historyQuickBadge);
+    applyHistoryBadgeState(elements.historyBadge);
+
+    if (elements.historyQuickText) {
         if (!configured) {
-            elements.historyBadge.textContent = 'Off';
+            elements.historyQuickText.textContent =
+                'Passphrase is off. New chats are created without encryption.';
         } else if (protectNewChats) {
-            elements.historyBadge.textContent = unlocked ? 'On (unlocked)' : 'On (locked)';
+            elements.historyQuickText.textContent = unlocked
+                ? 'Passphrase is on. New chats are protected.'
+                : 'Passphrase is on. Unlock to open protected chats.';
         } else {
-            elements.historyBadge.textContent = 'Paused';
+            elements.historyQuickText.textContent =
+                'Passphrase is paused for new chats. Existing protected chats remain protected.';
         }
-        elements.historyBadge.classList.toggle('is-off', !configured);
-        elements.historyBadge.classList.toggle(
-            'is-locked',
-            configured && protectNewChats && !unlocked
-        );
-        elements.historyBadge.classList.toggle(
-            'is-unlocked',
-            configured && protectNewChats && unlocked
-        );
-        elements.historyBadge.classList.toggle('is-paused', configured && !protectNewChats);
     }
+    if (elements.historyQuickPrimary) {
+        if (!configured) {
+            elements.historyQuickPrimary.textContent = 'Set passphrase…';
+        } else if (unlocked) {
+            elements.historyQuickPrimary.textContent = 'Lock protected chats';
+        } else {
+            elements.historyQuickPrimary.textContent = 'Unlock protected chats';
+        }
+        elements.historyQuickPrimary.disabled = uiLocked;
+    }
+    if (elements.historyQuickLockNew) {
+        elements.historyQuickLockNew.checked = protectNewChats;
+        elements.historyQuickLockNew.disabled = uiLocked || !configured;
+    }
+
     if (elements.historyOverviewText) {
         if (!configured) {
             elements.historyOverviewText.textContent =
@@ -2357,32 +2406,8 @@ function updateHistoryUi() {
         }
     }
 
-    if (elements.historyConfigureButton) {
-        elements.historyConfigureButton.textContent = 'Set passphrase…';
-        elements.historyConfigureButton.hidden = configured;
-        elements.historyConfigureButton.disabled = uiLocked || configured;
-    }
-    if (elements.historyUnlockButton) {
-        elements.historyUnlockButton.textContent = 'Unlock protected chats';
-        elements.historyUnlockButton.hidden = !configured || unlocked;
-        elements.historyUnlockButton.disabled = uiLocked || !configured || unlocked;
-    }
-    if (elements.historyLockButton) {
-        elements.historyLockButton.textContent = 'Lock protected chats';
-        elements.historyLockButton.hidden = !configured || !unlocked;
-        elements.historyLockButton.disabled = uiLocked || !configured || !unlocked;
-    }
-
     if (elements.historyAdvanced) {
         elements.historyAdvanced.hidden = false;
-    }
-
-    if (elements.historyLockNewRow) {
-        elements.historyLockNewRow.hidden = !configured;
-    }
-    if (elements.historyLockNew) {
-        elements.historyLockNew.checked = protectNewChats;
-        elements.historyLockNew.disabled = uiLocked || !configured;
     }
     if (elements.historyResetProtection) {
         elements.historyResetProtection.hidden = !configured;
@@ -2401,7 +2426,57 @@ function setPassphrasePromptError(text) {
     elements.passphraseError.hidden = !normalized;
 }
 
-function openPassphrasePrompt({ mode, errorText = null } = {}) {
+function setPassphrasePromptBusy(isBusy) {
+    const busy = Boolean(isBusy);
+    if (passphrasePrompt) {
+        passphrasePrompt.busy = busy;
+    }
+    if (elements.passphraseInput) {
+        elements.passphraseInput.disabled = busy;
+    }
+    if (elements.passphraseConfirm) {
+        elements.passphraseConfirm.disabled = busy;
+    }
+    if (elements.passphraseCancel) {
+        elements.passphraseCancel.disabled = busy;
+    }
+    if (elements.passphraseContinueUnprotected) {
+        elements.passphraseContinueUnprotected.disabled = busy;
+    }
+    if (elements.passphraseSubmit) {
+        elements.passphraseSubmit.disabled = busy;
+    }
+}
+
+function extractPassphraseFromPromptResult(result) {
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+        if (result.kind === 'passphrase') {
+            return String(result.value || '');
+        }
+        return '';
+    }
+    if (typeof result === 'string') {
+        return result;
+    }
+    return '';
+}
+
+function isContinueWithoutPassphraseResult(result) {
+    return Boolean(
+        result &&
+            typeof result === 'object' &&
+            !Array.isArray(result) &&
+            result.kind === 'continue_without_passphrase'
+    );
+}
+
+function openPassphrasePrompt({
+    mode,
+    context = 'default',
+    errorText = null,
+    onSubmitPassphrase = null,
+    onContinueWithoutPassphrase = null,
+} = {}) {
     if (passphrasePrompt?.promise) {
         setPassphrasePromptError(errorText);
         return passphrasePrompt.promise;
@@ -2411,23 +2486,43 @@ function openPassphrasePrompt({ mode, errorText = null } = {}) {
     }
 
     const promptPromise = new Promise((resolve) => {
-        passphrasePrompt = { mode, resolve, promise: null };
+        passphrasePrompt = {
+            mode,
+            context,
+            resolve,
+            promise: null,
+            onSubmitPassphrase,
+            onContinueWithoutPassphrase,
+            busy: false,
+        };
     });
     passphrasePrompt.promise = promptPromise;
 
     const configuring = mode === 'configure';
+    const allowContinueWithout = !configuring && context === 'new_chat';
     if (elements.passphraseTitle) {
         elements.passphraseTitle.textContent = configuring
             ? 'Set passphrase'
             : 'Unlock protected chats';
     }
     if (elements.passphraseNote) {
-        elements.passphraseNote.textContent = configuring
-            ? 'Set a passphrase to protect your new chats.'
-            : 'Enter your passphrase to unlock protected chats.';
+        if (configuring) {
+            elements.passphraseNote.textContent = 'Set a passphrase to protect your new chats.';
+        } else if (allowContinueWithout) {
+            elements.passphraseNote.textContent =
+                'Unlock with your passphrase, or continue by creating this chat without passphrase protection.';
+        } else {
+            elements.passphraseNote.textContent = 'Enter your passphrase to unlock protected chats.';
+        }
     }
     if (elements.passphraseConfirmField) {
         elements.passphraseConfirmField.hidden = !configuring;
+    }
+    if (elements.passphraseContinueHelp) {
+        elements.passphraseContinueHelp.hidden = !allowContinueWithout;
+    }
+    if (elements.passphraseContinueUnprotected) {
+        elements.passphraseContinueUnprotected.hidden = !allowContinueWithout;
     }
     if (elements.passphraseSubmit) {
         elements.passphraseSubmit.textContent = configuring ? 'Save' : 'Unlock';
@@ -2440,6 +2535,7 @@ function openPassphrasePrompt({ mode, errorText = null } = {}) {
 
     elements.passphraseInput.value = '';
     if (elements.passphraseConfirm) elements.passphraseConfirm.value = '';
+    setPassphrasePromptBusy(false);
 
     window.setTimeout(() => {
         elements.passphraseInput?.focus();
@@ -2451,6 +2547,7 @@ function openPassphrasePrompt({ mode, errorText = null } = {}) {
 function closePassphrasePrompt(result) {
     if (!passphrasePrompt) return;
     const { resolve } = passphrasePrompt;
+    setPassphrasePromptBusy(false);
     passphrasePrompt = null;
 
     if (elements.passphraseBackdrop) elements.passphraseBackdrop.hidden = true;
@@ -2466,11 +2563,13 @@ function closePassphrasePrompt(result) {
 }
 
 function cancelPassphrasePrompt() {
+    if (passphrasePrompt?.busy) return;
     closePassphrasePrompt(null);
 }
 
-function submitPassphrasePrompt() {
+async function submitPassphrasePrompt() {
     if (!passphrasePrompt) return;
+    if (passphrasePrompt.busy) return;
     const mode = passphrasePrompt.mode;
     const passphrase = String(elements.passphraseInput?.value || '');
     const confirm = String(elements.passphraseConfirm?.value || '');
@@ -2487,22 +2586,95 @@ function submitPassphrasePrompt() {
     }
 
     if (mode === 'configure') {
-        closePassphrasePrompt(passphrase);
+        closePassphrasePrompt({ kind: 'passphrase', value: passphrase });
         return;
     }
 
-    closePassphrasePrompt(passphrase);
+    if (typeof passphrasePrompt.onSubmitPassphrase === 'function') {
+        setPassphrasePromptBusy(true);
+        try {
+            const result = await passphrasePrompt.onSubmitPassphrase(passphrase);
+            if (result && result.ok === false) {
+                setPassphrasePromptError(result.error || 'Failed to unlock with this passphrase.');
+                setPassphrasePromptBusy(false);
+                elements.passphraseInput?.focus();
+                return;
+            }
+        } catch (error) {
+            setPassphrasePromptError(error?.message || 'Failed to unlock with this passphrase.');
+            setPassphrasePromptBusy(false);
+            elements.passphraseInput?.focus();
+            return;
+        }
+        closePassphrasePrompt({ kind: 'passphrase', value: passphrase });
+        return;
+    }
+
+    closePassphrasePrompt({ kind: 'passphrase', value: passphrase });
 }
 
-async function promptForPassphrase({ mode, errorText = null } = {}) {
-    if (!elements.passphraseBackdrop || !elements.passphraseModal || !elements.passphraseInput) {
-        const first = window.prompt('Enter your passphrase');
-        if (first === null) return null;
-        const passphrase = String(first || '');
-        if (!passphrase.trim()) return null;
-        return passphrase;
+async function submitContinueWithoutPassphrase() {
+    if (!passphrasePrompt) return;
+    if (passphrasePrompt.busy) return;
+    if (passphrasePrompt.mode === 'configure') return;
+    if (passphrasePrompt.context !== 'new_chat') return;
+
+    if (typeof passphrasePrompt.onContinueWithoutPassphrase === 'function') {
+        setPassphrasePromptBusy(true);
+        try {
+            const result = await passphrasePrompt.onContinueWithoutPassphrase();
+            if (result && result.ok === false) {
+                setPassphrasePromptError(
+                    result.error || 'Failed to continue without passphrase.'
+                );
+                setPassphrasePromptBusy(false);
+                return;
+            }
+        } catch (error) {
+            setPassphrasePromptError(error?.message || 'Failed to continue without passphrase.');
+            setPassphrasePromptBusy(false);
+            return;
+        }
     }
-    return openPassphrasePrompt({ mode, errorText });
+
+    closePassphrasePrompt({ kind: 'continue_without_passphrase' });
+}
+
+async function promptForPassphrase({
+    mode,
+    context = 'default',
+    errorText = null,
+    onSubmitPassphrase = null,
+    onContinueWithoutPassphrase = null,
+} = {}) {
+    if (!elements.passphraseBackdrop || !elements.passphraseModal || !elements.passphraseInput) {
+        while (true) {
+            const first = window.prompt('Enter your passphrase');
+            if (first === null) return null;
+            const passphrase = String(first || '');
+            if (!passphrase.trim()) return null;
+            if (typeof onSubmitPassphrase === 'function') {
+                try {
+                    const result = await onSubmitPassphrase(passphrase);
+                    if (result && result.ok === false) {
+                        window.alert(result.error || 'Failed to unlock with this passphrase.');
+                        continue;
+                    }
+                } catch (error) {
+                    window.alert(error?.message || 'Failed to unlock with this passphrase.');
+                    continue;
+                }
+            }
+            return { kind: 'passphrase', value: passphrase };
+        }
+    }
+    return openPassphrasePrompt({
+        mode,
+        context,
+        errorText,
+        onSubmitPassphrase,
+        onContinueWithoutPassphrase,
+    });
 }
 
 async function promptForPassphraseSetup({ errorText = null } = {}) {
@@ -2521,7 +2693,7 @@ async function promptForPassphraseSetup({ errorText = null } = {}) {
     }
 
     const result = await openPassphrasePrompt({ mode: 'configure', errorText });
-    const passphrase = String(result || '');
+    const passphrase = extractPassphraseFromPromptResult(result);
     if (!passphrase.trim()) return null;
     return passphrase;
 }
@@ -2553,7 +2725,9 @@ async function configureHistoryEncryption() {
 }
 
 async function setLockNewChatsByDefault(enabled) {
-    if (!state.historyStatus?.configured) return;
+    if (!state.historyStatus?.configured) {
+        return { ok: false, error: 'Passphrase is not set yet.' };
+    }
     const nextEnabled = Boolean(enabled);
     const wasUnlocked = Boolean(state.historyStatus?.unlocked);
     const response = await sendMessageAsync({
@@ -2561,19 +2735,24 @@ async function setLockNewChatsByDefault(enabled) {
         enabled: nextEnabled,
     });
     if (!response || response.ok === false) {
-        setHistoryStatus(`Error: ${response?.error || 'Failed to update settings.'}`, true);
+        const errorMessage = response?.error || 'Failed to update settings.';
+        setHistoryStatus(`Error: ${errorMessage}`, true);
         requestHistoryStatus({ hydrateChats: false });
-        return;
+        return { ok: false, error: errorMessage };
     }
     updateHistoryStatus(response.status);
     if (!nextEnabled && wasUnlocked) {
-        await lockHistory({
+        const locked = await lockHistory({
             statusText: 'Pausing passphrase for new chats…',
             finalStatus: 'New chats no longer require passphrase. Protected chats are locked.',
         });
-        return;
+        if (!locked) {
+            return { ok: false, error: 'Failed to lock protected chats.' };
+        }
+        return { ok: true };
     }
     requestChatsState();
+    return { ok: true };
 }
 
 async function resetProtection() {
@@ -2668,8 +2847,14 @@ async function unlockHistory({ auto = false } = {}) {
 
     let errorText = null;
     while (true) {
-        const passphrase = await promptForPassphrase({ mode: 'unlock', errorText });
-        if (passphrase === null) return false;
+        const promptResult = await promptForPassphrase({ mode: 'unlock', errorText });
+        if (promptResult === null) return false;
+        if (isContinueWithoutPassphraseResult(promptResult)) return false;
+        const passphrase = extractPassphraseFromPromptResult(promptResult);
+        if (!passphrase.trim()) {
+            errorText = 'Passphrase is empty.';
+            continue;
+        }
 
         setHistoryStatus('Unlocking…');
         const response = await sendMessageAsync({ type: 'HISTORY_UNLOCK', passphrase });
@@ -3656,6 +3841,56 @@ function handleChatsState(payload) {
     }
 }
 
+async function resolveNewChatHistoryLocked() {
+    const promptResult = await promptForPassphrase({
+        mode: 'unlock',
+        context: 'new_chat',
+        onSubmitPassphrase: async (passphrase) => {
+            setHistoryStatus('Unlocking…');
+            const response = await sendMessageAsync({ type: 'HISTORY_UNLOCK', passphrase });
+            if (!response || response.ok === false) {
+                const code = response?.code || '';
+                if (code === 'PASSPHRASE_INVALID') {
+                    return { ok: false, error: 'Incorrect passphrase.' };
+                }
+                if (code === 'ENCRYPTION_NOT_CONFIGURED') {
+                    requestHistoryStatus({ hydrateChats: false });
+                    return { ok: false, error: 'Passphrase is not set yet.' };
+                }
+                return { ok: false, error: response?.error || 'Failed to unlock history.' };
+            }
+            updateHistoryStatus(response.status);
+            requestChatsState();
+            return { ok: true };
+        },
+        onContinueWithoutPassphrase: async () => {
+            setHistoryStatus('Pausing passphrase for new chats…');
+            const toggleResult = await setLockNewChatsByDefault(false);
+            if (!toggleResult?.ok) {
+                return {
+                    ok: false,
+                    error:
+                        toggleResult?.error || 'Failed to continue without passphrase.',
+                };
+            }
+            return { ok: true };
+        },
+    });
+
+    if (promptResult === null) return false;
+    if (isContinueWithoutPassphraseResult(promptResult)) {
+        setSessionStatus('Continuing without passphrase for this new chat.');
+        createNewChat();
+        return true;
+    }
+
+    const passphrase = extractPassphraseFromPromptResult(promptResult);
+    if (!passphrase.trim()) return false;
+    setSessionStatus('History unlocked. Creating new chat…');
+    createNewChat();
+    return true;
+}
+
 function createNewChat() {
     if (isHistoryAppLocked()) {
         setSessionStatus('Unlock history to continue.');
@@ -3668,14 +3903,10 @@ function createNewChat() {
         if (!response || response.ok === false) {
             const code = response?.code || '';
             if (code === 'HISTORY_LOCKED') {
-                setSessionStatus('Unlock history to continue.');
-                unlockHistory({ auto: true })
-                    .then((unlocked) => {
-                        if (unlocked) createNewChat();
-                    })
-                    .catch((error) => {
-                        console.warn('Unlock failed:', error);
-                    });
+                setSessionStatus('Unlock history or continue without passphrase for this new chat.');
+                resolveNewChatHistoryLocked().catch((error) => {
+                    console.warn('New chat passphrase flow failed:', error);
+                });
                 return;
             }
             handleActionResponse(response || { ok: false, error: 'Failed to create chat.' });

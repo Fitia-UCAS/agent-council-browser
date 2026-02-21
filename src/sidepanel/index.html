@@ -285,24 +285,34 @@
                 </button>
             </div>
             <div class="drawer-body drawer-scroll">
-                <section class="drawer-section">
-                    <div class="drawer-section-title">Conversation</div>
-                    <div class="prompt-note">
-                        Control how the live transcript behaves while providers are responding.
+                <section class="drawer-section passphrase-quick-section">
+                    <div class="drawer-section-title">Passphrase quick controls</div>
+                    <div class="passphrase-quick-header">
+                        <div class="passphrase-quick-title">Passphrase protection</div>
+                        <div class="security-badge is-off" id="history-quick-badge">Off</div>
                     </div>
-                    <div class="settings-actions settings-actions-start">
-                        <label class="inline-toggle">
-                            <input type="checkbox" id="auto-scroll" checked />
-                            <span>Auto-scroll transcript</span>
-                        </label>
+                    <div class="prompt-note passphrase-quick-text" id="history-quick-text">
+                        Control whether new chats require a passphrase before they are created.
+                    </div>
+                    <div class="settings-actions passphrase-quick-actions">
+                        <button class="ghost-button" id="history-quick-primary" type="button">
+                            Set passphrase…
+                        </button>
+                    </div>
+                    <label class="inline-toggle security-mode-toggle passphrase-quick-toggle">
+                        <input type="checkbox" id="history-quick-lock-new" />
+                        <span>Require passphrase for new chats</span>
+                    </label>
+                    <div class="field-help security-help">
+                        If disabled, new chats stay readable while existing protected chats remain
+                        locked.
                     </div>
                 </section>
 
-                <section class="drawer-section">
+                <section class="drawer-section drawer-section-templates">
                     <div class="drawer-section-title">Templates</div>
                     <div class="prompt-note">
-                        Customize debate instructions with guided fields first. Advanced mode is
-                        available for full template control.
+                        Start with a preset, then adjust the fields you need.
                     </div>
                     <div
                         class="prompt-mode-switch"
@@ -316,7 +326,7 @@
                             role="tab"
                             aria-selected="true"
                         >
-                            Guided
+                            Simple
                         </button>
                         <button
                             class="route-mode"
@@ -325,11 +335,11 @@
                             role="tab"
                             aria-selected="false"
                         >
-                            Advanced
+                            Advanced JSON
                         </button>
                     </div>
                     <div class="template-preset-block" id="prompt-guided-presets">
-                        <div class="template-preset-title">Presets</div>
+                        <div class="template-preset-title">Quick presets</div>
                         <div class="template-preset-list">
                             <button
                                 class="ghost-button template-preset-button"
@@ -337,7 +347,7 @@
                                 type="button"
                                 data-preset="balanced"
                             >
-                                Balanced critique
+                                Balanced rewrite
                             </button>
                             <button
                                 class="ghost-button template-preset-button"
@@ -345,7 +355,7 @@
                                 type="button"
                                 data-preset="concise"
                             >
-                                Concise refinement
+                                Concise paraphrase
                             </button>
                             <button
                                 class="ghost-button template-preset-button"
@@ -353,12 +363,12 @@
                                 type="button"
                                 data-preset="final_only"
                             >
-                                Final-only answer
+                                Final answer only
                             </button>
                         </div>
                     </div>
                     <div class="template-token-block" id="prompt-token-block">
-                        <div class="template-preset-title">Insert variable</div>
+                        <div class="template-preset-title">Insert variable token</div>
                         <div class="template-token-list">
                             <button
                                 class="ghost-button template-token"
@@ -393,7 +403,7 @@
 
                     <div class="prompt-template-fields" id="prompt-template-fields">
                         <label class="field">
-                            <span class="field-label">Opening instruction</span>
+                            <span class="field-label">Start style (first turns)</span>
                             <textarea
                                 id="prompt-initial"
                                 class="prompt-template"
@@ -401,14 +411,16 @@
                                 spellcheck="false"
                                 placeholder="Context and debate rules for the first turn."
                             ></textarea>
-                            <div class="field-help">Used to prime turn 1 and turn 2 context.</div>
+                            <div class="field-help">
+                                Sent at the start so both models follow the same style.
+                            </div>
                         </label>
                         <div class="template-usage-preview">
-                            Used in: <code>debate.header</code> on opening turns.
+                            When used: first two turns.
                         </div>
 
                         <label class="field">
-                            <span class="field-label">During rounds</span>
+                            <span class="field-label">Round style</span>
                             <textarea
                                 id="prompt-intermediary"
                                 class="prompt-template"
@@ -416,16 +428,14 @@
                                 spellcheck="false"
                                 placeholder="How each agent should critique and improve in intermediate rounds."
                             ></textarea>
-                            <div class="field-help">
-                                Default for non-final turns after the opener.
-                            </div>
+                            <div class="field-help">Used for each round before the final answer.</div>
                         </label>
                         <div class="template-usage-preview">
-                            Used in: <code>turn2/turn3+ {intermediary_message}</code>.
+                            When used: middle turns.
                         </div>
 
                         <label class="field">
-                            <span class="field-label">Final answer instruction</span>
+                            <span class="field-label">Final style</span>
                             <textarea
                                 id="prompt-final"
                                 class="prompt-template"
@@ -433,22 +443,20 @@
                                 spellcheck="false"
                                 placeholder="How the final turn should answer the user."
                             ></textarea>
-                            <div class="field-help">Applied only on the last turn of the run.</div>
+                            <div class="field-help">Used only for the final response.</div>
                         </label>
                         <div class="template-usage-preview">
-                            Used in: <code>turn == total_turns</code>.
+                            When used: last turn only.
                         </div>
                     </div>
 
                     <details class="prompt-advanced" id="prompt-advanced-panel">
                         <summary class="prompt-advanced-summary">
-                            <span>Advanced template editor (raw JSON)</span>
+                            <span>Advanced editor (JSON)</span>
                             <span class="material-symbols-rounded">expand_more</span>
                         </summary>
                         <div class="prompt-advanced-body">
-                            <div class="field-help">
-                                Edit full debate template JSON for power-user control.
-                            </div>
+                            <div class="field-help">Use this only if you need full JSON control.</div>
                             <textarea
                                 id="prompt-advanced-json"
                                 class="prompt-editor"
@@ -457,7 +465,7 @@
                                 placeholder='{"schemaVersion":1,"debate":{...}}'
                             ></textarea>
                             <div class="field-help" id="prompt-advanced-help">
-                                Guided fields remain the primary editor; advanced JSON is optional.
+                                Simple mode above is easier for most edits.
                             </div>
                         </div>
                     </details>
@@ -466,16 +474,18 @@
                         <button class="ghost-button" id="prompt-load" type="button">
                             Load current
                         </button>
-                        <button class="ghost-button" id="prompt-save" type="button">Save</button>
+                        <button class="ghost-button" id="prompt-save" type="button">
+                            Save changes
+                        </button>
                         <button class="ghost-button" id="prompt-reset" type="button">
-                            Reset to default
+                            Reset defaults
                         </button>
                     </div>
-                    <div class="prompt-status" id="prompt-status">Not loaded</div>
+                    <div class="prompt-status" id="prompt-status">Load templates to begin.</div>
                 </section>
 
                 <section class="drawer-section security-section">
-                    <div class="drawer-section-title">Security</div>
+                    <div class="drawer-section-title">Passphrase details</div>
                     <div class="security-overview">
                         <div class="security-overview-head">
                             <div class="security-overview-title">Passphrase protection</div>
@@ -485,28 +495,6 @@
                             History is always local on this device. Enable a passphrase for
                             protected chats.
                         </div>
-                    </div>
-                    <div
-                        class="settings-actions security-primary-actions"
-                        id="history-primary-actions"
-                    >
-                        <button class="ghost-button" id="history-configure" type="button">
-                            Set passphrase…
-                        </button>
-                        <button class="ghost-button" id="history-unlock" type="button">
-                            Unlock protected chats
-                        </button>
-                        <button class="ghost-button" id="history-lock" type="button">
-                            Lock protected chats
-                        </button>
-                    </div>
-                    <label class="inline-toggle security-mode-toggle" id="history-lock-new-row">
-                        <input type="checkbox" id="history-lock-new" />
-                        <span>Require passphrase for new chats</span>
-                    </label>
-                    <div class="field-help security-help" id="history-lock-new-help">
-                        If disabled, new chats stay readable while existing protected chats remain
-                        locked.
                     </div>
                     <details class="drawer-details" id="history-advanced" hidden>
                         <summary class="drawer-details-summary">
@@ -568,6 +556,10 @@
                 <div class="prompt-note" id="passphrase-note">
                     Enter your passphrase to unlock encrypted history.
                 </div>
+                <div class="field-help passphrase-continue-help" id="passphrase-continue-help" hidden>
+                    Continuing will pause passphrase for new chats. Existing protected chats stay
+                    locked.
+                </div>
                 <label class="field">
                     <span class="field-label">Passphrase</span>
                     <input
@@ -595,6 +587,14 @@
             </div>
             <div class="modal-actions">
                 <button class="ghost-button" id="passphrase-cancel" type="button">Cancel</button>
+                <button
+                    class="ghost-button"
+                    id="passphrase-continue-unprotected"
+                    type="button"
+                    hidden
+                >
+                    Continue without passphrase
+                </button>
                 <button class="primary-button" id="passphrase-submit" type="button">Unlock</button>
             </div>
         </div>

@@ -360,6 +360,109 @@ body {
     color: var(--text-secondary);
 }
 
+.passphrase-quick-section {
+    gap: 10px;
+}
+
+.passphrase-quick-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.passphrase-quick-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-strong);
+}
+
+.passphrase-quick-text {
+    font-size: 0.85rem;
+    line-height: 1.45;
+    color: var(--text-secondary);
+}
+
+.passphrase-quick-actions {
+    justify-content: flex-start;
+}
+
+.passphrase-quick-actions .ghost-button {
+    font-size: 0.84rem;
+    font-weight: 600;
+}
+
+.passphrase-quick-toggle {
+    color: var(--text-secondary);
+}
+
+.drawer-section-templates .drawer-section-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: 0;
+}
+
+.drawer-section-templates .prompt-note {
+    font-size: 0.86rem;
+    line-height: 1.45;
+    color: var(--text-secondary);
+}
+
+.drawer-section-templates .route-mode {
+    font-size: 0.84rem;
+    font-weight: 600;
+}
+
+.drawer-section-templates .template-preset-title {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.drawer-section-templates .template-preset-button,
+.drawer-section-templates .template-token {
+    padding: 8px 13px;
+    font-size: 0.84rem;
+}
+
+.drawer-section-templates .field-label {
+    font-size: 0.84rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.drawer-section-templates .prompt-template {
+    min-height: 112px;
+    font-family: var(--font-family-sans);
+    font-size: 0.9rem;
+    line-height: 1.55;
+}
+
+.drawer-section-templates .field-help {
+    font-size: 0.8rem;
+    line-height: 1.45;
+}
+
+.drawer-section-templates .template-usage-preview {
+    margin-top: -2px;
+    font-size: 0.79rem;
+    line-height: 1.4;
+}
+
+.drawer-section-templates .prompt-advanced-summary {
+    font-size: 0.84rem;
+    font-weight: 600;
+}
+
+.drawer-section-templates .prompt-editor {
+    font-size: 0.84rem;
+}
+
+.drawer-section-templates .prompt-status {
+    font-size: 0.8rem;
+}
+
 .prompt-advanced {
     border: 1px solid var(--border-soft);
     border-radius: var(--radius-md);
@@ -1530,9 +1633,26 @@ button:focus-visible,
     display: flex;
     align-items: center;
     justify-content: flex-end;
+    flex-wrap: wrap;
     gap: 10px;
     border-top: 1px solid var(--border-soft);
     background: rgba(12, 18, 26, 0.98);
+}
+
+.passphrase-continue-help {
+    margin-top: -4px;
+}
+
+#passphrase-continue-unprotected {
+    border-color: rgba(245, 158, 11, 0.42);
+    background: rgba(245, 158, 11, 0.08);
+    color: #f7d8a8;
+}
+
+#passphrase-continue-unprotected:hover {
+    border-color: rgba(245, 158, 11, 0.65);
+    background: rgba(245, 158, 11, 0.14);
+    color: var(--text-primary);
 }
 
 .drawer {
@@ -1681,7 +1801,7 @@ button:focus-visible,
 }
 
 .drawer-section-title {
-    font-size: 0.76rem;
+    font-size: 0.82rem;
     text-transform: none;
     letter-spacing: 0.02em;
     font-weight: 500;
@@ -1800,6 +1920,12 @@ button:focus-visible,
 
     .composer-run-row {
         grid-template-columns: 1fr;
+    }
+
+    .modal-actions .ghost-button,
+    .modal-actions .primary-button {
+        width: 100%;
+        justify-content: center;
     }
 }
 
