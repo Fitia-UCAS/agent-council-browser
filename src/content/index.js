@@ -62,6 +62,7 @@
         lastText: '',
         baselineText: '',
         baselineAssistantCount: null,
+        baselineAssistantIndex: null,
         hasNewText: false,
         sawGenerating: false,
         lastTextChangeAt: 0,
@@ -173,12 +174,14 @@
         captureState.startedAt = message.timestamp || Date.now();
         captureState.lastText = '';
         captureState.baselineAssistantCount = null;
+        captureState.baselineAssistantIndex = null;
         const baselineExtraction = extractLatestResponse({ withMeta: true });
         captureState.baselineText = baselineExtraction.text || '';
         if (isChatGPT) {
             const baselineIndex = Number.isFinite(baselineExtraction.meta?.bestAssistantIndex)
                 ? baselineExtraction.meta.bestAssistantIndex
                 : null;
+            captureState.baselineAssistantIndex = baselineIndex;
             captureState.baselineAssistantCount =
                 baselineIndex !== null
                     ? Math.max(0, baselineIndex + 1)
@@ -212,6 +215,7 @@
             sessionId: captureState.sessionId,
             turnIndex: captureState.turnIndex,
             baselineAssistantCount: captureState.baselineAssistantCount,
+            baselineAssistantIndex: captureState.baselineAssistantIndex,
             baselinePreview: String(captureState.baselineText || '').slice(0, 160),
         });
         setTimeout(() => scheduleEvaluateCapture(), 1200);
@@ -3233,21 +3237,44 @@
                 const baselineCount = Number.isFinite(captureState.baselineAssistantCount)
                     ? captureState.baselineAssistantCount
                     : null;
+                const baselineAssistantIndex = Number.isFinite(captureState.baselineAssistantIndex)
+                    ? captureState.baselineAssistantIndex
+                    : null;
                 const bestAssistantIndex = Number.isFinite(
                     captureState.lastExtractionMeta?.bestAssistantIndex
                 )
                     ? captureState.lastExtractionMeta.bestAssistantIndex
                     : null;
-
-                // Prevent capturing a pre-turn assistant message (common in Pro mode due to side panels/rerenders).
-                if (baselineCount !== null) {
-                    if (bestAssistantIndex === null || bestAssistantIndex < baselineCount) return;
-                }
-
                 const baselineNormalized = normalizeCaptureCandidateText(
                     captureState.baselineText || ''
                 );
                 const textNormalized = normalizeCaptureCandidateText(text);
+                const textChangedFromBaseline = Boolean(
+                    textNormalized && (!baselineNormalized || textNormalized !== baselineNormalized)
+                );
+
+                // Prevent capturing a pre-turn assistant message (common in Pro mode due to side panels/rerenders).
+                if (baselineCount !== null) {
+                    const missingNewAssistantTurn =
+                        bestAssistantIndex === null || bestAssistantIndex < baselineCount;
+                    if (missingNewAssistantTurn) {
+                        const allowSameAssistantUpdate =
+                            textChangedFromBaseline &&
+                            baselineAssistantIndex !== null &&
+                            bestAssistantIndex !== null &&
+                            bestAssistantIndex === baselineAssistantIndex &&
+                            (captureState.sawGenerating || now - captureState.startedAt >= 8000);
+                        if (!allowSameAssistantUpdate) return;
+                        captureDebug('ChatGPT accepted same-assistant update', {
+                            baselineCount,
+                            baselineAssistantIndex,
+                            bestAssistantIndex,
+                            sawGenerating: captureState.sawGenerating,
+                            elapsedMs: now - captureState.startedAt,
+                            textLen: text.length,
+                        });
+                    }
+                }
                 if (baselineNormalized && textNormalized && textNormalized === baselineNormalized)
                     return;
             } else if (isGrok) {

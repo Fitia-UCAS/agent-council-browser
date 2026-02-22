@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Cute council minion icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8EE7C2" />
+      <stop offset="1" stop-color="#66D6C4" />
+    </linearGradient>
+  </defs>
+
+  <circle cx="256" cy="256" r="236" fill="url(#bg)" stroke="#1F3550" stroke-width="20" />
+
+  <circle cx="176" cy="134" r="28" fill="#FFD364" stroke="#1F3550" stroke-width="12" />
+  <circle cx="256" cy="102" r="28" fill="#61D0E1" stroke="#1F3550" stroke-width="12" />
+  <circle cx="336" cy="134" r="28" fill="#F59AB5" stroke="#1F3550" stroke-width="12" />
+  <path d="M176 166 Q256 196 336 166" fill="none" stroke="#1F3550" stroke-width="12" stroke-linecap="round" />
+
+  <circle cx="256" cy="290" r="142" fill="#FFF6DB" stroke="#1F3550" stroke-width="18" />
+  <circle cx="206" cy="262" r="22" fill="#1F3550" />
+  <circle cx="306" cy="262" r="22" fill="#1F3550" />
+  <path d="M198 336 Q256 378 314 336" fill="none" stroke="#1F3550" stroke-width="18" stroke-linecap="round" />
+</svg>

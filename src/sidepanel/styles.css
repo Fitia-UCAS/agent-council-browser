@@ -116,11 +116,29 @@ body {
     gap: 10px;
 }
 
+.topbar-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.topbar-logo {
+    width: 30px;
+    height: 30px;
+    flex: 0 0 30px;
+    object-fit: contain;
+    filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.28));
+}
+
 .topbar-title {
-    font-size: 0.97rem;
+    font-size: 1rem;
     font-weight: 600;
     letter-spacing: 0.15px;
     color: var(--text-strong);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .icon-button {

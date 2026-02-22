@@ -18,6 +18,7 @@
         "build:release": "bash scripts/release/build-release-artifact.sh",
         "build:variant:all-local-worktrees": "bash scripts/dev/build-all-local-worktrees-variants.sh",
         "brand:in-place": "npm run build:src && bash scripts/dev/build-extension-variant.sh --in-place",
+        "icons:council": "bash scripts/dev/render-council-icon.sh",
         "brand:all-worktrees": "bash scripts/dev/apply-worktree-branding.sh",
         "icons:ensure": "bash scripts/dev/ensure-variant-icons.sh",
         "hooks:enable": "bash scripts/dev/enable-git-hooks.sh"
