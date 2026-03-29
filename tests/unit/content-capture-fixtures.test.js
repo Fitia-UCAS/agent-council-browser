@@ -1,0 +1,220 @@
+import { describe, expect, test } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
+import { JSDOM } from 'jsdom';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const captureUtilsSource = fs.readFileSync(
+    path.resolve(__dirname, '..', '..', 'src', 'content', 'captureUtils.js'),
+    'utf8'
+);
+const contentScriptSource = fs.readFileSync(
+    path.resolve(__dirname, '..', '..', 'src', 'content', 'index.js'),
+    'utf8'
+);
+
+function readFixture(...segments) {
+    return fs.readFileSync(path.resolve(__dirname, '..', 'fixtures', ...segments), 'utf8');
+}
+
+function normalizeText(value) {
+    return String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function buildProviderRegistry() {
+    return {
+        chatgpt: {
+            id: 'chatgpt',
+            matchesHost(hostname) {
+                const host = String(hostname || '').toLowerCase();
+                return host.includes('chatgpt.com') || host.includes('openai.com');
+            },
+            forceCaptureStableMs: 45000,
+        },
+        claude: {
+            id: 'claude',
+            matchesHost(hostname) {
+                return String(hostname || '').toLowerCase().includes('claude.ai');
+            },
+            forceCaptureStableMs: 20000,
+        },
+    };
+}
+
+function createChromeStub(sentMessages, listeners) {
+    return {
+        runtime: {
+            lastError: null,
+            onMessage: {
+                addListener(listener) {
+                    listeners.push(listener);
+                },
+            },
+            sendMessage(message, callback) {
+                sentMessages.push(message);
+                this.lastError = null;
+                if (typeof callback === 'function') callback({ ok: true });
+            },
+        },
+    };
+}
+
+function loadCaptureHarness({ provider, html }) {
+    const url =
+        provider === 'claude'
+            ? 'https://claude.ai/chat/test-fixture'
+            : 'https://chatgpt.com/c/test-fixture';
+    const dom = new JSDOM(html, {
+        url,
+        runScripts: 'outside-only',
+        pretendToBeVisual: true,
+    });
+    const sentMessages = [];
+    const listeners = [];
+    const chrome = createChromeStub(sentMessages, listeners);
+    const context = dom.getInternalVMContext();
+
+    context.console = console;
+    context.chrome = chrome;
+    context.__MLC_CAPTURE_TEST_MODE__ = true;
+    context.MLCCaptureProviders = buildProviderRegistry();
+    context.globalThis.__MLC_CAPTURE_TEST_MODE__ = true;
+    context.globalThis.MLCCaptureProviders = context.MLCCaptureProviders;
+    Object.defineProperty(context.document, 'visibilityState', {
+        value: 'visible',
+        configurable: true,
+    });
+
+    vm.runInContext(captureUtilsSource, context, { filename: 'captureUtils.js' });
+    vm.runInContext(contentScriptSource, context, { filename: 'content/index.js' });
+
+    const hooks = context.__MLC_CAPTURE_TEST_HOOKS__;
+    if (!hooks) {
+        throw new Error('Capture test hooks were not exposed.');
+    }
+
+    return {
+        dom,
+        window: context,
+        document: context.document,
+        hooks,
+        sentMessages,
+        listeners,
+    };
+}
+
+describe('Content capture fixtures', () => {
+    test('ChatGPT captures reference-heavy answers without toolbar noise', () => {
+        const harness = loadCaptureHarness({
+            provider: 'chatgpt',
+            html: readFixture('capture', 'chatgpt', 'reference-heavy-answer.html'),
+        });
+
+        const extraction = harness.hooks.extractLatestResponse({ withMeta: true, withHtml: true });
+        const text = normalizeText(extraction.text);
+
+        expect(text).toContain('The capture pipeline should keep the full answer text intact.');
+        expect(text).toContain('Reference summary one');
+        expect(text).toContain('Reference summary two');
+        expect(text).not.toContain('Copy');
+        expect(text).not.toContain('Share');
+        expect(text).not.toContain('Regenerate');
+        expect(extraction.html).toContain('Reference summary one');
+        expect(extraction.html).not.toContain('Copy');
+        expect(extraction.html).not.toContain('<button');
+        expect(extraction.meta.finalWordCount).toBeGreaterThan(10);
+    });
+
+    test('ChatGPT preserves interleaved citation ordering from the sanitized fragment collector', () => {
+        const harness = loadCaptureHarness({
+            provider: 'chatgpt',
+            html: readFixture('capture', 'chatgpt', 'interleaved-citations.html'),
+        });
+
+        const extraction = harness.hooks.extractLatestResponse({ withMeta: true });
+        const text = normalizeText(extraction.text);
+        const firstParagraphIndex = text.indexOf('Primary answer paragraph one.');
+        const citationIndex = text.indexOf('Citation label 1');
+        const secondParagraphIndex = text.indexOf('Primary answer paragraph two.');
+        const referenceIndex = text.indexOf('Reference summary two');
+
+        expect(firstParagraphIndex).toBeGreaterThanOrEqual(0);
+        expect(citationIndex).toBeGreaterThan(firstParagraphIndex);
+        expect(secondParagraphIndex).toBeGreaterThan(citationIndex);
+        expect(referenceIndex).toBeGreaterThan(secondParagraphIndex);
+        expect(text).not.toContain('Copy');
+    });
+
+    test('Claude captures long answers with citations while stripping toolbar noise from text and html', () => {
+        const harness = loadCaptureHarness({
+            provider: 'claude',
+            html: readFixture('capture', 'claude', 'long-answer-with-noise.html'),
+        });
+
+        const extraction = harness.hooks.extractLatestResponse({ withMeta: true, withHtml: true });
+        const text = normalizeText(extraction.text);
+
+        expect(text).toContain(
+            'Claude should return the long-form answer without dragging action chrome into the transcript.'
+        );
+        expect(text).toContain('Citation summary one');
+        expect(text).not.toContain('Copy');
+        expect(text).not.toContain('Share');
+        expect(extraction.html).toContain('Citation summary one');
+        expect(extraction.html).not.toContain('Copy');
+        expect(extraction.html).not.toContain('<button');
+    });
+
+    test('Claude progressed-candidate selection and capture emission prefer the new reply over the baseline answer', () => {
+        const harness = loadCaptureHarness({
+            provider: 'claude',
+            html: readFixture('capture', 'claude', 'previous-long-answer.html'),
+        });
+
+        harness.hooks.armCapture({
+            promptId: 'test_prompt',
+            sessionId: 'test_session',
+            turnIndex: 2,
+            agentId: 'agent_claude_1',
+            timestamp: Date.now() - 7000,
+        });
+
+        harness.document
+            .querySelector('main')
+            .insertAdjacentHTML(
+                'beforeend',
+                readFixture('capture', 'claude', 'new-short-reply-fragment.html')
+            );
+
+        const preferred = harness.hooks.extractLatestResponse({
+            withMeta: true,
+            withHtml: true,
+            preferAfterOrder: harness.hooks.captureState.baselineBestOrder,
+            preferAfterSignature: harness.hooks.captureState.baselineBestSignature,
+        });
+        const preferredText = normalizeText(preferred.text);
+
+        expect(preferredText).toContain('Short new reply.');
+        expect(preferredText).toContain('It answers the latest user turn directly.');
+        expect(preferredText).not.toContain('Copy');
+        expect(preferred.meta.bestOrder).toBeGreaterThan(harness.hooks.captureState.baselineBestOrder);
+
+        harness.hooks.captureState.startedAt = Date.now() - 7000;
+        harness.hooks.evaluateCapture();
+        expect(harness.sentMessages).toHaveLength(0);
+
+        harness.hooks.captureState.lastTextChangeAt = Date.now() - 2500;
+        harness.hooks.evaluateCapture();
+
+        expect(harness.sentMessages).toHaveLength(1);
+        expect(harness.sentMessages[0].type).toBe('MLC_RESPONSE_CAPTURED');
+        expect(normalizeText(harness.sentMessages[0].content)).toContain('Short new reply.');
+        expect(harness.sentMessages[0].content).not.toContain('Copy');
+    });
+});

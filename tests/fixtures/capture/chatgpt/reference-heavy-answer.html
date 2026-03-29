@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+  <body>
+    <main>
+      <div role="log">
+        <article data-message-author-role="assistant">
+          <div data-testid="message-content">
+            <p>The capture pipeline should keep the full answer text intact.</p>
+            <p>It also needs to preserve the reference summaries that belong to this reply.</p>
+          </div>
+          <section class="sources-list">
+            <div class="reference-row">Reference summary one</div>
+            <div class="reference-row">Reference summary two</div>
+          </section>
+          <div role="toolbar" aria-label="Message actions">
+            <button>Copy</button>
+            <button>Share</button>
+            <button>Regenerate</button>
+          </div>
+        </article>
+      </div>
+    </main>
+    <textarea id="prompt-textarea"></textarea>
+  </body>
+</html>

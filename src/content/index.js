@@ -20,6 +20,7 @@
         (isChatGPT ? 'chatgpt' : isGemini ? 'gemini' : isClaude ? 'claude' : 'grok');
     const providerCaptureProfile = captureProviders[currentLLM] || null;
     const CONTENT_SCRIPT_BUILD = 'grok-capture-r7-2026-02-13';
+    const CAPTURE_TEST_MODE = globalThis.__MLC_CAPTURE_TEST_MODE__ === true;
 
     console.log(
         `[MLC ContentScript] Initializing for ${currentLLM} (build=${CONTENT_SCRIPT_BUILD}).`
@@ -54,6 +55,7 @@
     const captureState = {
         active: false,
         promptId: null,
+        turnAttemptId: null,
         promptPreview: '',
         sessionId: null,
         turnIndex: null,
@@ -61,6 +63,9 @@
         startedAt: 0,
         lastText: '',
         baselineText: '',
+        baselineBestBottom: null,
+        baselineBestOrder: null,
+        baselineBestSignature: '',
         baselineAssistantCount: null,
         baselineAssistantIndex: null,
         hasNewText: false,
@@ -163,6 +168,10 @@
         if (!message || !message.promptId) return;
         captureState.active = true;
         captureState.promptId = message.promptId;
+        captureState.turnAttemptId =
+            typeof message.turnAttemptId === 'string' && message.turnAttemptId.trim()
+                ? message.turnAttemptId.trim()
+                : null;
         captureState.promptPreview =
             typeof message.promptPreview === 'string' ? message.promptPreview : '';
         captureState.sessionId = message.sessionId || null;
@@ -177,6 +186,16 @@
         captureState.baselineAssistantIndex = null;
         const baselineExtraction = extractLatestResponse({ withMeta: true });
         captureState.baselineText = baselineExtraction.text || '';
+        captureState.baselineBestBottom = Number.isFinite(baselineExtraction.meta?.bestBottom)
+            ? baselineExtraction.meta.bestBottom
+            : null;
+        captureState.baselineBestOrder = Number.isFinite(baselineExtraction.meta?.bestOrder)
+            ? baselineExtraction.meta.bestOrder
+            : null;
+        captureState.baselineBestSignature =
+            typeof baselineExtraction.meta?.bestSignature === 'string'
+                ? baselineExtraction.meta.bestSignature
+                : '';
         if (isChatGPT) {
             const baselineIndex = Number.isFinite(baselineExtraction.meta?.bestAssistantIndex)
                 ? baselineExtraction.meta.bestAssistantIndex
@@ -212,13 +231,16 @@
         captureDebug('Armed', {
             llm: currentLLM,
             promptId: message.promptId,
+            turnAttemptId: captureState.turnAttemptId,
             sessionId: captureState.sessionId,
             turnIndex: captureState.turnIndex,
             baselineAssistantCount: captureState.baselineAssistantCount,
             baselineAssistantIndex: captureState.baselineAssistantIndex,
             baselinePreview: String(captureState.baselineText || '').slice(0, 160),
         });
-        setTimeout(() => scheduleEvaluateCapture(), 1200);
+        if (!CAPTURE_TEST_MODE) {
+            setTimeout(() => scheduleEvaluateCapture(), 1200);
+        }
     }
 
     function isElementVisible(el) {
@@ -502,11 +524,74 @@
         return (text || '').trim();
     }
 
-    function extractCleanHtmlFromNode(node) {
-        if (!node) return '';
+    function looksLikeUiChromeText(text, options = {}) {
+        const raw = String(text || '').trim();
+        if (!raw) return false;
+        if (CaptureUtils && typeof CaptureUtils.looksLikeUiControlText === 'function') {
+            if (CaptureUtils.looksLikeUiControlText(raw, { provider: options.provider || '' })) {
+                return true;
+            }
+        }
+
+        const normalized = normalizeCaptureCandidateText(raw).toLowerCase();
+        if (!normalized) return false;
+
+        const wordCount = getCaptureWordCount(normalized);
+        if (wordCount === 0 || wordCount > 12) return false;
+
+        const chromePatterns = [
+            /^copy$/,
+            /^copier$/,
+            /^share$/,
+            /^partager$/,
+            /^edit$/,
+            /^modifier$/,
+            /^retry$/,
+            /^try again$/,
+            /^regenerate$/,
+            /^read aloud$/,
+            /^listen$/,
+            /^speak$/,
+            /^voice$/,
+            /^thumbs up$/,
+            /^thumbs down$/,
+            /^good response$/,
+            /^bad response$/,
+            /^continue generating$/,
+            /^show more$/,
+            /^show less$/,
+            /^more$/,
+            /^less$/,
+        ];
+        return chromePatterns.some((pattern) => pattern.test(normalized));
+    }
+
+    function looksLikeUiChromeElement(element, options = {}) {
+        if (!element || element.nodeType !== 1) return false;
+        const descriptor = [
+            getElementAttributeValue(element, 'role'),
+            getElementAttributeValue(element, 'aria-label'),
+            getElementAttributeValue(element, 'title'),
+            getElementAttributeValue(element, 'data-testid'),
+            String(element.className || '').toLowerCase(),
+        ].join(' ');
+        const text = getTrimmedText(element);
+        if (looksLikeUiChromeText(text, options)) return true;
+        if (!descriptor) return false;
+        if (
+            /\b(toolbar|feedback|controls?|copy|share|edit|retry|regenerate|thumb|vote|reaction|composer|button|action)\b/.test(
+                descriptor
+            )
+        ) {
+            return !text || looksLikeUiChromeText(text, options);
+        }
+        return false;
+    }
+
+    function sanitizeContentClone(node, options = {}) {
+        if (!node) return null;
         const clone = node.cloneNode(true);
 
-        // Remove obvious non-content UI and media elements that can bloat messages.
         const removeSelectors = [
             'script',
             'style',
@@ -522,14 +607,39 @@
             'audio',
             'canvas',
             'picture',
+            'svg',
+            'nav',
+            'footer',
+            '[role="button"]',
+            '[role="menu"]',
+            '[role="menuitem"]',
+            '[role="tooltip"]',
+            '[contenteditable="true"]',
         ];
         clone.querySelectorAll(removeSelectors.join(',')).forEach((el) => el.remove());
 
-        const html = clone.innerHTML || '';
-        // Keep payloads bounded; if too large, fall back to plain text rendering in the UI.
+        const toRemove = [];
+        clone.querySelectorAll('*').forEach((el) => {
+            if (looksLikeUiChromeElement(el, options)) {
+                toRemove.push(el);
+            }
+        });
+        toRemove.forEach((el) => el.remove());
+        return clone;
+    }
+
+    function getBoundedHtmlFromNode(node) {
+        if (!node) return '';
+        const html = node.innerHTML || '';
         const MAX_HTML_CHARS = 120000;
         if (html.length > MAX_HTML_CHARS) return '';
         return html;
+    }
+
+    function extractCleanHtmlFromNode(node, options = {}) {
+        if (!node) return '';
+        const prepared = options.skipSanitize ? node : sanitizeContentClone(node, options);
+        return getBoundedHtmlFromNode(prepared);
     }
 
     function looksLikeChatGPTSourcesOnly(text) {
@@ -649,10 +759,137 @@
         return normalized;
     }
 
+    function getCaptureWordCount(text) {
+        if (CaptureUtils && typeof CaptureUtils.countWords === 'function') {
+            return CaptureUtils.countWords(text);
+        }
+        const normalized = normalizeCaptureCandidateText(text);
+        return normalized ? normalized.split(/\s+/).filter(Boolean).length : 0;
+    }
+
+    function extendsCandidateMeaningfully(baseText, candidateText, options = {}) {
+        if (CaptureUtils && typeof CaptureUtils.extendsMeaningfully === 'function') {
+            return CaptureUtils.extendsMeaningfully(baseText, candidateText, options);
+        }
+        const baseFragments = Array.isArray(baseText)
+            ? baseText
+                  .map((value) => normalizeCaptureCandidateText(value || ''))
+                  .filter(Boolean)
+            : [normalizeCaptureCandidateText(baseText || '')].filter(Boolean);
+        const baseNormalized = baseFragments.join(' ');
+        const candidateNormalized = normalizeCaptureCandidateText(candidateText || '');
+        if (!baseNormalized || !candidateNormalized || candidateNormalized === baseNormalized) {
+            return false;
+        }
+        let cursor = 0;
+        for (const fragment of baseFragments) {
+            const nextIndex = candidateNormalized.indexOf(fragment, cursor);
+            if (nextIndex === -1) return false;
+            cursor = nextIndex + fragment.length;
+        }
+        const minExtraWords = Number.isFinite(options.minExtraWords)
+            ? Math.max(1, Number(options.minExtraWords))
+            : 12;
+        const minExtraChars = Number.isFinite(options.minExtraChars)
+            ? Math.max(1, Number(options.minExtraChars))
+            : 80;
+        const baseWordCount = Array.isArray(baseText)
+            ? getCaptureWordCount(baseText.join(' '))
+            : getCaptureWordCount(baseText);
+        const extraWords = Math.max(0, getCaptureWordCount(candidateText) - baseWordCount);
+        const extraChars = Math.max(0, candidateNormalized.length - baseNormalized.length);
+        return extraWords >= minExtraWords || extraChars >= minExtraChars;
+    }
+
     function getTopLevelNodes(nodes) {
         const arr = Array.from(nodes || []).filter(Boolean);
         if (arr.length <= 1) return arr;
-        return arr.filter((node) => !arr.some((other) => other !== node && other.contains(node)));
+        const topLevel = arr.filter(
+            (node) => !arr.some((other) => other !== node && other.contains(node))
+        );
+        return topLevel.sort((a, b) => {
+            if (a === b) return 0;
+            const position = a.compareDocumentPosition?.(b);
+            if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+            if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+            return 0;
+        });
+    }
+
+    function collectSanitizedFragmentCandidate(rootNode, selectors, options = {}) {
+        const clone = sanitizeContentClone(rootNode, options);
+        if (!clone) {
+            return {
+                text: '',
+                html: '',
+                partCount: 0,
+                nodeCount: 0,
+                usedRoot: false,
+            };
+        }
+
+        let fragmentNodes = [];
+        if (Array.isArray(selectors) && selectors.length > 0) {
+            try {
+                fragmentNodes = getTopLevelNodes(clone.querySelectorAll(selectors.join(', ')));
+            } catch (error) {
+                fragmentNodes = [];
+            }
+        }
+
+        const seenText = new Set();
+        const parts = [];
+        const htmlParts = [];
+        for (const node of fragmentNodes) {
+            const text = getTrimmedText(node);
+            if (!text || looksLikeUiChromeText(text, options)) continue;
+            const normalized = normalizeCaptureCandidateText(text);
+            if (!normalized || seenText.has(normalized)) continue;
+            seenText.add(normalized);
+            parts.push(text);
+            if (options.withHtml) {
+                const html = extractCleanHtmlFromNode(node, {
+                    ...options,
+                    skipSanitize: true,
+                });
+                if (html) htmlParts.push(html);
+            }
+        }
+
+        const combinedText = parts.join('\n\n').trim();
+        const rootText = getTrimmedText(clone);
+        const canUseRootText = Boolean(
+            rootText &&
+                !looksLikeUiChromeText(rootText, options) &&
+                (!combinedText ||
+                    (!looksLikePromptEcho(rootText) &&
+                        extendsCandidateMeaningfully(parts.length ? parts : combinedText, rootText, {
+                            minExtraWords: 10,
+                            minExtraChars: 48,
+                        })))
+        );
+
+        const finalText = canUseRootText ? rootText : combinedText || rootText || '';
+        let finalHtml = '';
+        if (options.withHtml && finalText) {
+            finalHtml = canUseRootText
+                ? extractCleanHtmlFromNode(clone, { ...options, skipSanitize: true })
+                : htmlParts.join('\n').trim();
+            if (!finalHtml) {
+                finalHtml = extractCleanHtmlFromNode(clone, {
+                    ...options,
+                    skipSanitize: true,
+                });
+            }
+        }
+
+        return {
+            text: finalText,
+            html: finalHtml,
+            partCount: parts.length,
+            nodeCount: fragmentNodes.length,
+            usedRoot: canUseRootText || (!combinedText && Boolean(rootText)),
+        };
     }
 
     function buildChatGPTAssistantCandidate(messageRoot, assistantIndex, options = {}) {
@@ -667,54 +904,35 @@
             };
         }
 
-        const contentNodes = (() => {
-            const primary = getTopLevelNodes(
-                messageRoot.querySelectorAll('[data-testid="message-content"]')
-            );
-            if (primary.length) return primary;
-
-            const secondary = getTopLevelNodes(messageRoot.querySelectorAll('.markdown, .prose'));
-            if (secondary.length) return secondary;
-
-            return [messageRoot];
-        })();
-
-        const seenText = new Set();
-        const parts = [];
-        const htmlParts = [];
-        for (const node of contentNodes) {
-            const text = getTrimmedText(node);
-            if (!text) continue;
-            const normalized = normalizeCaptureCandidateText(text);
-            if (!normalized) continue;
-            if (seenText.has(normalized)) continue;
-            seenText.add(normalized);
-            parts.push(text);
-            if (options.withHtml) {
-                const html = extractCleanHtmlFromNode(node);
-                if (html) htmlParts.push(html);
-            }
-        }
-
-        const combinedText = parts.join('\n\n').trim();
-        let combinedHtml = '';
-        if (options.withHtml) {
-            combinedHtml = htmlParts.join('\n').trim();
-            const MAX_HTML_CHARS = 120000;
-            if (combinedHtml.length > MAX_HTML_CHARS) combinedHtml = '';
-        }
+        const selectors = [
+            '[data-testid="message-content"]',
+            '.markdown',
+            '.prose',
+            '[data-testid*="citation" i]',
+            '[data-testid*="reference" i]',
+            '[data-testid*="source" i]',
+            '[class*="citation" i]',
+            '[class*="reference" i]',
+            '[class*="source" i]',
+        ];
+        const collected = collectSanitizedFragmentCandidate(messageRoot, selectors, {
+            withHtml: options.withHtml,
+            provider: 'chatgpt',
+        });
+        const finalText = collected.text;
+        const combinedHtml = options.withHtml ? collected.html || '' : '';
 
         const origin = Number.isFinite(assistantIndex)
-            ? `assistant[${assistantIndex}] aggregated(${parts.length}/${contentNodes.length})`
+            ? `assistant[${assistantIndex}] ${collected.usedRoot ? 'root-sanitized' : `aggregated(${collected.partCount}/${collected.nodeCount})`}`
             : 'assistant aggregated';
 
         return {
-            text: combinedText,
+            text: finalText,
             html: combinedHtml,
             assistantIndex,
             origin,
-            partCount: parts.length,
-            nodeCount: contentNodes.length,
+            partCount: collected.partCount,
+            nodeCount: collected.nodeCount,
         };
     }
 
@@ -1063,6 +1281,8 @@
             supplementalCount: combined.supplementalIndices
                 ? combined.supplementalIndices.length
                 : 0,
+            finalWordCount: getCaptureWordCount(finalText),
+            finalTextLength: finalText.length,
             rankingTop: Array.isArray(ranking.ranked)
                 ? ranking.ranked.slice(0, 6).map((r) => ({
                       index: r.index,
@@ -1681,6 +1901,12 @@
             '.prose',
             '[class*="prose" i]',
             '[class*="markdown" i]',
+            '[data-testid*="citation" i]',
+            '[data-testid*="reference" i]',
+            '[data-testid*="source" i]',
+            '[class*="citation" i]',
+            '[class*="reference" i]',
+            '[class*="source" i]',
         ];
 
         const candidates = [];
@@ -1696,67 +1922,33 @@
                 return;
             if (isClaudeUserMessage(node)) return;
 
-            const contentNodes = [];
-            for (const sel of contentSelectors) {
-                try {
-                    node.querySelectorAll(sel).forEach((child) => contentNodes.push(child));
-                } catch (error) {
-                    // ignore selector errors
-                }
-            }
-            const topLevel = getTopLevelNodes(contentNodes);
-            const nodes = topLevel.length ? topLevel : [node];
-
-            const parts = [];
-            const htmlParts = [];
-            const localSeen = new Set();
-            for (const child of nodes) {
-                if (!child || isClaudeUserMessage(child)) continue;
-                const text = (child.innerText || child.textContent || '').trim();
-                if (!text) continue;
-                const normalized = normalizeCaptureCandidateText(text);
-                if (!normalized || localSeen.has(normalized)) continue;
-                localSeen.add(normalized);
-                parts.push(text);
-                if (options.withHtml) {
-                    const html = extractCleanHtmlFromNode(child);
-                    if (html) htmlParts.push(html);
-                }
-            }
-
-            const combinedText = parts.join('\n\n').trim();
-            if (!combinedText) return;
-            if (looksLikePromptEcho(combinedText)) {
+            const collected = collectSanitizedFragmentCandidate(node, contentSelectors, {
+                withHtml: options.withHtml,
+                provider: 'claude',
+            });
+            const finalText = collected.text;
+            if (!finalText) return;
+            if (looksLikePromptEcho(finalText)) {
                 sawPromptEcho = true;
                 return;
             }
-            const normalizedCombined = normalizeCaptureCandidateText(combinedText);
+            const normalizedCombined = normalizeCaptureCandidateText(finalText);
             if (!normalizedCombined || seenText.has(normalizedCombined)) return;
             seenText.add(normalizedCombined);
-
-            let rect;
-            try {
-                rect = node.getBoundingClientRect();
-            } catch (error) {
-                rect = null;
-            }
-            const bottom = rect && Number.isFinite(rect.bottom) ? rect.bottom : 0;
-
-            let combinedHtml = '';
-            if (options.withHtml && htmlParts.length) {
-                combinedHtml = htmlParts.join('\n').trim();
-                const MAX_HTML_CHARS = 120000;
-                if (combinedHtml.length > MAX_HTML_CHARS) combinedHtml = '';
-            }
+            const order = candidates.length;
+            const combinedHtml = options.withHtml ? collected.html || '' : '';
+            const signature = `${selector}:${stableTextSignature(finalText)}`;
 
             candidates.push({
                 node,
                 selector,
-                text: combinedText,
+                text: finalText,
                 html: combinedHtml,
-                bottom,
-                partCount: parts.length,
-                nodeCount: nodes.length,
+                order,
+                signature,
+                partCount: collected.partCount,
+                nodeCount: collected.nodeCount,
+                usedRoot: collected.usedRoot,
             });
         };
 
@@ -1875,9 +2067,49 @@
             return false;
         };
 
+        let hasExplicitProgressedCandidates = false;
+        const candidateRankingPool = (() => {
+            if (!Array.isArray(ranking.ranked) || ranking.ranked.length === 0) return [];
+            const baselineOrder = Number.isFinite(options.preferAfterOrder)
+                ? options.preferAfterOrder
+                : Number.isFinite(captureState.baselineBestOrder)
+                  ? captureState.baselineBestOrder
+                  : null;
+            const baselineSignature =
+                typeof options.preferAfterSignature === 'string' && options.preferAfterSignature.trim()
+                    ? options.preferAfterSignature.trim()
+                    : typeof captureState.baselineBestSignature === 'string' &&
+                        captureState.baselineBestSignature.trim()
+                      ? captureState.baselineBestSignature.trim()
+                      : '';
+            if (!Number.isFinite(baselineOrder) && !baselineSignature) return ranking.ranked;
+            const progressed = ranking.ranked.filter((item) => {
+                const candidate = candidates[item.index];
+                if (!candidate) return false;
+                if (Number.isFinite(baselineOrder) && Number.isFinite(candidate.order)) {
+                    if (candidate.order > baselineOrder) return true;
+                }
+                if (baselineSignature && candidate.signature && candidate.signature !== baselineSignature) {
+                    if (!Number.isFinite(baselineOrder)) return true;
+                    return Number.isFinite(candidate.order) && candidate.order >= baselineOrder;
+                }
+                return false;
+            });
+            const nonReferenceProgressed = progressed.filter((item) => item && !item.isReferenceList);
+            if (nonReferenceProgressed.length > 0) {
+                hasExplicitProgressedCandidates = true;
+                return nonReferenceProgressed;
+            }
+            if (progressed.length > 0) {
+                hasExplicitProgressedCandidates = true;
+                return progressed;
+            }
+            return ranking.ranked;
+        })();
+
         const bestIsReference = isReferenceCandidate(chosenIndex);
-        if (bestIsReference && Array.isArray(ranking.ranked)) {
-            const alt = ranking.ranked.find((item) => {
+        if (bestIsReference && candidateRankingPool.length > 0) {
+            const alt = candidateRankingPool.find((item) => {
                 if (item.index === chosenIndex) return false;
                 if (item.isReferenceList) return false;
                 const analysis = item.analysis || {};
@@ -1897,8 +2129,17 @@
             }
         }
 
+        if (hasExplicitProgressedCandidates && candidateRankingPool.length > 0) {
+            chosenIndex = candidateRankingPool[0].index;
+        } else if (
+            candidateRankingPool.length > 0 &&
+            !candidateRankingPool.some((item) => item.index === chosenIndex)
+        ) {
+            chosenIndex = candidateRankingPool[0].index;
+        }
+
         const chosenWordCount = getWordCount(chosenIndex);
-        if (chosenWordCount > 0 && chosenWordCount < 12) {
+        if (!hasExplicitProgressedCandidates && chosenWordCount > 0 && chosenWordCount < 12) {
             let bestAltIndex = chosenIndex;
             let bestAltWordCount = chosenWordCount;
             for (let i = 0; i < texts.length; i++) {
@@ -1931,9 +2172,7 @@
                 options.withHtml && bestCandidate?.html ? [bestCandidate.html] : [];
             const supplementalIndices = [];
             const normalizedSet = new Set([normalizeCaptureCandidateText(bestText)]);
-            const bestBottom = Number.isFinite(bestCandidate?.bottom)
-                ? bestCandidate.bottom
-                : -Infinity;
+            const bestOrder = Number.isFinite(bestCandidate?.order) ? bestCandidate.order : -Infinity;
 
             const ordered = candidates
                 .map((candidate, index) => ({
@@ -1941,16 +2180,16 @@
                     index,
                 }))
                 .sort((a, b) => {
-                    const aBottom = Number.isFinite(a.bottom) ? a.bottom : -Infinity;
-                    const bBottom = Number.isFinite(b.bottom) ? b.bottom : -Infinity;
-                    if (aBottom !== bBottom) return aBottom - bBottom;
+                    const aOrder = Number.isFinite(a.order) ? a.order : -Infinity;
+                    const bOrder = Number.isFinite(b.order) ? b.order : -Infinity;
+                    if (aOrder !== bOrder) return aOrder - bOrder;
                     return a.index - b.index;
                 });
 
             for (const entry of ordered) {
                 if (entry.index === bestIndex) continue;
-                const entryBottom = Number.isFinite(entry.bottom) ? entry.bottom : -Infinity;
-                if (entryBottom < bestBottom) continue;
+                const entryOrder = Number.isFinite(entry.order) ? entry.order : -Infinity;
+                if (entryOrder < bestOrder) continue;
 
                 const normalized = normalizeCaptureCandidateText(entry.text || '');
                 if (!normalized || normalizedSet.has(normalized)) continue;
@@ -1983,8 +2222,6 @@
 
         const finalText = combined.text || bestText;
         const finalHtml = options.withHtml ? combined.html || bestCandidate?.html || '' : '';
-
-        const bestBottom = bestCandidate ? bestCandidate.bottom : -Infinity;
         const bestLen = bestCandidate ? bestCandidate.text.length : null;
 
         const meta = {
@@ -1992,13 +2229,16 @@
             candidateCount: candidates.length,
             sawPromptEcho,
             bestSelector: bestCandidate?.selector || null,
-            bestBottom: Number.isFinite(bestBottom) ? Math.round(bestBottom) : null,
+            bestOrder: Number.isFinite(bestCandidate?.order) ? bestCandidate.order : null,
+            bestSignature: bestCandidate?.signature || null,
             bestLen: Number.isFinite(bestLen) ? bestLen : null,
             bestIsReferenceList: isReferenceCandidate(bestIndex),
             supplementalIndices: combined.supplementalIndices || [],
             supplementalCount: combined.supplementalIndices
                 ? combined.supplementalIndices.length
                 : 0,
+            finalWordCount: getCaptureWordCount(finalText),
+            finalTextLength: finalText.length,
         };
 
         const result = { text: finalText };
@@ -2912,6 +3152,7 @@
             content: text,
             contentHtml,
             promptId: captureState.promptId,
+            turnAttemptId: captureState.turnAttemptId,
             sessionId: captureState.sessionId,
             agentId: captureState.agentId,
             sourceLLM: currentLLM,
@@ -3344,6 +3585,61 @@
                         currentCandidateCount: currentGrokCandidateCount,
                     });
                 }
+            } else if (isClaude) {
+                const baselineNormalized = normalizeCaptureCandidateText(
+                    captureState.baselineText || ''
+                );
+                const textNormalized = normalizeCaptureCandidateText(text);
+                const sameAsBaseline = Boolean(
+                    baselineNormalized && textNormalized && textNormalized === baselineNormalized
+                );
+                if (sameAsBaseline) {
+                    const baselineOrder = Number.isFinite(captureState.baselineBestOrder)
+                        ? captureState.baselineBestOrder
+                        : null;
+                    const baselineSignature =
+                        typeof captureState.baselineBestSignature === 'string' &&
+                        captureState.baselineBestSignature.trim()
+                            ? captureState.baselineBestSignature.trim()
+                            : '';
+                    const elapsedMs = now - captureState.startedAt;
+                    const shouldRetryLatest =
+                        (Number.isFinite(baselineOrder) || baselineSignature) && elapsedMs >= 6000;
+                    if (!shouldRetryLatest) return;
+                    const latestExtraction = extractLatestResponse({
+                        withMeta: true,
+                        withHtml: true,
+                        preferAfterOrder: baselineOrder,
+                        preferAfterSignature: baselineSignature,
+                    });
+                    const latestText = latestExtraction.text || '';
+                    const latestNormalized = normalizeCaptureCandidateText(latestText);
+                    const latestSameAsBaseline = Boolean(
+                        baselineNormalized &&
+                        latestNormalized &&
+                        latestNormalized === baselineNormalized
+                    );
+                    if (!latestText || latestSameAsBaseline) {
+                        captureDebug('Claude no-progress fallback still matched baseline', {
+                            baselineOrder,
+                            baselineSignature,
+                            elapsedMs,
+                            latestLen: latestText.length,
+                            latestMeta: latestExtraction.meta || null,
+                        });
+                        return;
+                    }
+                    extraction = latestExtraction;
+                    text = latestText;
+                    captureState.lastExtractionMeta = latestExtraction.meta || null;
+                    meta = captureState.lastExtractionMeta || {};
+                    captureDebug('Claude switched to progressed candidate after baseline stall', {
+                        baselineOrder,
+                        baselineSignature,
+                        elapsedMs,
+                        latestMeta: latestExtraction.meta || null,
+                    });
+                }
             } else {
                 if (text === captureState.baselineText) return;
             }
@@ -3397,10 +3693,11 @@
         if (generating) captureState.sawGenerating = true;
         const stableForMs = now - captureState.lastTextChangeAt;
         const totalForMs = now - captureState.startedAt;
-        const metaWordCount =
-            isChatGPT && Number.isFinite(captureState.lastExtractionMeta?.bestWordCount)
-                ? captureState.lastExtractionMeta.bestWordCount
-                : null;
+        const metaWordCount = Number.isFinite(captureState.lastExtractionMeta?.finalWordCount)
+            ? captureState.lastExtractionMeta.finalWordCount
+            : isChatGPT && Number.isFinite(captureState.lastExtractionMeta?.bestWordCount)
+              ? captureState.lastExtractionMeta.bestWordCount
+              : null;
         const wordCount =
             metaWordCount !== null
                 ? metaWordCount
@@ -3587,6 +3884,16 @@
                 scheduledEvaluateHandle = null;
             }
         });
+    }
+
+    if (CAPTURE_TEST_MODE) {
+        globalThis.__MLC_CAPTURE_TEST_HOOKS__ = {
+            extractLatestResponse,
+            armCapture,
+            evaluateCapture,
+            captureState,
+        };
+        return;
     }
 
     startCaptureObservers();

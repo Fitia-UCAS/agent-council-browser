@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+  <body>
+    <main>
+      <article data-testid="chat-message" data-role="assistant">
+        <div data-testid="chat-message-content" class="markdown">
+          <p>This is the previous long answer that should become the baseline for the next Claude turn.</p>
+          <p>It is intentionally longer than the next reply so the ranking logic would otherwise keep preferring it.</p>
+          <p>That makes it a useful fixture for validating the progressed-candidate selection path.</p>
+        </div>
+      </article>
+    </main>
+    <footer>
+      <form>
+        <textarea placeholder="Message Claude"></textarea>
+      </form>
+    </footer>
+  </body>
+</html>
