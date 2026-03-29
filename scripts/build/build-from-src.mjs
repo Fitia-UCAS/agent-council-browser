@@ -193,7 +193,7 @@ async function main() {
     }
 
     if (mode === 'release') {
-        manifest.name = stripVariantSuffix(manifest.name || 'Multi-LLM Coder');
+        manifest.name = stripVariantSuffix(manifest.name || 'Minions Council');
         const existingAction =
             manifest.action && typeof manifest.action === 'object' ? manifest.action : {};
         manifest.action = {

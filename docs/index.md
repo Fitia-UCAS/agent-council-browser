@@ -1,4 +1,4 @@
-# Multi-LLM Coder Docs
+# Minions Council Docs
 
 ## Public Policies
 

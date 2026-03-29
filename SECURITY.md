@@ -11,7 +11,7 @@ Please do not open public issues for security vulnerabilities.
 Use one of these private channels:
 
 1. Preferred: GitHub private vulnerability reporting (Security Advisory draft):  
-   `https://github.com/multi-llm-coder/extension/security/advisories/new`
+   `https://github.com/AmT42/minions-council/security/advisories/new`
 
 Include:
 

@@ -27,7 +27,7 @@ This pipeline:
 
 Output:
 
-- `release/multi-llm-coder-v<version>.zip`
+- `release/minions-council-v<version>.zip`
 
 ## 3) CI gate expectations
 

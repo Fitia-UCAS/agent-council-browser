@@ -49,7 +49,7 @@ This triggers `.github/workflows/release.yml`.
 
 ## 4) Chrome Web Store submission
 
-1. Upload `release/multi-llm-coder-vX.Y.Z.zip`.
+1. Upload `release/minions-council-vX.Y.Z.zip`.
 2. Verify listing links point to public docs:
     - Privacy policy
     - Security policy
