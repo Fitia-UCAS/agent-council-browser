@@ -1,5 +1,5 @@
 /**
- * Multi-LLM Coder Extension - Background Service Worker
+ * Minions Council Extension - Background Service Worker
  * Handles communication with LLM websites and tab management
  */
 
@@ -197,6 +197,21 @@ function sendMessageToPopup(message) {
 // Generate a unique ID for each prompt-response cycle
 function generatePromptId() {
     return 'prompt_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+function generateTurnAttemptId(sessionId, turnIndex, agentId) {
+    const sessionPart = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : 'session';
+    const agentPart = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : 'agent';
+    const turnPart = Number.isFinite(turnIndex) ? Math.max(1, Number(turnIndex)) : 'x';
+    return `${sessionPart}:turn:${turnPart}:agent:${agentPart}:attempt:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function buildSequentialPromptId(turnAttemptId) {
+    const base =
+        typeof turnAttemptId === 'string' && turnAttemptId.trim()
+            ? turnAttemptId.trim()
+            : generatePromptId();
+    return `${base}:prompt`;
 }
 
 // DEBATE SESSION STATE MANAGEMENT
@@ -741,6 +756,7 @@ const defaultDebateState = {
     waitingFor: null,
     parallelPromptIds: null,
     lastPromptId: null,
+    lastTurnAttemptId: null,
     lastPromptTimestamp: 0,
     startedAt: 0,
     endedAt: 0,
@@ -5644,11 +5660,13 @@ async function sendDebateTurn(session) {
         return;
     }
 
+    const turnAttemptId = generateTurnAttemptId(session.sessionId, turnIndex, expectedAgentId);
     const promptText = await buildSessionPrompt(session, turnIndex);
-    const promptId = `${session.sessionId}:turn:${turnIndex}`;
+    const promptId = buildSequentialPromptId(turnAttemptId);
 
     session.waitingFor = expectedAgentId;
     session.lastPromptId = promptId;
+    session.lastTurnAttemptId = turnAttemptId;
     session.lastPromptTimestamp = Date.now();
 
     await saveSession(session);
@@ -5682,6 +5700,7 @@ async function sendDebateTurn(session) {
         await injectAndExecute(resolution.tabId, expectedProvider, promptText, {
             sessionId: session.sessionId,
             promptId: promptId,
+            turnAttemptId,
             turnIndex: turnIndex,
             agentId: expectedAgentId,
             attachments: attachmentsToSend || undefined,
@@ -5722,6 +5741,7 @@ async function sendDebateTurn(session) {
                 await injectAndExecute(resolution.tabId, expectedProvider, promptText, {
                     sessionId: session.sessionId,
                     promptId: promptId,
+                    turnAttemptId,
                     turnIndex: turnIndex,
                     agentId: expectedAgentId,
                 });
@@ -5923,39 +5943,53 @@ async function handleDebateResponse(message) {
         return;
     }
 
-    const expectedAgentId = typeof session.waitingFor === 'string' ? session.waitingFor : null;
-    const messageAgentId =
-        typeof message.agentId === 'string' && message.agentId.trim()
-            ? message.agentId.trim()
-            : typeof message.sourceAgentId === 'string' && message.sourceAgentId.trim()
-              ? message.sourceAgentId.trim()
-              : null;
-    if (expectedAgentId && !messageAgentId) {
-        console.log('[MLC Debate] Ignoring response without agentId for an agent-based session.');
-        return;
-    }
-    if (expectedAgentId && messageAgentId && messageAgentId !== expectedAgentId) {
-        console.log('[MLC Debate] Ignoring response from unexpected agent:', messageAgentId);
-        return;
-    }
-
-    const messageTurnIndex = Number.isFinite(message.turnIndex)
-        ? message.turnIndex
-        : parseInt(message.turnIndex, 10);
-    const hasTurnIndex = Number.isFinite(messageTurnIndex);
-    const promptMismatch =
-        session.lastPromptId && message.promptId && session.lastPromptId !== message.promptId;
-    const turnMismatch = hasTurnIndex && messageTurnIndex !== session.turnIndex;
-
-    if (promptMismatch && (!hasTurnIndex || turnMismatch)) {
-        console.log('[MLC Debate] Ignoring response with mismatched promptId/turnIndex.', {
-            expectedPromptId: session.lastPromptId,
-            messagePromptId: message.promptId,
-            expectedTurnIndex: session.turnIndex,
-            messageTurnIndex: messageTurnIndex,
+    const sequentialValidation =
+        sessionEngine && typeof sessionEngine.validateSequentialResponse === 'function'
+            ? sessionEngine.validateSequentialResponse(session, message)
+            : { ok: true };
+    if (!sequentialValidation?.ok) {
+        console.log('[MLC Debate] Ignoring stale or invalid response.', {
+            reason: sequentialValidation?.reason || 'unknown',
+            expectedAgentId: sequentialValidation?.expectedAgentId || null,
+            messageAgentId: sequentialValidation?.messageAgentId || null,
+            expectedPromptId: sequentialValidation?.expectedPromptId || session.lastPromptId || null,
+            messagePromptId:
+                sequentialValidation?.messagePromptId ||
+                (typeof message.promptId === 'string' ? message.promptId : null),
+            expectedTurnAttemptId:
+                sequentialValidation?.expectedTurnAttemptId || session.lastTurnAttemptId || null,
+            messageTurnAttemptId:
+                sequentialValidation?.messageTurnAttemptId ||
+                (typeof message.turnAttemptId === 'string' ? message.turnAttemptId : null),
+            expectedTurnIndex:
+                sequentialValidation?.expectedTurnIndex || session.turnIndex || null,
+            messageTurnIndex:
+                sequentialValidation?.messageTurnIndex ||
+                (Number.isFinite(message.turnIndex) ? message.turnIndex : null),
         });
         return;
     }
+    const expectedAgentId =
+        sequentialValidation && Object.prototype.hasOwnProperty.call(sequentialValidation, 'expectedAgentId')
+            ? sequentialValidation.expectedAgentId
+            : typeof session.waitingFor === 'string'
+              ? session.waitingFor
+              : null;
+    const messageAgentId =
+        sequentialValidation && Object.prototype.hasOwnProperty.call(sequentialValidation, 'messageAgentId')
+            ? sequentialValidation.messageAgentId
+            : typeof message.agentId === 'string' && message.agentId.trim()
+              ? message.agentId.trim()
+              : typeof message.sourceAgentId === 'string' && message.sourceAgentId.trim()
+                ? message.sourceAgentId.trim()
+                : null;
+    const messageTurnIndex =
+        sequentialValidation && Object.prototype.hasOwnProperty.call(sequentialValidation, 'messageTurnIndex')
+            ? sequentialValidation.messageTurnIndex
+            : Number.isFinite(message.turnIndex)
+              ? message.turnIndex
+              : parseInt(message.turnIndex, 10);
+    const hasTurnIndex = Number.isFinite(messageTurnIndex);
 
     const rawContent = typeof message.content === 'string' ? message.content : '';
     const content = rawContent.trim();
@@ -6005,6 +6039,7 @@ async function handleDebateResponse(message) {
 
     session.waitingFor = null;
     session.lastPromptId = null;
+    session.lastTurnAttemptId = null;
     session.lastPromptTimestamp = 0;
 
     await saveSession(session);
@@ -7316,6 +7351,10 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                             type: 'MLC_PROMPT_SENT',
                             sessionId: context.sessionId || null,
                             promptId: promptId,
+                            turnAttemptId:
+                                typeof context.turnAttemptId === 'string'
+                                    ? context.turnAttemptId
+                                    : null,
                             agentId: context.agentId || null,
                             llmType: llmType,
                             turnIndex: context.turnIndex || null,
@@ -7446,6 +7485,10 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                         type: 'MLC_PROMPT_SENT',
                         sessionId: context.sessionId || null,
                         promptId: promptId,
+                        turnAttemptId:
+                            typeof context.turnAttemptId === 'string'
+                                ? context.turnAttemptId
+                                : null,
                         agentId: context.agentId || null,
                         llmType: llmType,
                         turnIndex: context.turnIndex || null,

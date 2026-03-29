@@ -1,6 +1,6 @@
 const assert = require('assert');
 
-const CaptureUtils = require('../captureUtils.js');
+const CaptureUtils = require('../src/content/captureUtils.js');
 
 function runTest(name, fn) {
   try {
@@ -156,4 +156,52 @@ runTest('chooseBestTextCandidate: Grok prefers answer over prompt scaffold', () 
   ].join('\n');
   const result = CaptureUtils.chooseBestTextCandidate([scaffold, answer], { provider: 'grok' });
   assert.strictEqual(result.bestIndex, 1);
+});
+
+runTest('containsOrderedFragments: matches interleaved citation layout in DOM order', () => {
+  const fragments = [
+    'Primary answer paragraph one.',
+    'Primary answer paragraph two.'
+  ];
+  const candidate = [
+    'Primary answer paragraph one.',
+    'Citation label 1',
+    'Primary answer paragraph two.',
+    'Citation label 2',
+  ].join('\n');
+
+  assert.strictEqual(CaptureUtils.containsOrderedFragments(fragments, candidate), true);
+});
+
+runTest('extendsMeaningfully: detects ordered-fragment expansion with interleaved references', () => {
+  const fragments = [
+    'Primary answer paragraph one.',
+    'Primary answer paragraph two.'
+  ];
+  const extended = [
+    'Primary answer paragraph one.',
+    'Reference label 1',
+    'Primary answer paragraph two.',
+    'Reference summary one',
+    'Reference summary two',
+    'Reference summary three',
+    'Reference summary four',
+    'Reference summary five',
+    'Reference summary six'
+  ].join('\n');
+
+  assert.strictEqual(
+    CaptureUtils.extendsMeaningfully(fragments, extended, { minExtraWords: 10, minExtraChars: 48 }),
+    true
+  );
+});
+
+runTest('extendsMeaningfully: ignores tiny control-like suffixes', () => {
+  const aggregated = 'Here is the answer.';
+  const extended = 'Here is the answer. Copy';
+
+  assert.strictEqual(
+    CaptureUtils.extendsMeaningfully(aggregated, extended, { minExtraWords: 3, minExtraChars: 20 }),
+    false
+  );
 });

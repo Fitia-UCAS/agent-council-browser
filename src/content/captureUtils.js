@@ -21,6 +21,11 @@
             .filter(Boolean);
     }
 
+    function countWords(text) {
+        const normalized = normalizeWhitespace(text);
+        return normalized ? normalized.split(/\s+/).filter(Boolean).length : 0;
+    }
+
     function countMatches(text, regex) {
         if (!text) return 0;
         const matches = String(text).match(regex);
@@ -52,6 +57,28 @@
 
     function normalizeForMatch(value) {
         return stripDiacritics(value).replace(/\s+/g, ' ').trim().toLowerCase();
+    }
+
+    function normalizeOrderedFragments(value) {
+        if (Array.isArray(value)) {
+            return value.map(normalizeForMatch).filter(Boolean);
+        }
+        const normalized = normalizeForMatch(value);
+        return normalized ? [normalized] : [];
+    }
+
+    function containsOrderedFragments(baseText, candidateText) {
+        const fragments = normalizeOrderedFragments(baseText);
+        const candidateNormalized = normalizeForMatch(candidateText);
+        if (!fragments.length || !candidateNormalized) return false;
+
+        let cursor = 0;
+        for (const fragment of fragments) {
+            const index = candidateNormalized.indexOf(fragment, cursor);
+            if (index === -1) return false;
+            cursor = index + fragment.length;
+        }
+        return true;
     }
 
     function analyzeText(text) {
@@ -302,8 +329,32 @@
         };
     }
 
+    function extendsMeaningfully(baseText, candidateText, options) {
+        const baseFragments = normalizeOrderedFragments(baseText);
+        const baseNormalized = baseFragments.join(' ');
+        const candidateNormalized = normalizeForMatch(candidateText);
+        if (!baseNormalized || !candidateNormalized || candidateNormalized === baseNormalized) {
+            return false;
+        }
+        if (!containsOrderedFragments(baseFragments, candidateNormalized)) return false;
+
+        const minExtraWords = Number.isFinite(options?.minExtraWords)
+            ? Math.max(1, Number(options.minExtraWords))
+            : 12;
+        const minExtraChars = Number.isFinite(options?.minExtraChars)
+            ? Math.max(1, Number(options.minExtraChars))
+            : 80;
+        const baseWordCount = Array.isArray(baseText) ? countWords(baseText.join(' ')) : countWords(baseText);
+        const candidateWordCount = countWords(candidateText);
+        const extraWords = Math.max(0, candidateWordCount - baseWordCount);
+        const extraChars = Math.max(0, candidateNormalized.length - baseNormalized.length);
+
+        return extraWords >= minExtraWords || extraChars >= minExtraChars;
+    }
+
     return {
         normalizeWhitespace,
+        countWords,
         analyzeText,
         looksLikeReferenceList,
         looksLikeUiControlText,
@@ -311,5 +362,7 @@
         scoreTextCandidate,
         rankTextCandidates,
         chooseBestTextCandidate,
+        containsOrderedFragments,
+        extendsMeaningfully,
     };
 });

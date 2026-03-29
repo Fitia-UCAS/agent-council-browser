@@ -148,11 +148,131 @@
             return Math.ceil(turnIndex / 2);
         }
 
+        function resolveResponseAgentId(message) {
+            if (typeof message?.agentId === 'string' && message.agentId.trim()) {
+                return message.agentId.trim();
+            }
+            if (typeof message?.sourceAgentId === 'string' && message.sourceAgentId.trim()) {
+                return message.sourceAgentId.trim();
+            }
+            return null;
+        }
+
+        function validateSequentialResponse(session, message) {
+            const expectedAgentId =
+                typeof session?.waitingFor === 'string' && session.waitingFor.trim()
+                    ? session.waitingFor.trim()
+                    : null;
+            const messageAgentId = resolveResponseAgentId(message);
+
+            if (expectedAgentId && !messageAgentId) {
+                return {
+                    ok: false,
+                    reason: 'missing_agent_id',
+                    expectedAgentId,
+                    messageAgentId,
+                };
+            }
+            if (expectedAgentId && messageAgentId && messageAgentId !== expectedAgentId) {
+                return {
+                    ok: false,
+                    reason: 'unexpected_agent_id',
+                    expectedAgentId,
+                    messageAgentId,
+                };
+            }
+
+            const expectedTurnAttemptId =
+                typeof session?.lastTurnAttemptId === 'string' && session.lastTurnAttemptId.trim()
+                    ? session.lastTurnAttemptId.trim()
+                    : null;
+            const messageTurnAttemptId =
+                typeof message?.turnAttemptId === 'string' && message.turnAttemptId.trim()
+                    ? message.turnAttemptId.trim()
+                    : null;
+            if (expectedTurnAttemptId && messageTurnAttemptId) {
+                if (messageTurnAttemptId !== expectedTurnAttemptId) {
+                    return {
+                        ok: false,
+                        reason: 'turn_attempt_mismatch',
+                        expectedTurnAttemptId,
+                        messageTurnAttemptId,
+                    };
+                }
+            }
+
+            if (expectedTurnAttemptId && !messageTurnAttemptId) {
+                return {
+                    ok: false,
+                    reason: 'missing_turn_attempt_id',
+                    expectedTurnAttemptId,
+                };
+            }
+
+            const expectedPromptId =
+                typeof session?.lastPromptId === 'string' && session.lastPromptId.trim()
+                    ? session.lastPromptId.trim()
+                    : null;
+            const messagePromptId =
+                typeof message?.promptId === 'string' && message.promptId.trim()
+                    ? message.promptId.trim()
+                    : null;
+            if (expectedPromptId && messagePromptId && messagePromptId !== expectedPromptId) {
+                return {
+                    ok: false,
+                    reason: 'prompt_id_mismatch',
+                    expectedPromptId,
+                    messagePromptId,
+                };
+            }
+
+            const parsedTurnIndex = Number.isFinite(message?.turnIndex)
+                ? Number(message.turnIndex)
+                : parseInt(message?.turnIndex, 10);
+            const hasTurnIndex = Number.isFinite(parsedTurnIndex);
+            if (hasTurnIndex && parsedTurnIndex !== session?.turnIndex) {
+                return {
+                    ok: false,
+                    reason: 'turn_index_mismatch',
+                    expectedTurnIndex: session?.turnIndex ?? null,
+                    messageTurnIndex: parsedTurnIndex,
+                };
+            }
+
+            if (!expectedTurnAttemptId && expectedPromptId && !messagePromptId) {
+                return {
+                    ok: false,
+                    reason: 'missing_prompt_id',
+                    expectedPromptId,
+                };
+            }
+
+            if (!expectedTurnAttemptId && expectedPromptId && !hasTurnIndex) {
+                return {
+                    ok: false,
+                    reason: 'missing_turn_index',
+                    expectedTurnIndex: session?.turnIndex ?? null,
+                };
+            }
+
+            return {
+                ok: true,
+                expectedAgentId,
+                messageAgentId,
+                expectedTurnAttemptId,
+                messageTurnAttemptId,
+                expectedPromptId,
+                messagePromptId,
+                messageTurnIndex: hasTurnIndex ? parsedTurnIndex : null,
+            };
+        }
+
         return {
             getRoundIndex,
             getSessionParticipants,
             getTurnParticipant,
             getTurnProvider,
+            validateSequentialResponse,
         };
     }
 
