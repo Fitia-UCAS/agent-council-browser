@@ -50,12 +50,13 @@ This triggers `.github/workflows/release.yml`.
 ## 4) Chrome Web Store submission
 
 1. Upload `release/minions-council-vX.Y.Z.zip`.
-2. Verify listing links point to public docs:
+2. Review `docs/chrome-web-store-submission.md` and update any stale listing copy or reviewer notes.
+3. Verify listing links point to public docs:
     - Privacy policy
     - Security policy
     - Support policy
-3. Confirm `debugger` permission justification for Claude send path.
-4. Roll out to trusted testers first, then public.
+4. Confirm `debugger` permission justification for Claude send path.
+5. Roll out to trusted testers first, then public.
 
 ## 5) Post-release
 

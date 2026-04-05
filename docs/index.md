@@ -2,13 +2,14 @@
 
 ## Public Policies
 
-- [Privacy Policy](../PRIVACY.md)
-- [Security Policy](../SECURITY.md)
-- [Support and Maintenance](../SUPPORT.md)
+- [Privacy Policy](./privacy-policy.md)
+- [Security Policy](./security-policy.md)
+- [Support and Maintenance](./support-policy.md)
 
 ## Release and Quality
 
 - [Production Readiness Guide](./production-readiness.md)
+- [Chrome Web Store Submission Guide](./chrome-web-store-submission.md)
 - [RC Checklist](./rc-checklist.md)
 - [Release Runbook](./release-runbook.md)
 - [Branch Protection](./branch-protection.md)

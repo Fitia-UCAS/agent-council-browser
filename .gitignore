@@ -27,6 +27,8 @@ node_modules/
 test-results/
 playwright-report/
 *.log
+.DS_Store
+**/.DS_Store
 
 !scripts/build/
 !scripts/build/**

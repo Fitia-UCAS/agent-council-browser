@@ -58,8 +58,8 @@ Serve docs from `/docs` so store/repo links are stable.
 1. GitHub -> `Settings` -> `Pages`
 2. Build and deployment -> `Deploy from a branch`
 3. Branch: `main`, Folder: `/docs`
-4. Publish docs index: `docs/index.md` with links to privacy/security/support pages.
-5. Reuse this Pages URL in README and Chrome Web Store listing.
+4. Publish `docs/privacy-policy.md`, `docs/security-policy.md`, `docs/support-policy.md`, and `docs/index.md`.
+5. Reuse the generated Pages URLs for those three policy pages in the Chrome Web Store listing.
 
 ## 6) PR pipeline setup
 
@@ -70,6 +70,7 @@ Serve docs from `/docs` so store/repo links are stable.
 ## 7) Chrome Web Store checklist
 
 - Publish from `release/*.zip` only.
+- Keep `docs/chrome-web-store-submission.md` current before every release candidate.
 - Keep privacy and permission justification current (especially `debugger` for Claude flow).
 - Validate on a clean Chrome profile before submission.
 - Roll out to trusted testers first, then public release.

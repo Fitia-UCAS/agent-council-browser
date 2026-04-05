@@ -127,6 +127,7 @@ Output:
 Release process docs:
 
 - `docs/production-readiness.md`
+- `docs/chrome-web-store-submission.md`
 - `docs/release-runbook.md`
 
 ## Contributing
