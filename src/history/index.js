@@ -307,12 +307,6 @@
         return key;
     }
 
-    async function isEncryptionConfigured() {
-        const db = await openDb();
-        const config = await getCryptoConfig(db);
-        return Boolean(config && config.version === 1 && config.salt && config.keyCheck);
-    }
-
     async function requireHistoryEnabled(db, { encryptionConfigured = false } = {}) {
         const security = await getSecuritySettings(db, { encryptionConfigured });
         return security;
@@ -449,7 +443,7 @@
         const encryptionConfigured = Boolean(
             cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck
         );
-        const security = await requireHistoryEnabled(db, { encryptionConfigured });
+        await requireHistoryEnabled(db, { encryptionConfigured });
         const protectionMode = normalizeProtectionMode(security.protectionMode, {
             encryptionConfigured,
         });
@@ -615,7 +609,7 @@
         const encryptionConfigured = Boolean(
             cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck
         );
-        const security = await requireHistoryEnabled(db, { encryptionConfigured });
+        await requireHistoryEnabled(db, { encryptionConfigured });
         const thread = await ensureThread(threadId);
         const protectedThread = inferThreadProtected(thread);
         const normalized = normalizeTitle(title);
@@ -678,7 +672,7 @@
         const encryptionConfigured = Boolean(
             cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck
         );
-        const security = await requireHistoryEnabled(db, { encryptionConfigured });
+        await requireHistoryEnabled(db, { encryptionConfigured });
         const thread = await ensureThread(threadId);
         const protectedThread = inferThreadProtected(thread);
 
@@ -777,7 +771,7 @@
         const encryptionConfigured = Boolean(
             cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck
         );
-        const security = await requireHistoryEnabled(db, { encryptionConfigured });
+        await requireHistoryEnabled(db, { encryptionConfigured });
         const thread = await getThreadRecord(threadId);
         if (!thread) {
             const err = new Error('Chat not found.');
@@ -863,7 +857,7 @@
         const encryptionConfigured = Boolean(
             cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck
         );
-        const security = await requireHistoryEnabled(db, { encryptionConfigured });
+        await requireHistoryEnabled(db, { encryptionConfigured });
 
         const thread = await getThreadRecord(threadId);
         if (!thread) {
@@ -1139,7 +1133,7 @@
         const encryptionConfigured = Boolean(
             cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck
         );
-        const security = await getSecuritySettings(db, { encryptionConfigured });
+        await getSecuritySettings(db, { encryptionConfigured });
 
         if (!encryptionConfigured) {
             await updateSecuritySettings(

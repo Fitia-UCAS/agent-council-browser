@@ -192,20 +192,6 @@ const MATERIAL_SYMBOL_FALLBACKS = {
     drag_indicator: '⋮⋮',
 };
 
-function hasMaterialSymbolFont() {
-    const fonts = document?.fonts;
-    if (!fonts || typeof fonts.check !== 'function') return false;
-    try {
-        return (
-            fonts.check('20px "Material Symbols Rounded"') ||
-            fonts.check('20px "Material Symbols Outlined"') ||
-            fonts.check('20px "Material Icons"')
-        );
-    } catch {
-        return false;
-    }
-}
-
 function applyMaterialSymbolFallback(root = document) {
     if (!materialSymbolFallbackEnabled) return;
     if (!root || typeof root.querySelectorAll !== 'function') return;
@@ -552,12 +538,6 @@ async function loadRoutePreference() {
     );
 }
 
-function saveRoutePreference(route) {
-    const next = sanitizeRoute(route);
-    patchState({ route: next }, 'route_saved');
-    return storageSet({ [ROUTE_STORAGE_KEY_V2]: next });
-}
-
 let routeDragAgentId = null;
 let routeConnectionStatusTimer = null;
 let routeOutsideClickHandler = null;
@@ -775,11 +755,6 @@ function countRouteAgentsByProvider(route) {
     return counts;
 }
 
-function isRouteProviderSelected(provider) {
-    const route = state.route || getDefaultRoute();
-    return getRouteAgents(route).some((agent) => agent.provider === provider);
-}
-
 function getRouteAgentById(route, agentId) {
     const agents = getRouteAgents(route);
     return agents.find((agent) => agent?.id === agentId) || null;
@@ -817,7 +792,8 @@ function pickRouteAgentBindingIndex(provider, route, { targetAgentId = null } = 
     if (targetAgentId) {
         const explicitIndex = agents.findIndex(
             (agent) =>
-                agent?.id === targetAgentId && normalizeProviderId(agent?.provider) === normalizedProvider
+                agent?.id === targetAgentId &&
+                normalizeProviderId(agent?.provider) === normalizedProvider
         );
         if (explicitIndex >= 0) return explicitIndex;
     }
@@ -999,41 +975,6 @@ function isProfileRoutable(profile, provider) {
     if (profile.status === 'offline') return false;
     if (profile.status === 'wrong_host') return false;
     return true;
-}
-
-function suggestProfileSelectionForNewAgent(provider, route) {
-    const normalizedProvider = normalizeProviderId(provider);
-    if (!normalizedProvider) return null;
-    const agents = getRouteAgents(route).filter((agent) => agent?.provider === normalizedProvider);
-    if (agents.length === 0) return 'default';
-
-    const used = new Set();
-    agents.forEach((agent) => {
-        const resolved = resolveAgentProfileId(agent);
-        if (resolved) used.add(resolved);
-    });
-
-    const profiles = getProfilesForProvider(normalizedProvider);
-    const usable = profiles.filter((profile) => isProfileRoutable(profile, normalizedProvider));
-    const candidate =
-        usable.find((profile) => profile.status === 'ok' && !used.has(profile.profileId)) ||
-        usable.find((profile) => !used.has(profile.profileId)) ||
-        null;
-    return candidate ? candidate.profileId : null;
-}
-
-function addRouteAgent(provider, { profileId } = {}) {
-    const normalizedProvider = normalizeProviderId(provider);
-    if (!normalizedProvider) return;
-    const route = state.route || getDefaultRoute();
-    const agents = getRouteAgents(route);
-    const selection = profileId === undefined ? 'default' : normalizeProfileSelection(profileId);
-    const nextAgent = {
-        id: generateRouteAgentId(),
-        provider: normalizedProvider,
-        profileId: selection || null,
-    };
-    setRoute({ ...route, agents: [...agents, nextAgent] });
 }
 
 function setRoute(route, { persist = true } = {}) {
@@ -2464,9 +2405,9 @@ function extractPassphraseFromPromptResult(result) {
 function isContinueWithoutPassphraseResult(result) {
     return Boolean(
         result &&
-            typeof result === 'object' &&
-            !Array.isArray(result) &&
-            result.kind === 'continue_without_passphrase'
+        typeof result === 'object' &&
+        !Array.isArray(result) &&
+        result.kind === 'continue_without_passphrase'
     );
 }
 
@@ -2512,7 +2453,8 @@ function openPassphrasePrompt({
             elements.passphraseNote.textContent =
                 'Unlock with your passphrase, or continue by creating this chat without passphrase protection.';
         } else {
-            elements.passphraseNote.textContent = 'Enter your passphrase to unlock protected chats.';
+            elements.passphraseNote.textContent =
+                'Enter your passphrase to unlock protected chats.';
         }
     }
     if (elements.passphraseConfirmField) {
@@ -2624,9 +2566,7 @@ async function submitContinueWithoutPassphrase() {
         try {
             const result = await passphrasePrompt.onContinueWithoutPassphrase();
             if (result && result.ok === false) {
-                setPassphrasePromptError(
-                    result.error || 'Failed to continue without passphrase.'
-                );
+                setPassphrasePromptError(result.error || 'Failed to continue without passphrase.');
                 setPassphrasePromptBusy(false);
                 return;
             }
@@ -2895,28 +2835,6 @@ async function lockHistory({ statusText = 'Locking…', finalStatus = '' } = {})
     requestChatsState();
     if (finalStatus) setHistoryStatus(finalStatus);
     return true;
-}
-
-function resetHistory() {
-    const confirmed = window.confirm(
-        'Reset encrypted history? This will delete all chats and remove your encryption setup.'
-    );
-    if (!confirmed) return;
-    setHistoryStatus('Resetting history…');
-    sendMessage({ type: 'HISTORY_RESET' }, (response) => {
-        if (!response || response.ok === false) {
-            setHistoryStatus(`Error: ${response?.error || 'Failed to reset history.'}`, true);
-            return;
-        }
-        updateHistoryStatus(response.status);
-        state.chats = [];
-        state.activeChat = null;
-        state.activeChatId = null;
-        state.activeChatHasMore = false;
-        state.activeChatNextCursorSequence = null;
-        clearTranscript();
-        renderChatList();
-    });
 }
 
 function setPromptStatus(text, isError = false) {
@@ -3869,8 +3787,7 @@ async function resolveNewChatHistoryLocked() {
             if (!toggleResult?.ok) {
                 return {
                     ok: false,
-                    error:
-                        toggleResult?.error || 'Failed to continue without passphrase.',
+                    error: toggleResult?.error || 'Failed to continue without passphrase.',
                 };
             }
             return { ok: true };
@@ -3903,7 +3820,9 @@ function createNewChat() {
         if (!response || response.ok === false) {
             const code = response?.code || '';
             if (code === 'HISTORY_LOCKED') {
-                setSessionStatus('Unlock history or continue without passphrase for this new chat.');
+                setSessionStatus(
+                    'Unlock history or continue without passphrase for this new chat.'
+                );
                 resolveNewChatHistoryLocked().catch((error) => {
                     console.warn('New chat passphrase flow failed:', error);
                 });
@@ -4777,12 +4696,6 @@ function resumeSession() {
     if (!state.sessionId || !state.paused) return;
     setSessionStatus('Resuming session...');
     sendMessage({ type: 'RESUME_SESSION', sessionId: state.sessionId }, handleActionResponse);
-}
-
-function isFullyConnected() {
-    const providers = getSupportedProviders();
-    if (providers.length === 0) return false;
-    return providers.every((provider) => isProviderReady(provider));
 }
 
 function handleBackgroundMessage(message) {
@@ -5789,10 +5702,6 @@ function normalizeInlineText(value) {
     return String(value || '')
         .replace(/\s+/g, ' ')
         .trim();
-}
-
-function getProfilesForProvider(provider) {
-    return state.profiles.filter((profile) => profile.provider === provider);
 }
 
 function getProfileById(profileId) {

@@ -200,7 +200,8 @@ function generatePromptId() {
 }
 
 function generateTurnAttemptId(sessionId, turnIndex, agentId) {
-    const sessionPart = typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : 'session';
+    const sessionPart =
+        typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : 'session';
     const agentPart = typeof agentId === 'string' && agentId.trim() ? agentId.trim() : 'agent';
     const turnPart = Number.isFinite(turnIndex) ? Math.max(1, Number(turnIndex)) : 'x';
     return `${sessionPart}:turn:${turnPart}:agent:${agentPart}:attempt:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
@@ -410,7 +411,7 @@ function generateChatId() {
     return 'chat_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 }
 
-function toChatSummary(chat) {
+function _toChatSummary(chat) {
     if (!chat || typeof chat !== 'object') return null;
     const chatId = chat.chatId || chat.threadId;
     if (!chatId) return null;
@@ -860,7 +861,7 @@ function normalizeSessionState(session) {
                           .filter((p) => p && isSupportedProviderKey(p))
                     : listSessionProviders(normalized);
             normalized.participants = providers
-                .map((provider, idx) => ({
+                .map((provider, _idx) => ({
                     agentId: provider,
                     provider,
                     profileId: normalized.profileIds?.[provider] || null,
@@ -1308,7 +1309,7 @@ function isSupportedProviderKey(provider) {
     return providerRegistry.isSupportedProviderKey(provider);
 }
 
-function initProviderFlagMap(providers, initialValue) {
+function _initProviderFlagMap(providers, initialValue) {
     return providerRegistry.buildProviderFlagMap(providers, initialValue);
 }
 
@@ -1316,7 +1317,7 @@ function listSessionProviders(session, fallbackProvider) {
     return providerRegistry.listSessionProviders(session, fallbackProvider);
 }
 
-function getSessionProviders(session, fallbackProvider) {
+function _getSessionProviders(session, fallbackProvider) {
     return providerRegistry.getSessionProviders(session, fallbackProvider);
 }
 
@@ -1617,7 +1618,7 @@ function sanitizeProfilesState(state) {
     return { state: nextState, changed };
 }
 
-function getExpectedHosts(provider) {
+function _getExpectedHosts(provider) {
     return providerRegistry.getExpectedHosts(provider);
 }
 
@@ -3312,7 +3313,7 @@ function sanitizeUiRoute(input) {
     return { kind: 'single', agents: [agents[0]], providers: [agents[0].provider], rounds: 1 };
 }
 
-function buildRouteFromRun(mode, { firstLLM, secondLLM, directTarget, rounds }) {
+function buildRouteFromRun(mode, { firstLLM, secondLLM: _secondLLM, directTarget, rounds }) {
     if (mode === 'debate') {
         const first = firstLLM === 'gemini' ? 'gemini' : 'chatgpt';
         const second = first === 'chatgpt' ? 'gemini' : 'chatgpt';
@@ -3915,7 +3916,6 @@ function getProviderAttachmentMode(provider) {
 const DEBATE_PROMPTS_PATH = 'debate_prompts.json';
 const PROMPT_TEMPLATES_OVERRIDE_KEY = 'mlc_debate_prompts_override_v1';
 let cachedDebatePromptConfig = null;
-let cachedDebatePromptSource = null;
 let debatePromptConfigLoadPromise = null;
 
 function getDefaultDebatePromptConfig() {
@@ -4187,11 +4187,9 @@ async function loadDebatePromptConfig() {
             const override = await getDebatePromptOverride();
             if (override) {
                 cachedDebatePromptConfig = normalizeDebatePromptConfig(override);
-                cachedDebatePromptSource = 'override';
                 return cachedDebatePromptConfig;
             }
             cachedDebatePromptConfig = await loadDebatePromptConfigFromFile();
-            cachedDebatePromptSource = 'default';
             return cachedDebatePromptConfig;
         } finally {
             debatePromptConfigLoadPromise = null;
@@ -4217,14 +4215,12 @@ async function setDebatePromptOverride(config) {
     const normalized = normalizeDebatePromptConfig(config);
     await chrome.storage.local.set({ [PROMPT_TEMPLATES_OVERRIDE_KEY]: normalized });
     cachedDebatePromptConfig = normalized;
-    cachedDebatePromptSource = 'override';
     return { ok: true, config: normalized, source: 'override' };
 }
 
 async function clearDebatePromptOverride() {
     await chrome.storage.local.remove(PROMPT_TEMPLATES_OVERRIDE_KEY);
     cachedDebatePromptConfig = null;
-    cachedDebatePromptSource = null;
     return { ok: true };
 }
 
@@ -5410,7 +5406,7 @@ async function prefetchSessionAttachments(session, excludeAgentId) {
     }
 }
 
-function getParallelProviders(session) {
+function _getParallelProviders(session) {
     const providers = [];
     const candidates =
         Array.isArray(session?.route?.providers) && session.route.providers.length > 0
@@ -5428,7 +5424,7 @@ function buildParallelPromptId(sessionId, agentId) {
     return `${sessionId}:parallel:${String(agentId || '').trim()}`;
 }
 
-function formatProvidersForUi(providers) {
+function _formatProvidersForUi(providers) {
     if (!Array.isArray(providers) || providers.length === 0) return '';
     return providers.map(formatLLMLabel).join(' + ');
 }
@@ -5952,7 +5948,8 @@ async function handleDebateResponse(message) {
             reason: sequentialValidation?.reason || 'unknown',
             expectedAgentId: sequentialValidation?.expectedAgentId || null,
             messageAgentId: sequentialValidation?.messageAgentId || null,
-            expectedPromptId: sequentialValidation?.expectedPromptId || session.lastPromptId || null,
+            expectedPromptId:
+                sequentialValidation?.expectedPromptId || session.lastPromptId || null,
             messagePromptId:
                 sequentialValidation?.messagePromptId ||
                 (typeof message.promptId === 'string' ? message.promptId : null),
@@ -5961,8 +5958,7 @@ async function handleDebateResponse(message) {
             messageTurnAttemptId:
                 sequentialValidation?.messageTurnAttemptId ||
                 (typeof message.turnAttemptId === 'string' ? message.turnAttemptId : null),
-            expectedTurnIndex:
-                sequentialValidation?.expectedTurnIndex || session.turnIndex || null,
+            expectedTurnIndex: sequentialValidation?.expectedTurnIndex || session.turnIndex || null,
             messageTurnIndex:
                 sequentialValidation?.messageTurnIndex ||
                 (Number.isFinite(message.turnIndex) ? message.turnIndex : null),
@@ -5970,13 +5966,15 @@ async function handleDebateResponse(message) {
         return;
     }
     const expectedAgentId =
-        sequentialValidation && Object.prototype.hasOwnProperty.call(sequentialValidation, 'expectedAgentId')
+        sequentialValidation &&
+        Object.prototype.hasOwnProperty.call(sequentialValidation, 'expectedAgentId')
             ? sequentialValidation.expectedAgentId
             : typeof session.waitingFor === 'string'
               ? session.waitingFor
               : null;
     const messageAgentId =
-        sequentialValidation && Object.prototype.hasOwnProperty.call(sequentialValidation, 'messageAgentId')
+        sequentialValidation &&
+        Object.prototype.hasOwnProperty.call(sequentialValidation, 'messageAgentId')
             ? sequentialValidation.messageAgentId
             : typeof message.agentId === 'string' && message.agentId.trim()
               ? message.agentId.trim()
@@ -5984,7 +5982,8 @@ async function handleDebateResponse(message) {
                 ? message.sourceAgentId.trim()
                 : null;
     const messageTurnIndex =
-        sequentialValidation && Object.prototype.hasOwnProperty.call(sequentialValidation, 'messageTurnIndex')
+        sequentialValidation &&
+        Object.prototype.hasOwnProperty.call(sequentialValidation, 'messageTurnIndex')
             ? sequentialValidation.messageTurnIndex
             : Number.isFinite(message.turnIndex)
               ? message.turnIndex
@@ -7632,7 +7631,6 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
 
     try {
         let inputElement = null;
-        let sendButton = null;
         const attachmentPayloads = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
 
         function base64ToUint8Array(base64) {

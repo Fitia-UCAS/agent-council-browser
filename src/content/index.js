@@ -772,9 +772,7 @@
             return CaptureUtils.extendsMeaningfully(baseText, candidateText, options);
         }
         const baseFragments = Array.isArray(baseText)
-            ? baseText
-                  .map((value) => normalizeCaptureCandidateText(value || ''))
-                  .filter(Boolean)
+            ? baseText.map((value) => normalizeCaptureCandidateText(value || '')).filter(Boolean)
             : [normalizeCaptureCandidateText(baseText || '')].filter(Boolean);
         const baseNormalized = baseFragments.join(' ');
         const candidateNormalized = normalizeCaptureCandidateText(candidateText || '');
@@ -860,13 +858,13 @@
         const rootText = getTrimmedText(clone);
         const canUseRootText = Boolean(
             rootText &&
-                !looksLikeUiChromeText(rootText, options) &&
-                (!combinedText ||
-                    (!looksLikePromptEcho(rootText) &&
-                        extendsCandidateMeaningfully(parts.length ? parts : combinedText, rootText, {
-                            minExtraWords: 10,
-                            minExtraChars: 48,
-                        })))
+            !looksLikeUiChromeText(rootText, options) &&
+            (!combinedText ||
+                (!looksLikePromptEcho(rootText) &&
+                    extendsCandidateMeaningfully(parts.length ? parts : combinedText, rootText, {
+                        minExtraWords: 10,
+                        minExtraChars: 48,
+                    })))
         );
 
         const finalText = canUseRootText ? rootText : combinedText || rootText || '';
@@ -1726,7 +1724,11 @@
 
         const fullLines = getGrokComparableLines(fullRaw);
         const baselineLines = getGrokComparableLines(baselineRaw);
-        if (!fullLines.length || !baselineLines.length || fullLines.length <= baselineLines.length) {
+        if (
+            !fullLines.length ||
+            !baselineLines.length ||
+            fullLines.length <= baselineLines.length
+        ) {
             return '';
         }
 
@@ -1760,7 +1762,10 @@
             return '';
         }
 
-        return fullLines.slice(bestStart + bestMatched).join('\n').trim();
+        return fullLines
+            .slice(bestStart + bestMatched)
+            .join('\n')
+            .trim();
     }
 
     function extractGrokIncrementalTranscriptText(
@@ -2076,7 +2081,8 @@
                   ? captureState.baselineBestOrder
                   : null;
             const baselineSignature =
-                typeof options.preferAfterSignature === 'string' && options.preferAfterSignature.trim()
+                typeof options.preferAfterSignature === 'string' &&
+                options.preferAfterSignature.trim()
                     ? options.preferAfterSignature.trim()
                     : typeof captureState.baselineBestSignature === 'string' &&
                         captureState.baselineBestSignature.trim()
@@ -2089,13 +2095,19 @@
                 if (Number.isFinite(baselineOrder) && Number.isFinite(candidate.order)) {
                     if (candidate.order > baselineOrder) return true;
                 }
-                if (baselineSignature && candidate.signature && candidate.signature !== baselineSignature) {
+                if (
+                    baselineSignature &&
+                    candidate.signature &&
+                    candidate.signature !== baselineSignature
+                ) {
                     if (!Number.isFinite(baselineOrder)) return true;
                     return Number.isFinite(candidate.order) && candidate.order >= baselineOrder;
                 }
                 return false;
             });
-            const nonReferenceProgressed = progressed.filter((item) => item && !item.isReferenceList);
+            const nonReferenceProgressed = progressed.filter(
+                (item) => item && !item.isReferenceList
+            );
             if (nonReferenceProgressed.length > 0) {
                 hasExplicitProgressedCandidates = true;
                 return nonReferenceProgressed;
@@ -2172,7 +2184,9 @@
                 options.withHtml && bestCandidate?.html ? [bestCandidate.html] : [];
             const supplementalIndices = [];
             const normalizedSet = new Set([normalizeCaptureCandidateText(bestText)]);
-            const bestOrder = Number.isFinite(bestCandidate?.order) ? bestCandidate.order : -Infinity;
+            const bestOrder = Number.isFinite(bestCandidate?.order)
+                ? bestCandidate.order
+                : -Infinity;
 
             const ordered = candidates
                 .map((candidate, index) => ({
@@ -2808,13 +2822,6 @@
     }
 
     function extractGrokTranscriptTailText(options = {}) {
-        const inputEl = findInput({ silent: true });
-        const composerRoot = inputEl
-            ? inputEl.closest('form') ||
-              inputEl.closest('footer') ||
-              inputEl.closest('[role="form"]') ||
-              inputEl.parentElement
-            : null;
         const root =
             document.querySelector('main') ||
             document.querySelector('[role="main"]') ||
@@ -2962,7 +2969,7 @@
         return extractGrokResponse(options);
     }
 
-    function extractLatestResponseText() {
+    function _extractLatestResponseText() {
         return extractLatestResponse({ withMeta: false }).text || '';
     }
 
