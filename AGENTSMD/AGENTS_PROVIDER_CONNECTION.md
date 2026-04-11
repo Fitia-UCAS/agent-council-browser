@@ -64,22 +64,22 @@ The service worker (`background.js`) handles `CONNECT_PROVIDER` by:
 
 The side panel refreshes its connection UI based on the new profile/default state.
 
-### 4) “Connected” is verified by pinging the content script (and auto-injecting if needed)
+### 4) “Connected” is verified by pinging the content script and probing page readiness
 
 Separately, the UI sends `{ type: 'CHECK_CONNECTION' }`.
 
-The background checks the **default profile tabIds** and pings each tab:
+The background checks the **default profile tabIds**, pings each tab, and reads the content-script readiness probe:
 
 - `chrome.tabs.sendMessage(tabId, { type: 'PING' })`
-- The content script replies `{ type: 'PONG' }`
+- The content script replies `{ type: 'PONG', readiness }`
 
 If the ping fails because the content script is missing (common after extension reload), the background attempts to inject `captureUtils.js` + `contentScript.js` into the tab (when the URL is injectable) and retries once.
 
 The background returns:
 
-- `CONNECTION_STATUS`: `{ status: { [provider]: boolean }, profileStatus?: { [profileId]: boolean } }`
+- `CONNECTION_STATUS`: `{ status: { [provider]: boolean }, profileStatus?: { [profileId]: boolean }, statusDetails?, profileStatusDetails? }`
 
-The side panel only shows **ready/connected** once the provider tab responds to `PING` (this ensures capture is possible).
+The side panel only shows **ready/connected** once the provider tab responds to `PING` and the readiness probe confirms a usable composer. Login/auth-wall pages surface as `Login required`.
 
 ## The “New tab” flow (create an additional profile/agent)
 

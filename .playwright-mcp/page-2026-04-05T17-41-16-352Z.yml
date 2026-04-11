@@ -1,0 +1,183 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - button "Chats" [ref=e5] [cursor=pointer]:
+          - generic [ref=e6]: ☰
+        - button "New chat" [ref=e7] [cursor=pointer]:
+          - generic [ref=e8]: +
+        - generic "Minions Council" [ref=e9]:
+          - img "Minions Council logo" [ref=e10]
+          - generic [ref=e11]: Minions Council
+      - generic [ref=e12]:
+        - button "Providers" [ref=e13] [cursor=pointer]: "Providers: 4/4 ready"
+        - button "Settings" [ref=e14] [cursor=pointer]:
+          - generic [ref=e15]: ⚙
+    - main [ref=e16]:
+      - generic [ref=e17]:
+        - generic [ref=e18]: New chat
+        - generic [ref=e19]: Choose where to send your message.
+        - button "Choose agents" [ref=e21] [cursor=pointer]
+    - contentinfo [ref=e22]:
+      - generic [ref=e23]: Prompt
+      - generic [ref=e24]:
+        - textbox "Prompt" [ref=e25]:
+          - /placeholder: Choose an agent in To…
+        - generic [ref=e26]: Choose an agent in To to start.
+        - generic [ref=e27]:
+          - button "Attach files" [ref=e28] [cursor=pointer]:
+            - generic [ref=e29]: 📎
+          - button "Select agents… ▾" [expanded] [ref=e30] [cursor=pointer]:
+            - generic [ref=e31]: Select agents…
+            - generic [ref=e32]: ▾
+          - button "Send" [disabled] [ref=e33]
+        - generic [ref=e34]:
+          - generic [ref=e35]: "0"
+          - text: chars
+        - dialog "Route builder" [ref=e36]:
+          - generic [ref=e37]:
+            - generic [ref=e38]: Route
+            - button "Close route builder" [ref=e39] [cursor=pointer]:
+              - generic [ref=e40]: ✕
+          - generic [ref=e41]:
+            - generic [ref=e42]:
+              - generic [ref=e43]: Agents
+              - generic [ref=e229]: No agents selected.
+              - generic [ref=e46]: Agents are order-only. Use New tab in Providers to add/repair tabs, then drag to reorder.
+            - generic [ref=e47]:
+              - generic [ref=e48]: Providers
+              - button "Add all agents" [ref=e49] [cursor=pointer]
+              - generic [ref=e50]:
+                - generic [ref=e230]:
+                  - generic [ref=e231]:
+                    - generic [ref=e234]: ChatGPT
+                    - generic [ref=e235]: "Ready • Using: ChatGPT profile"
+                  - generic [ref=e236]:
+                    - button "Focus" [ref=e237] [cursor=pointer]
+                    - button "New tab" [ref=e238] [cursor=pointer]
+                - generic [ref=e239]:
+                  - generic [ref=e240]:
+                    - generic [ref=e243]: Gemini
+                    - generic [ref=e244]: "Ready • Using: Gemini profile • Autres options pour Clarifying AI Model Names"
+                  - generic [ref=e245]:
+                    - button "Focus" [ref=e246] [cursor=pointer]
+                    - button "New tab" [ref=e247] [cursor=pointer]
+                - generic [ref=e248]:
+                  - generic [ref=e249]:
+                    - generic [ref=e252]: Claude
+                    - generic [ref=e253]: "Ready • Using: Claude profile • Sonnet 4.6"
+                  - generic [ref=e254]:
+                    - button "Focus" [ref=e255] [cursor=pointer]
+                    - button "New tab" [ref=e256] [cursor=pointer]
+                - generic [ref=e257]:
+                  - generic [ref=e258]:
+                    - generic [ref=e261]: Grok
+                    - generic [ref=e262]: "Ready • Using: Grok profile"
+                  - generic [ref=e263]:
+                    - button "Focus" [ref=e264] [cursor=pointer]
+                    - button "New tab" [ref=e265] [cursor=pointer]
+            - generic [ref=e87]:
+              - button "Settings" [ref=e88] [cursor=pointer]
+              - button "Done" [ref=e89] [cursor=pointer]
+  - complementary [ref=e90]:
+    - generic [ref=e91]:
+      - generic [ref=e92]: Chats
+      - button [ref=e93] [cursor=pointer]:
+        - generic [ref=e94]: ✕
+    - generic [ref=e95]:
+      - button [ref=e96] [cursor=pointer]:
+        - generic [ref=e97]: +
+        - generic [ref=e98]: New chat
+      - generic [ref=e99]:
+        - generic [ref=e100] [cursor=pointer]:
+          - generic [ref=e102]: New chat
+          - generic [ref=e103]: 0 msgs • 1h ago
+        - generic [ref=e104] [cursor=pointer]:
+          - generic [ref=e106]: hello nigars
+          - generic [ref=e107]: 3 msgs • 1h ago
+        - generic [ref=e108] [cursor=pointer]:
+          - generic [ref=e110]: "Reply with exactly: auth-gate-check"
+          - generic [ref=e111]: 4 msgs • 1h ago
+        - generic [ref=e112] [cursor=pointer]:
+          - generic [ref=e114]: New chat
+          - generic [ref=e115]: 0 msgs • 1h ago
+        - generic [ref=e116] [cursor=pointer]:
+          - generic [ref=e118]: New chat
+          - generic [ref=e119]: 0 msgs • 2h ago
+  - complementary [ref=e120]:
+    - generic [ref=e121]:
+      - generic [ref=e122]: Settings
+      - button [ref=e123] [cursor=pointer]:
+        - generic [ref=e124]: ✕
+    - generic [ref=e125]:
+      - generic [ref=e126]:
+        - generic [ref=e127]: Passphrase quick controls
+        - generic [ref=e128]:
+          - generic [ref=e129]: Passphrase protection
+          - generic [ref=e130]: "Off"
+        - generic [ref=e131]: Passphrase is off. New chats are created without encryption.
+        - button [ref=e133] [cursor=pointer]: Set passphrase…
+        - generic [ref=e134]:
+          - checkbox [disabled] [ref=e135]
+          - generic [ref=e136]: Require passphrase for new chats
+        - generic [ref=e137]: If disabled, new chats stay readable while existing protected chats remain locked.
+      - generic [ref=e138]:
+        - generic [ref=e139]: Templates
+        - generic [ref=e140]: Start with a preset, then adjust the fields you need.
+        - tablist [ref=e141]:
+          - tab [selected] [ref=e142] [cursor=pointer]: Simple
+          - tab [ref=e143] [cursor=pointer]: Advanced JSON
+        - generic [ref=e144]:
+          - generic [ref=e145]: Quick presets
+          - generic [ref=e146]:
+            - button [ref=e147] [cursor=pointer]: Balanced rewrite
+            - button [ref=e148] [cursor=pointer]: Concise paraphrase
+            - button [ref=e149] [cursor=pointer]: Final answer only
+        - generic [ref=e150]:
+          - generic [ref=e151]: Insert variable token
+          - generic [ref=e152]:
+            - button [ref=e153] [cursor=pointer]: "{other_llm}"
+            - button [ref=e154] [cursor=pointer]: "{round}"
+            - button [ref=e155] [cursor=pointer]: "{rounds}"
+            - button [ref=e156] [cursor=pointer]: "{other_answer}"
+        - generic [ref=e157]:
+          - generic [ref=e158]:
+            - generic [ref=e159]: Start style (first turns)
+            - textbox [ref=e160]:
+              - /placeholder: Context and debate rules for the first turn.
+              - text: "You will participate in a multi-agent debate with {other_llm} over {rounds} iterations to produce the most accurate answer to the user. Guidelines: - Be precise and non-egoic (optimize for correctness, not for \"being right\"). - Be constructive: critique to make progress and improve the answer. - If unsure, say so briefly and propose a way to verify."
+            - generic [ref=e161]: Sent at the start so both models follow the same style.
+          - generic [ref=e162]: "When used: first two turns."
+          - generic [ref=e163]:
+            - generic [ref=e164]: Round style
+            - textbox [ref=e165]:
+              - /placeholder: How each agent should critique and improve in intermediate rounds.
+              - text: "Provide a constructive improvement for iteration {round}/{rounds}: - Critique key issues (short bullets) - Revised answer"
+            - generic [ref=e166]: Used for each round before the final answer.
+          - generic [ref=e167]: "When used: middle turns."
+          - generic [ref=e168]:
+            - generic [ref=e169]: Final style
+            - textbox [ref=e170]:
+              - /placeholder: How the final turn should answer the user.
+              - text: Provide your final best answer for the user. Output only the final answer (no critique section).
+            - generic [ref=e171]: Used only for the final response.
+          - generic [ref=e172]: "When used: last turn only."
+        - group [ref=e173]:
+          - generic [ref=e174] [cursor=pointer]:
+            - generic [ref=e175]: Advanced editor (JSON)
+            - generic [ref=e176]: ▾
+        - generic [ref=e177]:
+          - button [ref=e178] [cursor=pointer]: Load current
+          - button [ref=e179] [cursor=pointer]: Save changes
+          - button [ref=e180] [cursor=pointer]: Reset defaults
+        - generic [ref=e181]: Loaded default templates (no override saved).
+      - generic [ref=e182]:
+        - generic [ref=e183]: Passphrase details
+        - generic [ref=e184]:
+          - generic [ref=e185]:
+            - generic [ref=e186]: Passphrase protection
+            - generic [ref=e187]: "Off"
+          - generic [ref=e188]: History is always saved on this device. Set a passphrase to protect new chats.
+        - group [ref=e189]:
+          - generic [ref=e190]: Danger zone ▾
+        - generic [ref=e191]: "Passphrase: off. New chats are saved without encryption."

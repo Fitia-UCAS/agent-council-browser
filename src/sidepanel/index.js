@@ -80,7 +80,9 @@ const initialState = {
     },
     schemaResetInProgress: false,
     connectionStatus: initProviderMap(false),
+    connectionDetails: initProviderMap(null),
     profileConnectionStatus: {},
+    profileConnectionDetails: {},
     connecting: initProviderMap(false),
     profiles: [],
     defaults: initProviderMap(null),
@@ -614,6 +616,9 @@ function ensureProviderMaps() {
         if (!Object.prototype.hasOwnProperty.call(state.connectionStatus, provider)) {
             state.connectionStatus[provider] = false;
         }
+        if (!Object.prototype.hasOwnProperty.call(state.connectionDetails, provider)) {
+            state.connectionDetails[provider] = null;
+        }
         if (!Object.prototype.hasOwnProperty.call(state.connecting, provider)) {
             state.connecting[provider] = false;
         }
@@ -686,10 +691,19 @@ function getChatDefaultProfileId(chatId, provider) {
 function getEffectiveDefaultProfileId(provider) {
     const normalizedProvider = normalizeProviderId(provider);
     if (!normalizedProvider) return null;
-    if (isActiveChatNewTabOnly()) {
-        return getChatDefaultProfileId(state.activeChatId, normalizedProvider);
+    const chatDefaultProfileId = isActiveChatNewTabOnly()
+        ? getChatDefaultProfileId(state.activeChatId, normalizedProvider)
+        : null;
+    const providerDefaultProfileId = state.defaults?.[normalizedProvider] || null;
+
+    if (routeBindingApi && typeof routeBindingApi.resolveDefaultProfileId === 'function') {
+        return routeBindingApi.resolveDefaultProfileId({
+            chatProfileId: chatDefaultProfileId,
+            providerDefaultProfileId,
+        });
     }
-    return state.defaults?.[normalizedProvider] || null;
+
+    return chatDefaultProfileId || providerDefaultProfileId || null;
 }
 
 function setActiveChatDefaultProfile(provider, profileId) {
@@ -933,15 +947,25 @@ function getRouteAgentConnectionInfo(agent) {
 
     let statusText = 'Needs reconnect';
     let statusTone = 'warn';
+    const connectionDetail =
+        getKnownProfileConnectionDetail(resolvedProfileId) ||
+        (selection === 'default' ? getKnownProviderConnectionDetail(provider) : null);
     if (profile.status === 'wrong_host') {
         statusText = 'Wrong site';
     } else if (profile.status === 'offline') {
         statusText = 'Tab closed';
     } else if (!canFocus) {
         statusText = 'Tab missing';
+    } else if (getConnectionReason(connectionDetail) === 'auth_required') {
+        statusText = 'Login required';
     } else if (profile.status === 'unknown') {
         statusText = 'Checking tab…';
         statusTone = 'muted';
+    } else if (getConnectionReason(connectionDetail) === 'loading') {
+        statusText = 'Loading…';
+        statusTone = 'muted';
+    } else if (getConnectionReason(connectionDetail) === 'composer_missing') {
+        statusText = 'Composer missing';
     } else {
         const knownConnected =
             selection === 'default'
@@ -1024,50 +1048,6 @@ function setRouteKind(kind) {
     if (normalizedKind === 'debate' && agents.length < 2) return;
     if (normalizedKind !== 'parallel' && normalizedKind !== 'debate') return;
     setRoute({ ...route, kind: normalizedKind });
-}
-
-function applyRoutePreset(preset) {
-    const route = state.route || getDefaultRoute();
-    const kind = String(preset || '')
-        .trim()
-        .toLowerCase();
-    if (kind === 'single') {
-        const first = getRouteAgents(route)[0] || null;
-        const provider = normalizeProviderId(first?.provider) || 'chatgpt';
-        setRoute({
-            kind: 'single',
-            agents: [{ id: generateRouteAgentId(), provider, profileId: 'default' }],
-            rounds: route.rounds,
-        });
-        return;
-    }
-    if (kind === 'compare') {
-        const supported = getSupportedProviders();
-        const providers = supported.length >= 2 ? supported : ['chatgpt', 'gemini'];
-        setRoute({
-            kind: 'parallel',
-            agents: providers.map((provider) => ({
-                id: generateRouteAgentId(),
-                provider,
-                profileId: 'default',
-            })),
-            rounds: route.rounds,
-        });
-        return;
-    }
-    if (kind === 'debate') {
-        const supported = getSupportedProviders();
-        const fallbackPair = supported.length >= 2 ? supported.slice(0, 2) : ['chatgpt', 'gemini'];
-        setRoute({
-            kind: 'debate',
-            agents: fallbackPair.map((provider) => ({
-                id: generateRouteAgentId(),
-                provider,
-                profileId: 'default',
-            })),
-            rounds: route.rounds || 3,
-        });
-    }
 }
 
 function swapRouteProviders() {
@@ -1298,6 +1278,7 @@ function renderRouteProviderList(route) {
         const ready = isProviderReady(provider);
         const connecting = Boolean(state.connecting?.[provider]);
         const profile = getDefaultProfile(provider);
+        const detail = getKnownProviderConnectionDetail(provider);
         const busy = Boolean(profile?.inUseBySessionId);
         const connected = Boolean(profile?.tabId && ready && !busy);
         const modelHint = profile?.modelHint ? ` • ${profile.modelHint}` : '';
@@ -1306,8 +1287,12 @@ function renderRouteProviderList(route) {
         if (connecting) statusText = 'Connecting…';
         else if (busy) statusText = 'In use';
         else if (ready) statusText = 'Ready';
+        else if (getConnectionReason(detail) === 'auth_required') statusText = 'Login required';
         else if (profile?.status === 'wrong_host') statusText = 'Wrong host';
         else if (profile?.status === 'unknown') statusText = 'Loading…';
+        else if (getConnectionReason(detail) === 'loading') statusText = 'Loading…';
+        else if (getConnectionReason(detail) === 'composer_missing')
+            statusText = 'Composer missing';
         else if (profile?.status === 'ok') statusText = 'Waiting…';
 
         const usingText = connected
@@ -1496,9 +1481,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.routeDebateSettings = document.getElementById('route-debate-settings');
     elements.routeRounds = document.getElementById('route-rounds');
     elements.routeSwap = document.getElementById('route-swap');
-    elements.routePresetSingle = document.getElementById('route-preset-single');
-    elements.routePresetCompare = document.getElementById('route-preset-compare');
-    elements.routePresetDebate = document.getElementById('route-preset-debate');
     elements.routeConnectAll = document.getElementById('route-connect-all');
     elements.routeManageProviders = document.getElementById('route-manage-providers');
     elements.routeDone = document.getElementById('route-done');
@@ -1692,18 +1674,6 @@ function bindEvents() {
             closeRoutePopover();
             openSettingsDrawer();
         });
-    }
-
-    if (elements.routePresetSingle) {
-        elements.routePresetSingle.addEventListener('click', () => applyRoutePreset('single'));
-    }
-
-    if (elements.routePresetCompare) {
-        elements.routePresetCompare.addEventListener('click', () => applyRoutePreset('compare'));
-    }
-
-    if (elements.routePresetDebate) {
-        elements.routePresetDebate.addEventListener('click', () => applyRoutePreset('debate'));
     }
 
     if (elements.routeProviderList) {
@@ -3376,6 +3346,27 @@ function getKnownProfileConnection(profileId) {
     return Boolean(map[profileId]);
 }
 
+function getKnownProviderConnectionDetail(provider) {
+    const normalizedProvider = normalizeProviderId(provider);
+    if (!normalizedProvider) return null;
+    const map = state.connectionDetails;
+    if (!map || typeof map !== 'object') return null;
+    return map[normalizedProvider] && typeof map[normalizedProvider] === 'object'
+        ? map[normalizedProvider]
+        : null;
+}
+
+function getKnownProfileConnectionDetail(profileId) {
+    if (!profileId) return null;
+    const map = state.profileConnectionDetails;
+    if (!map || typeof map !== 'object') return null;
+    return map[profileId] && typeof map[profileId] === 'object' ? map[profileId] : null;
+}
+
+function getConnectionReason(detail) {
+    return typeof detail?.reason === 'string' ? detail.reason : '';
+}
+
 function isProviderReady(provider) {
     const normalizedProvider = normalizeProviderId(provider);
     if (!normalizedProvider) return false;
@@ -3638,8 +3629,9 @@ function requestConnectionStatus(options = {}) {
     const requestedProfileIds = Array.isArray(options?.profileIds)
         ? options.profileIds.map((id) => String(id || '').trim()).filter(Boolean)
         : [];
+    const routeProfileIds = getRouteProfileIdsForConnection(getRoute());
     const scopedDefaults = getActiveChatScopedProfileIds();
-    const profileIds = [...requestedProfileIds, ...scopedDefaults];
+    const profileIds = [...requestedProfileIds, ...routeProfileIds, ...scopedDefaults];
     if (profileIds.length > 0) {
         payload.profileIds = [...new Set(profileIds)];
     }
@@ -4918,24 +4910,50 @@ function rebindPausedProvider() {
 
 function handleConnectionStatus(message) {
     const incoming = message.status && typeof message.status === 'object' ? message.status : {};
+    const detailIncoming =
+        message.statusDetails && typeof message.statusDetails === 'object'
+            ? message.statusDetails
+            : message.connectionDetails && typeof message.connectionDetails === 'object'
+              ? message.connectionDetails
+              : null;
     const profileIncoming =
         message.profileStatus && typeof message.profileStatus === 'object'
             ? message.profileStatus
             : message.profileConnectionStatus && typeof message.profileConnectionStatus === 'object'
               ? message.profileConnectionStatus
               : null;
+    const profileDetailIncoming =
+        message.profileStatusDetails && typeof message.profileStatusDetails === 'object'
+            ? message.profileStatusDetails
+            : message.profileConnectionDetails &&
+                typeof message.profileConnectionDetails === 'object'
+              ? message.profileConnectionDetails
+              : null;
     ensureProviderMaps();
     const next = { ...state.connectionStatus };
+    const nextDetails = { ...state.connectionDetails };
     getSupportedProviders().forEach((provider) => {
         next[provider] = Boolean(incoming[provider]);
+        nextDetails[provider] =
+            detailIncoming?.[provider] && typeof detailIncoming[provider] === 'object'
+                ? detailIncoming[provider]
+                : null;
     });
     state.connectionStatus = next;
+    state.connectionDetails = nextDetails;
     if (profileIncoming) {
         const mergedProfiles = { ...(state.profileConnectionStatus || {}) };
         Object.entries(profileIncoming).forEach(([profileId, value]) => {
             mergedProfiles[profileId] = Boolean(value);
         });
         state.profileConnectionStatus = mergedProfiles;
+    }
+    if (profileDetailIncoming) {
+        const mergedDetails = { ...(state.profileConnectionDetails || {}) };
+        Object.entries(profileDetailIncoming).forEach(([profileId, value]) => {
+            mergedDetails[profileId] = value && typeof value === 'object' ? value : null;
+        });
+        state.profileConnectionDetails = mergedDetails;
     }
     updateProviderUi();
     updateSendState();
@@ -5009,7 +5027,7 @@ function hydrateSession(session) {
             setPendingTranscriptEntries(
                 buildPendingEntriesFromProgress({
                     waitingFor: waitingProviders,
-                    waitingForAgentIds,
+                    waitingAgentIds,
                     roundIndex: Number.isFinite(session.roundIndex) ? session.roundIndex : null,
                     totalRounds: Number.isFinite(session.rounds) ? session.rounds : null,
                 })

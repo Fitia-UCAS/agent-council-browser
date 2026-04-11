@@ -443,7 +443,7 @@
         const encryptionConfigured = Boolean(
             cryptoConfig && cryptoConfig.version === 1 && cryptoConfig.salt && cryptoConfig.keyCheck
         );
-        await requireHistoryEnabled(db, { encryptionConfigured });
+        const security = await requireHistoryEnabled(db, { encryptionConfigured });
         const protectionMode = normalizeProtectionMode(security.protectionMode, {
             encryptionConfigured,
         });

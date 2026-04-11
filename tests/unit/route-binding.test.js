@@ -34,6 +34,33 @@ function loadRouteBinding() {
 }
 
 describe('Route binding helper', () => {
+    test('falls back to provider default when chat-scoped default is missing', () => {
+        const api = loadRouteBinding();
+        const profileId = api.resolveDefaultProfileId({
+            chatProfileId: null,
+            providerDefaultProfileId: 'profile_default',
+        });
+        expect(profileId).toBe('profile_default');
+    });
+
+    test('prefers chat-scoped default over provider default', () => {
+        const api = loadRouteBinding();
+        const profileId = api.resolveDefaultProfileId({
+            chatProfileId: 'profile_chat',
+            providerDefaultProfileId: 'profile_default',
+        });
+        expect(profileId).toBe('profile_chat');
+    });
+
+    test('ignores placeholder default selections when resolving defaults', () => {
+        const api = loadRouteBinding();
+        const profileId = api.resolveDefaultProfileId({
+            chatProfileId: 'default',
+            providerDefaultProfileId: 'profile_default',
+        });
+        expect(profileId).toBe('profile_default');
+    });
+
     test('returns explicit target index for matching provider', () => {
         const api = loadRouteBinding();
         const index = api.pickRouteAgentIndexForNewTabBinding({

@@ -1,0 +1,48 @@
+- generic [ref=e1]:
+  - main [ref=e7]:
+    - generic [ref=e8]:
+      - link "Page d'accueil" [ref=e11] [cursor=pointer]:
+        - /url: /
+        - img [ref=e12]
+      - generic [ref=e15]:
+        - link "Imagine" [ref=e17] [cursor=pointer]:
+          - /url: /imagine
+          - img [ref=e20]
+        - generic [ref=e34]:
+          - button "Paramètres" [ref=e35] [cursor=pointer]:
+            - img [ref=e36]
+          - link "Se connecter" [ref=e39] [cursor=pointer]:
+            - /url: /sign-in
+          - link "S'inscrire" [ref=e40] [cursor=pointer]:
+            - /url: /sign-up
+    - generic [ref=e42]:
+      - img [ref=e45]
+      - generic [ref=e54]:
+        - generic [ref=e58]:
+          - paragraph [ref=e63]: Demander à Grok
+          - generic [ref=e65]:
+            - button "Attacher" [ref=e67] [cursor=pointer]:
+              - img [ref=e68]
+            - generic [ref=e70]:
+              - button "Sélection du modèle" [ref=e72] [cursor=pointer]:
+                - generic [ref=e75]: Auto
+                - img [ref=e77]
+              - button "Dictée (⌃D)" [ref=e81] [cursor=pointer]:
+                - img [ref=e82]
+              - button "Passer en mode vocal (⌘⇧O)" [ref=e85] [cursor=pointer]
+        - generic [ref=e93]:
+          - generic [ref=e94]:
+            - img [ref=e95]
+            - generic [ref=e98]: Nouveau · Maintenez Ctrl+D pour dicter
+          - button "Ignorer" [ref=e99] [cursor=pointer]:
+            - img [ref=e100]
+    - generic [ref=e102]:
+      - text: En envoyant un message à Grok, vous acceptez nos
+      - link "Conditions" [ref=e103] [cursor=pointer]:
+        - /url: https://x.ai/legal/terms-of-service
+      - text: et notre
+      - link "Politique de confidentialité" [ref=e104] [cursor=pointer]:
+        - /url: https://x.ai/legal/privacy-policy
+      - text: .
+  - region "Notifications alt+T"
+  - alert [ref=e105]

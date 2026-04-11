@@ -69,7 +69,11 @@ function loadCaptureHarness({ provider, html }) {
     const url =
         provider === 'claude'
             ? 'https://claude.ai/chat/test-fixture'
-            : 'https://chatgpt.com/c/test-fixture';
+            : provider === 'gemini'
+              ? 'https://gemini.google.com/app/test-fixture'
+              : provider === 'grok'
+                ? 'https://grok.com/chat/test-fixture'
+                : 'https://chatgpt.com/c/test-fixture';
     const dom = new JSDOM(html, {
         url,
         runScripts: 'outside-only',
@@ -109,7 +113,61 @@ function loadCaptureHarness({ provider, html }) {
     };
 }
 
+function sendRuntimeMessage(harness, message) {
+    let payload = null;
+    const listener = harness.listeners[0];
+    if (typeof listener !== 'function') {
+        throw new Error('No runtime listener registered.');
+    }
+    listener(message, {}, (response) => {
+        payload = response;
+    });
+    return payload;
+}
+
+function buildReadyFixture(provider) {
+    if (provider === 'gemini') {
+        return `<!doctype html><html><body><main><div class="ql-editor" role="textbox">Draft</div><button aria-label="Send prompt"></button></main></body></html>`;
+    }
+    if (provider === 'grok') {
+        return `<!doctype html><html><body><main><div role="textbox" contenteditable="true">Draft</div><button aria-label="Send"></button></main></body></html>`;
+    }
+    return readFixture('capture', provider, provider === 'claude' ? 'long-answer-with-noise.html' : 'reference-heavy-answer.html');
+}
+
+function buildAuthFixture(label) {
+    return `<!doctype html><html><body><main><a href="/login">${label}</a><button>${label}</button></main></body></html>`;
+}
+
 describe('Content capture fixtures', () => {
+    test.each([
+        ['chatgpt', buildReadyFixture('chatgpt')],
+        ['gemini', buildReadyFixture('gemini')],
+        ['claude', buildReadyFixture('claude')],
+        ['grok', buildReadyFixture('grok')],
+    ])('%s readiness probe reports ready on a usable chat surface', (provider, html) => {
+        const harness = loadCaptureHarness({ provider, html });
+        const readiness = harness.hooks.probeProviderReadiness();
+
+        expect(readiness.ready).toBe(true);
+        expect(readiness.reason).toBe('ready');
+    });
+
+    test.each([
+        ['chatgpt', buildAuthFixture('Se connecter')],
+        ['gemini', buildAuthFixture('Sign in')],
+        ['claude', buildAuthFixture('Continue with Google')],
+        ['grok', buildAuthFixture('Log in')],
+    ])('%s readiness probe reports auth_required on an auth wall', (provider, html) => {
+        const harness = loadCaptureHarness({ provider, html });
+        const payload = sendRuntimeMessage(harness, { type: 'PING' });
+
+        expect(payload.type).toBe('PONG');
+        expect(payload.status).toBe('not_ready');
+        expect(payload.readiness.ready).toBe(false);
+        expect(payload.readiness.reason).toBe('auth_required');
+    });
+
     test('ChatGPT captures reference-heavy answers without toolbar noise', () => {
         const harness = loadCaptureHarness({
             provider: 'chatgpt',
@@ -216,5 +274,28 @@ describe('Content capture fixtures', () => {
         expect(harness.sentMessages[0].type).toBe('MLC_RESPONSE_CAPTURED');
         expect(normalizeText(harness.sentMessages[0].content)).toContain('Short new reply.');
         expect(harness.sentMessages[0].content).not.toContain('Copy');
+    });
+
+    test('Universal emit guard rejects prompt-echo captures', () => {
+        const harness = loadCaptureHarness({
+            provider: 'chatgpt',
+            html: readFixture('capture', 'chatgpt', 'reference-heavy-answer.html'),
+        });
+
+        harness.hooks.armCapture({
+            promptId: 'echo_prompt',
+            sessionId: 'echo_session',
+            turnIndex: 1,
+            agentId: 'agent_chatgpt_1',
+            timestamp: Date.now() - 3000,
+            promptPreview: 'Reply with exactly: auth-gate-check',
+        });
+
+        const emitted = harness.hooks.emitCaptureFromResolvedExtraction('prompt_echo', {
+            text: 'Reply with exactly: auth-gate-check',
+        });
+
+        expect(emitted).toBe(false);
+        expect(harness.sentMessages).toHaveLength(0);
     });
 });

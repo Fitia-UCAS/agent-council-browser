@@ -65,7 +65,7 @@ This file is the durable memory for the repo. It is the canonical reference for 
 - **New tab** creates an additional profile and assigns it to the most-recent unassigned agent for that provider (or replaces a broken pinned agent); otherwise it adds a new pinned agent.
 - Quick connect satisfies agents that use `Default`. Additional same-provider agents require extra profiles created via **New tab**.
 - Per-agent **Reconnect** (in the Agents list) reopens/rebinds the specific broken agent slot instead of adding random duplicate agents.
-- Connection “ready” is still determined by a successful `PING`/`PONG` to the content script (login/redirect pages may delay readiness). If a tab is open but the content script isn’t injected (common after extension reload), the background will attempt to inject `captureUtils.js` + `contentScript.js` and retry once.
+- Connection “ready” is determined by a successful content-script `PING`/`PONG` **plus** a readiness probe that confirms the tab exposes a usable provider chat surface. Login/landing/auth-wall pages are not ready and surface as login-required instead of connected. If a tab is open but the content script isn’t injected (common after extension reload), the background will attempt to inject `captureUtils.js` + `contentScript.js` and retry once.
 - Profile writes are serialized in the background to avoid lost-update races.
 
 ### Session gating and safety

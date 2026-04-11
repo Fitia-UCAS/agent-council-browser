@@ -144,9 +144,12 @@ In the Route Builder, “connected” is intentionally stricter than “a tabId 
 A provider is considered **ready** only when:
 
 - the default profile has a `tabId`, **and**
-- the content script responds to `PING` (background → tab → `PONG`)
+- the content script responds to `PING` (background → tab → `PONG`), **and**
+- the readiness probe says the page is a usable chat surface (not a login/auth/landing page)
 
 If the tab exists but the content script isn’t injected (common after extension reload), the background attempts to inject `captureUtils.js` + `contentScript.js` and retries the ping once.
+
+If the host is correct but the tab is not authenticated, the Route Builder shows `Login required` and blocks send until the user signs in.
 
 This is surfaced in UI as `state.connectionStatus[provider]` (from `CHECK_CONNECTION` / `CONNECTION_STATUS`).
 

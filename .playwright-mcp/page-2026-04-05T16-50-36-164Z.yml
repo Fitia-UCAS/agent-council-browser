@@ -1,0 +1,54 @@
+- generic [active] [ref=e1]:
+  - button "Compte Google Sam Benoit (krimino938@gmail.com)" [ref=e8] [cursor=pointer]:
+    - img [ref=e10]
+  - main [ref=e12]:
+    - generic:
+      - button "Menu principal" [ref=e14] [cursor=pointer]:
+        - img [ref=e15]: menu
+      - button "Nouvelle discussion" [disabled] [ref=e19]:
+        - generic [ref=e21]: Gemini
+    - button "Discussion temporaire" [ref=e28] [cursor=pointer]:
+      - img [ref=e31]
+    - generic [ref=e37]:
+      - text: more_vert more_vert more_vert more_vert more_vert more_vert more_vert more_vert more_vert more_vert more_vert more_vert more_vert
+      - generic [ref=e44]:
+        - generic [ref=e45]:
+          - heading "Conversation avec Gemini" [level=1] [ref=e46]
+          - generic [ref=e52]:
+            - generic [ref=e58]: Bonjour Sam
+            - heading "Par où commencer ?" [level=1] [ref=e65]
+            - generic [ref=e70]:
+              - button "🖼️ Créer une image, bouton, appuyer pour utiliser l'outil" [ref=e72] [cursor=pointer]:
+                - generic [ref=e73]: 🖼️ Créer une image
+              - button "🎸 Créer de la musique, bouton, appuyer pour utiliser l'outil" [ref=e75] [cursor=pointer]:
+                - generic [ref=e76]: 🎸 Créer de la musique
+              - button "Donne du peps à ma journée, bouton, appuyer pour utiliser l'outil" [ref=e78] [cursor=pointer]:
+                - generic [ref=e79]: Donne du peps à ma journée
+              - button "Rédiger, bouton, appuyer pour utiliser l'outil" [ref=e81] [cursor=pointer]:
+                - generic [ref=e82]: Rédiger
+              - button "Aide-moi à apprendre, bouton, appuyer pour utiliser l'outil" [ref=e84] [cursor=pointer]:
+                - generic [ref=e85]: Aide-moi à apprendre
+        - generic [ref=e86]:
+          - group [ref=e87]:
+            - generic [ref=e90]:
+              - textbox "Saisissez un prompt pour Gemini" [ref=e95]:
+                - text: Demander à Gemini
+                - paragraph [ref=e96]
+              - generic [ref=e97]:
+                - button "Ouvrir le menu \"Importer un fichier\"" [ref=e102] [cursor=pointer]:
+                  - img [ref=e103]: add_2
+                - button "Outils" [ref=e109] [cursor=pointer]:
+                  - img [ref=e111]: page_info
+              - generic [ref=e114]:
+                - group [ref=e117]:
+                  - button "Ouvrir le sélecteur de mode" [ref=e118]:
+                    - generic [ref=e120]:
+                      - generic [ref=e121]: Pro
+                      - img [ref=e122]: keyboard_arrow_down
+                - generic [ref=e125]:
+                  - button "Micro" [ref=e128] [cursor=pointer]:
+                    - img [ref=e130]: mic
+                  - text: send
+          - generic [ref=e133]:
+            - generic:
+              - paragraph

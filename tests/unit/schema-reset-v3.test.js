@@ -123,6 +123,24 @@ describe('Schema reset v3 module', () => {
         expect(status.legacyDetected).toBe(true);
     });
 
+    test('ignores current v3 state after schema meta is initialized', async () => {
+        const { api } = loadModule({
+            storage: {
+                mlc_schema_v3_meta: { version: 3, initialized: true },
+                mlc_tab_profiles_v1: { profiles: [], defaults: {} },
+                mlc_last_route_v2: { kind: 'single', agents: [], rounds: 3 },
+            },
+            databases: ['mlc_history_v1'],
+        });
+
+        const status = await api.detectLegacyState();
+        expect(status.initialized).toBe(true);
+        expect(status.resetRequired).toBe(false);
+        expect(status.legacyDetected).toBe(false);
+        expect(status.extraStorageKeys).toEqual([]);
+        expect(status.databaseNames).toEqual([]);
+    });
+
     test('marks clean state as initialized without reset', async () => {
         const { api, getStorage } = loadModule({ storage: {}, databases: [] });
 
@@ -135,12 +153,32 @@ describe('Schema reset v3 module', () => {
         expect(stored.mlc_schema_v3_meta?.version).toBe(3);
     });
 
-    test('performReset clears legacy keys/databases and sets schema meta', async () => {
+    test('primes current non-legacy state without forcing reset', async () => {
+        const { api, getStorage } = loadModule({
+            storage: {
+                mlc_last_route_v2: { kind: 'single', agents: [], rounds: 3 },
+                mlc_ui_preferences_v1: { promptTemplatesCollapsed: false },
+            },
+            databases: [],
+        });
+
+        const status = await api.primeStatus();
+        expect(status.initialized).toBe(true);
+        expect(status.resetRequired).toBe(false);
+
+        const stored = getStorage();
+        expect(stored.mlc_last_route_v2).toBeTruthy();
+        expect(stored.mlc_ui_preferences_v1).toBeTruthy();
+        expect(stored.mlc_schema_v3_meta?.initialized).toBe(true);
+    });
+
+    test('performReset clears only legacy keys/databases and sets schema meta', async () => {
         const { api, getStorage, getDatabases } = loadModule({
             storage: {
                 mlc_preferred_tabs: { chatgptTabId: 2 },
                 mlc_chats_v1: { chats: [] },
-                arbitrary_temp: { value: true },
+                mlc_last_route_v2: { kind: 'single', agents: [], rounds: 3 },
+                mlc_tab_profiles_v1: { profiles: [], defaults: {} },
             },
             databases: ['mlc_history_v1', 'mlc_other_v1'],
         });
@@ -152,10 +190,11 @@ describe('Schema reset v3 module', () => {
         expect(Object.keys(stored)).toContain('mlc_schema_v3_meta');
         expect(Object.keys(stored)).not.toContain('mlc_preferred_tabs');
         expect(Object.keys(stored)).not.toContain('mlc_chats_v1');
-        expect(Object.keys(stored)).not.toContain('arbitrary_temp');
+        expect(Object.keys(stored)).toContain('mlc_last_route_v2');
+        expect(Object.keys(stored)).toContain('mlc_tab_profiles_v1');
 
         const dbs = getDatabases();
-        expect(dbs).toEqual([]);
+        expect(dbs).toEqual(['mlc_other_v1']);
 
         const status = await api.detectLegacyState();
         expect(status.initialized).toBe(true);

@@ -14,6 +14,7 @@
         "test:unit:focused": "vitest run",
         "test:integration": "npm run build:src && node tests/test-capture-heuristics.js && node tests/test-debate-prompt-utils.js && node tests/test-manifest.js",
         "test:e2e:smoke": "npm run build:src && playwright test --config=playwright.config.js tests/e2e/smoke.spec.js",
+        "test:e2e:extension": "npm run build:src && playwright test --config=playwright.config.js tests/e2e/extension.spec.js",
         "verify:release-artifact": "bash scripts/release/verify-release-artifact.sh",
         "build:variant": "npm run build:src && bash scripts/dev/build-extension-variant.sh",
         "build:release": "bash scripts/release/build-release-artifact.sh",

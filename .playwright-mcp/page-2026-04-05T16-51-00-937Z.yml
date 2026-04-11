@@ -1,0 +1,180 @@
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e5]:
+      - generic:
+        - generic:
+          - navigation "Barre latérale":
+            - generic [ref=e6]:
+              - generic:
+                - link "Accueil":
+                  - /url: /new
+                  - img "Claude"
+              - button "Ouvrir la barre latérale" [ref=e8] [cursor=pointer]:
+                - generic [ref=e9]:
+                  - img [ref=e11]
+                  - img [ref=e14]
+            - generic:
+              - link:
+                - /url: /new
+                - generic:
+                  - generic:
+                    - generic:
+                      - img
+            - generic:
+              - link:
+                - /url: "#"
+                - generic:
+                  - generic:
+                    - img
+              - link:
+                - /url: /customize
+                - generic:
+                  - generic:
+                    - generic:
+                      - img
+            - generic:
+              - link:
+                - /url: /recents
+                - generic:
+                  - generic:
+                    - img
+                - text: Discussions
+              - link:
+                - /url: /projects
+                - generic:
+                  - generic:
+                    - img
+                - text: Projets
+              - link:
+                - /url: /artifacts
+                - generic:
+                  - generic:
+                    - img
+              - link:
+                - /url: /upgrade
+                - generic:
+                  - generic:
+                    - img
+                - text: Code
+            - generic:
+              - button [expanded]:
+                - text: Récents
+                - generic: Masquer
+              - link:
+                - /url: /chat/05acce14-84c6-4b9a-bd0e-5ca65df7a3b3
+              - link:
+                - /url: /chat/0a861e26-81f6-4cd1-b5f3-edd963ae9ebb
+              - link:
+                - /url: /chat/3cf1b02b-b809-40db-a8c4-a1aa9ac8afcb
+                - text: Sans titre
+              - link:
+                - /url: /chat/f7ab752b-3092-4fc5-8664-71c30bb5c128
+              - link:
+                - /url: /chat/8d46ce91-0371-4821-b5f4-6fc4d558fe1a
+              - link:
+                - /url: /chat/cdd90214-e550-41ef-b4ac-c96f877b2d38
+              - link:
+                - /url: /chat/8c35c1e1-d654-49d6-ba78-3c5264278ef6
+              - link:
+                - /url: /chat/10d8d14b-fcad-45d1-8c49-aedb026432da
+              - link:
+                - /url: /chat/775ca0e9-8490-4412-88cc-74318995f71a
+              - link:
+                - /url: /chat/1409ac19-e469-4059-9372-bce4300564dc
+              - link:
+                - /url: /chat/3a297b9f-398c-45aa-8d94-64e678ce9636
+              - link:
+                - /url: /chat/a8caf67a-cb92-4897-8d8c-c06893a31be6
+              - link:
+                - /url: /chat/f09bff53-b764-4674-bab0-c37ad24d7a9b
+              - link:
+                - /url: /chat/053f7c1e-5387-422f-8c4c-4cabcf9ce3bd
+              - link:
+                - /url: /chat/dbf24369-290a-44d0-8761-99bd31a66e24
+              - link:
+                - /url: /chat/f6b74286-faf0-4bb3-be72-016d891972bc
+              - link:
+                - /url: /chat/c5444241-765f-4b5b-a610-863f1628a8de
+              - link:
+                - /url: /chat/1fec783f-1f39-4e8f-9d5e-927e746870c4
+              - link:
+                - /url: /chat/f3125c1a-b2d3-4659-aaad-29f32ad56303
+              - link:
+                - /url: /chat/282c8820-9353-4fc3-9886-1c300de5389e
+                - text: Sans titre
+              - link:
+                - /url: /chat/6a46684d-3d5c-48ba-87ba-b3c6b79ede00
+              - link:
+                - /url: /chat/6ddc3090-174e-4cdf-aa37-c10dfc5bb5cd
+              - link:
+                - /url: /chat/499aba53-cb74-4c1d-bd40-79ec1a418944
+              - link:
+                - /url: /chat/875bbf06-7eb8-4a29-9eef-50c66adc1680
+              - link:
+                - /url: /chat/58af172d-d9b8-4dc5-832c-fb0787f693e2
+              - link:
+                - /url: /chat/02cccd09-1277-4270-9e2e-54d5dae2a8b3
+              - link:
+                - /url: /chat/833d8c91-5b1a-4b03-883b-5ebd9a1f0d47
+              - link:
+                - /url: /chat/d2a844fd-fe8b-4618-b76a-8ddf944b6c1f
+              - link:
+                - /url: /chat/49d878fc-a385-4f53-89f2-cd2c0e2d78e1
+              - link:
+                - /url: /chat/c79f0ab0-1b6f-4a28-9e98-0ef66a122d99
+              - link:
+                - /url: /recents
+                - img
+            - generic:
+              - link:
+                - /url: /downloads
+                - generic:
+                  - generic:
+                    - img
+            - button:
+              - generic:
+                - generic:
+                  - generic: AC
+              - generic:
+                - img
+      - generic [ref=e16]:
+        - main [ref=e17]:
+          - generic [ref=e18]:
+            - generic [ref=e19]:
+              - text: Forfait Free
+              - link "Mettre à niveau" [ref=e22] [cursor=pointer]:
+                - /url: /upgrade
+            - generic [ref=e24]:
+              - img [ref=e28]
+              - generic [ref=e30]: Bonsoir, ahmet.
+          - group [ref=e35]:
+            - generic [ref=e38]:
+              - generic [ref=e39]:
+                - textbox "Écrivez votre invite à Claude." [active] [ref=e41]:
+                  - paragraph [ref=e42]
+                - generic:
+                  - generic: Comment puis-je vous aider ?
+              - generic [ref=e43]:
+                - button "Ajouter des fichiers, des connecteurs et plus" [ref=e46] [cursor=pointer]:
+                  - img [ref=e48]
+                - button "Sonnet 4.6" [ref=e52] [cursor=pointer]:
+                  - generic [ref=e55]: Sonnet 4.6
+                  - img [ref=e57]
+                - button "Utiliser le mode vocal" [ref=e62] [cursor=pointer]:
+                  - img [ref=e65]
+            - status [ref=e73]:
+              - button "Connectez vos outils à Claude icon icon icon" [ref=e75] [cursor=pointer]:
+                - generic [ref=e76]:
+                  - paragraph [ref=e77]: Connectez vos outils à Claude
+                  - generic [ref=e78]:
+                    - generic [ref=e79]:
+                      - img "icon" [ref=e92]
+                      - img "icon" [ref=e95]
+                      - img "icon" [ref=e98]
+                    - img [ref=e99]
+        - button "Utiliser l'incognito" [ref=e104] [cursor=pointer]:
+          - img [ref=e106]
+    - region "Notifications (F8)":
+      - list
+  - iframe [ref=e111]:
+    

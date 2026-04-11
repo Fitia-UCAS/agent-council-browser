@@ -1,0 +1,62 @@
+- generic [ref=e1]:
+  - main [ref=e7]:
+    - generic:
+      - generic:
+        - link "Page d'accueil" [ref=e10] [cursor=pointer]:
+          - /url: /
+          - img [ref=e11]
+        - generic [ref=e14]:
+          - link "Imagine" [ref=e16] [cursor=pointer]:
+            - /url: /imagine
+            - img [ref=e19]
+            - generic [ref=e33]: Imagine
+          - generic [ref=e34]:
+            - button "Paramètres" [ref=e35] [cursor=pointer]:
+              - img [ref=e36]
+            - link "Se connecter" [ref=e39] [cursor=pointer]:
+              - /url: /sign-in
+            - link "S'inscrire" [ref=e40] [cursor=pointer]:
+              - /url: /sign-up
+    - generic [ref=e42]:
+      - img [ref=e45]
+      - generic [ref=e53]:
+        - generic [ref=e58]:
+          - textbox "Poser une question à Grok" [active] [ref=e60]:
+            - /placeholder: À quoi pensez-vous ?
+            - text: t
+          - generic [ref=e62]:
+            - button "Attacher" [ref=e64] [cursor=pointer]:
+              - img [ref=e65]
+            - generic [ref=e67]:
+              - button "Sélection du modèle" [ref=e69] [cursor=pointer]:
+                - generic [ref=e72]: Auto
+                - img [ref=e74]
+              - button "Dictée (⌃D)" [ref=e78] [cursor=pointer]:
+                - img [ref=e79]
+              - button "Soumettre" [ref=e115] [cursor=pointer]:
+                - img [ref=e117]
+        - list [ref=e119]:
+          - listitem [ref=e120] [cursor=pointer]:
+            - generic [ref=e121]:
+              - img [ref=e123]
+              - generic [ref=e126]: t
+    - generic [ref=e99]:
+      - text: En envoyant un message à Grok, vous acceptez nos
+      - link "Conditions" [ref=e100] [cursor=pointer]:
+        - /url: https://x.ai/legal/terms-of-service
+      - text: et notre
+      - link "Politique de confidentialité" [ref=e101] [cursor=pointer]:
+        - /url: https://x.ai/legal/privacy-policy
+      - text: .
+  - region "Notifications alt+T"
+  - generic [ref=e103]:
+    - generic [ref=e104]:
+      - paragraph [ref=e105]: "Depuis le 4 avril 2026, notre Politique de confidentialité et notre Politique en matière de cookies ont été mises à jour. Consultez-les ici :"
+      - generic [ref=e106]:
+        - link "Politique de confidentialité" [ref=e107] [cursor=pointer]:
+          - /url: https://x.ai/legal/privacy-policy
+        - link "Politique en matière de cookies" [ref=e108] [cursor=pointer]:
+          - /url: https://x.ai/legal/cookie-policy
+    - button "Fermer" [ref=e109] [cursor=pointer]:
+      - img [ref=e110]
+  - alert [ref=e113]

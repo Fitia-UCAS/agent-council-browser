@@ -1854,8 +1854,62 @@ async function ensureProviderContentScripts(tabId, provider) {
     return promise;
 }
 
-async function pingTab(tabId, provider) {
-    if (!Number.isFinite(tabId)) return false;
+function normalizeTabReadiness(provider, response) {
+    const readiness =
+        response?.readiness && typeof response.readiness === 'object' ? response.readiness : null;
+    const legacyReady = Boolean(
+        response && (response.type === 'PONG' || response.status === 'ready')
+    );
+    const ready = readiness?.ready === true || (!readiness && legacyReady);
+    const rawReason =
+        typeof readiness?.reason === 'string' && readiness.reason.trim()
+            ? readiness.reason.trim()
+            : ready
+              ? 'ready'
+              : 'not_responding';
+    return {
+        provider: normalizeProviderKey(provider) || provider || null,
+        ready,
+        reason: ready ? 'ready' : rawReason,
+        hasInput: Boolean(readiness?.hasInput),
+        hasSendControl: Boolean(readiness?.hasSendControl),
+    };
+}
+
+function buildTabReadinessError(label, readiness) {
+    const normalized = readiness && typeof readiness === 'object' ? readiness : {};
+    const reason = String(normalized.reason || 'not_responding').trim().toLowerCase();
+    const prefix = label || 'Provider tab';
+    if (reason === 'auth_required') {
+        return `${prefix} requires login. Open the tab and sign in.`;
+    }
+    if (reason === 'loading') {
+        return `${prefix} is still loading. Wait for the chat composer to appear and try again.`;
+    }
+    if (reason === 'composer_missing') {
+        return `${prefix} does not show a usable chat composer. Open an actual chat and try again.`;
+    }
+    return `${prefix} is not responding. Refresh the tab and try again.`;
+}
+
+function createTabReadinessError(provider, readiness, label) {
+    const error = new Error(buildTabReadinessError(label || formatLLMLabel(provider), readiness));
+    error.code = readiness?.reason === 'auth_required' ? 'TAB_AUTH_REQUIRED' : 'TAB_NOT_READY';
+    error.provider = normalizeProviderKey(provider) || provider || null;
+    error.readiness = readiness || null;
+    return error;
+}
+
+async function probeTabReadiness(tabId, provider) {
+    if (!Number.isFinite(tabId)) {
+        return {
+            provider: normalizeProviderKey(provider) || provider || null,
+            ready: false,
+            reason: 'not_responding',
+            hasInput: false,
+            hasSendControl: false,
+        };
+    }
     const normalizedProvider = normalizeProviderKey(provider) || provider;
     const timeoutMs = 1800;
 
@@ -1864,7 +1918,7 @@ async function pingTab(tabId, provider) {
             chrome.tabs.sendMessage(tabId, { type: 'PING' }),
             new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs)),
         ]);
-        return Boolean(response && (response.type === 'PONG' || response.status === 'ready'));
+        return normalizeTabReadiness(normalizedProvider, response);
     };
 
     try {
@@ -1880,7 +1934,7 @@ async function pingTab(tabId, provider) {
                         `[MLC Background] ${normalizedProvider} tab ping still failing after inject:`,
                         retryError?.message || retryError
                     );
-                    return false;
+                    return normalizeTabReadiness(normalizedProvider, null);
                 }
             }
         }
@@ -1888,7 +1942,7 @@ async function pingTab(tabId, provider) {
             `[MLC Background] ${normalizedProvider} tab ping failed:`,
             error?.message || error
         );
-        return false;
+        return normalizeTabReadiness(normalizedProvider, null);
     }
 }
 
@@ -2378,11 +2432,12 @@ async function validateProfileForSession(provider, profileId, { requirePing = fa
             return { ok: false, error: `${validated.label} is ${statusLabel}.` };
         }
         if (requirePing) {
-            const pingOk = await pingTab(validated.tabId, provider);
-            if (!pingOk) {
+            const readiness = await probeTabReadiness(validated.tabId, provider);
+            if (!readiness.ready) {
                 return {
                     ok: false,
-                    error: `${validated.label} is not responding. Refresh the tab and try again.`,
+                    error: buildTabReadinessError(validated.label, readiness),
+                    readiness,
                 };
             }
         }
@@ -2711,11 +2766,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     type: 'CONNECTION_STATUS',
                     status: result.status,
                     profileStatus: result.profileStatus,
+                    statusDetails: result.statusDetails,
+                    profileStatusDetails: result.profileStatusDetails,
                 });
                 sendResponse({
                     type: 'CONNECTION_STATUS',
                     status: result.status,
                     profileStatus: result.profileStatus,
+                    statusDetails: result.statusDetails,
+                    profileStatusDetails: result.profileStatusDetails,
                 });
             });
             return true; // Keep message channel open for async response
@@ -5007,6 +5066,16 @@ async function resolveSessionTab(session, target, { requirePing = false } = {}) 
     const fallbackTabId = participant?.tabId || session.tabIds?.[provider];
     const fallbackValidation = await validateTabForProvider(fallbackTabId, provider);
     if (fallbackValidation.ok) {
+        if (requirePing) {
+            const readiness = await probeTabReadiness(fallbackValidation.tabId, provider);
+            if (!readiness.ready) {
+                return {
+                    ok: false,
+                    error: buildTabReadinessError(formatLLMLabel(provider), readiness),
+                    readiness,
+                };
+            }
+        }
         const inUse = await isTabInUse(fallbackValidation.tabId, {
             excludeSessionId: session.sessionId,
         });
@@ -7314,6 +7383,15 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
 
         sendMessageToPopup({ type: 'LLM_PROGRESS', llm: llmType, status: 'Sending prompt...' });
 
+        const readinessBeforeSend = await probeTabReadiness(tabId, llmType);
+        if (!readinessBeforeSend.ready) {
+            throw createTabReadinessError(
+                llmType,
+                readinessBeforeSend,
+                formatLLMLabel(llmType)
+            );
+        }
+
         if (llmType === 'claude') {
             const promptId = context.promptId || generatePromptId();
             try {
@@ -7343,6 +7421,17 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                         '[MLC Background] Claude debugger send succeeded (verified input cleared).',
                         result?.meta || null
                     );
+                    const readinessAfterSend = await probeTabReadiness(tabId, llmType);
+                    if (
+                        !readinessAfterSend.ready &&
+                        readinessAfterSend.reason === 'auth_required'
+                    ) {
+                        throw createTabReadinessError(
+                            llmType,
+                            readinessAfterSend,
+                            formatLLMLabel(llmType)
+                        );
+                    }
                     const preview = typeof prompt === 'string' ? prompt.trim().slice(0, 800) : '';
                     const ack = result?.meta?.ack || null;
                     try {
@@ -7477,6 +7566,14 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                 console.log(
                     `[MLC Background] simpleInteraction SUCCEEDED for ${llmType}: ${result.method}`
                 );
+                const readinessAfterSend = await probeTabReadiness(tabId, llmType);
+                if (!readinessAfterSend.ready && readinessAfterSend.reason === 'auth_required') {
+                    throw createTabReadinessError(
+                        llmType,
+                        readinessAfterSend,
+                        formatLLMLabel(llmType)
+                    );
+                }
                 const promptId = context.promptId || generatePromptId();
                 try {
                     const preview = typeof prompt === 'string' ? prompt.trim().slice(0, 800) : '';
@@ -8913,14 +9010,17 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
 async function checkConnectionStatus({ profileIds = [] } = {}) {
     const status = {};
     const profileStatus = {};
+    const statusDetails = {};
+    const profileStatusDetails = {};
     const providers = getSupportedProviderKeys();
     if (providers.length === 0) {
         status.chatgpt = false;
         status.gemini = false;
-        return { status, profileStatus };
+        return { status, profileStatus, statusDetails, profileStatusDetails };
     }
     providers.forEach((provider) => {
         status[provider] = false;
+        statusDetails[provider] = normalizeTabReadiness(provider, null);
     });
 
     console.log('[MLC Background] Starting connection status check...');
@@ -8931,7 +9031,7 @@ async function checkConnectionStatus({ profileIds = [] } = {}) {
     } catch (error) {
         console.error('[MLC Background] Error loading tab profiles for connection check:', error);
         console.log('[MLC Background] Final connection status:', status);
-        return { status, profileStatus };
+        return { status, profileStatus, statusDetails, profileStatusDetails };
     }
 
     for (const provider of providers) {
@@ -8943,20 +9043,29 @@ async function checkConnectionStatus({ profileIds = [] } = {}) {
             if (!profile || !Number.isFinite(profile.tabId)) {
                 console.log(`[MLC Background] No default ${formatLLMLabel(provider)} profile/tab`);
                 status[provider] = false;
+                statusDetails[provider] = {
+                    provider,
+                    ready: false,
+                    reason: 'composer_missing',
+                    hasInput: false,
+                    hasSendControl: false,
+                };
                 continue;
             }
 
             const validation = await validateTabForProvider(profile.tabId, provider);
             if (!validation.ok) {
                 status[provider] = false;
+                statusDetails[provider] = normalizeTabReadiness(provider, null);
                 continue;
             }
 
-            const pingOk = await pingTab(profile.tabId, provider);
-            status[provider] = pingOk;
+            const readiness = await probeTabReadiness(profile.tabId, provider);
+            status[provider] = readiness.ready;
+            statusDetails[provider] = readiness;
             console.log(
                 `[MLC Background] ${formatLLMLabel(provider)} default profile responsive:`,
-                pingOk ? profile.tabId : 'No'
+                readiness.ready ? profile.tabId : 'No'
             );
         } catch (error) {
             console.warn(
@@ -8964,6 +9073,7 @@ async function checkConnectionStatus({ profileIds = [] } = {}) {
                 error?.message || error
             );
             status[provider] = false;
+            statusDetails[provider] = normalizeTabReadiness(provider, null);
         }
     }
 
@@ -8978,26 +9088,32 @@ async function checkConnectionStatus({ profileIds = [] } = {}) {
                     const profile = findProfileById(profilesState, profileId);
                     if (!profile || !Number.isFinite(profile.tabId)) {
                         profileStatus[profileId] = false;
+                        profileStatusDetails[profileId] = normalizeTabReadiness(null, null);
                         return;
                     }
                     const provider = normalizeProviderKey(profile.provider);
                     if (!provider || !isSupportedProviderKey(provider)) {
                         profileStatus[profileId] = false;
+                        profileStatusDetails[profileId] = normalizeTabReadiness(provider, null);
                         return;
                     }
                     const validation = await validateTabForProvider(profile.tabId, provider);
                     if (!validation.ok) {
                         profileStatus[profileId] = false;
+                        profileStatusDetails[profileId] = normalizeTabReadiness(provider, null);
                         return;
                     }
-                    profileStatus[profileId] = await pingTab(profile.tabId, provider);
+                    const readiness = await probeTabReadiness(profile.tabId, provider);
+                    profileStatus[profileId] = readiness.ready;
+                    profileStatusDetails[profileId] = readiness;
                 } catch (error) {
                     profileStatus[profileId] = false;
+                    profileStatusDetails[profileId] = normalizeTabReadiness(null, null);
                 }
             })
         );
     }
 
     console.log('[MLC Background] Final connection status:', status);
-    return { status, profileStatus };
+    return { status, profileStatus, statusDetails, profileStatusDetails };
 }

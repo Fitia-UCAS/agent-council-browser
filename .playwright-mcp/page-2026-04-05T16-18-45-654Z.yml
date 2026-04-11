@@ -1,0 +1,90 @@
+- generic [ref=e1]:
+  - link "Connexion" [ref=e6] [cursor=pointer]:
+    - /url: https://accounts.google.com/ServiceLogin?passive=1209600&continue=https://gemini.google.com/&followup=https://gemini.google.com/&ec=GAZAkgU
+  - main [ref=e8]:
+    - generic:
+      - button "Menu principal" [ref=e10] [cursor=pointer]:
+        - img [ref=e11]: menu
+      - button "Nouvelle discussion" [disabled] [ref=e15]:
+        - generic [ref=e17]: Gemini
+    - generic [ref=e21]:
+      - link "À propos de Gemini S'ouvre dans une nouvelle fenêtre" [ref=e22] [cursor=pointer]:
+        - /url: https://gemini.google/about/?utm_source=gemini&utm_medium=web&utm_campaign=gemini_zero_state_link_to_marketing_microsite
+        - text: À propos de Gemini
+        - generic [ref=e23]: S'ouvre dans une nouvelle fenêtre
+      - link "Appli Gemini S'ouvre dans une nouvelle fenêtre" [ref=e24] [cursor=pointer]:
+        - /url: https://gemini.google.com/app/download
+        - text: Appli Gemini
+        - generic [ref=e25]: S'ouvre dans une nouvelle fenêtre
+      - link "Abonnements S'ouvre dans une nouvelle fenêtre" [ref=e26] [cursor=pointer]:
+        - /url: https://one.google.com/ai
+        - text: Abonnements
+        - generic [ref=e27]: S'ouvre dans une nouvelle fenêtre
+      - link "Pour les entreprises S'ouvre dans une nouvelle fenêtre" [ref=e28] [cursor=pointer]:
+        - /url: https://workspace.google.com/solutions/ai/?utm_source=geminiforbusiness&utm_medium=et&utm_campaign=gemini-page-crosslink&utm_term=-&utm_content=forbusiness-2025Q3
+        - text: Pour les entreprises
+        - generic [ref=e29]: S'ouvre dans une nouvelle fenêtre
+    - generic [ref=e31]:
+      - navigation [ref=e32]:
+        - generic [ref=e35]:
+          - group [ref=e36]:
+            - generic [ref=e37]:
+              - link "New chat" [disabled]:
+                - /url: /app
+                - generic:
+                  - generic:
+                    - img: edit_square
+          - group [ref=e38]:
+            - button "Settings & help" [ref=e40] [cursor=pointer]:
+              - img [ref=e43]: settings_2
+      - generic [ref=e52]:
+        - generic [ref=e53]:
+          - heading "Conversation avec Gemini" [level=1] [ref=e54]
+          - generic [ref=e59]:
+            - heading "Découvrez Gemini, votre assistant IA personnel" [level=1] [ref=e68]
+            - generic [ref=e76]:
+              - button "Écrire, bouton, appuyer pour utiliser l'outil" [ref=e78] [cursor=pointer]:
+                - generic [ref=e79]: Écrire
+              - button "Planifier, bouton, appuyer pour utiliser l'outil" [ref=e81] [cursor=pointer]:
+                - generic [ref=e82]: Planifier
+              - button "Rechercher, bouton, appuyer pour utiliser l'outil" [ref=e84] [cursor=pointer]:
+                - generic [ref=e85]: Rechercher
+              - button "Apprendre, bouton, appuyer pour utiliser l'outil" [ref=e87] [cursor=pointer]:
+                - generic [ref=e88]: Apprendre
+        - generic [ref=e89]:
+          - group [ref=e90]:
+            - generic [ref=e93]:
+              - textbox "Saisissez un prompt pour Gemini" [active] [ref=e98]:
+                - text: Demander à Gemini
+                - paragraph [ref=e99]
+              - generic [ref=e100]:
+                - button "Ouvrir le menu \"Importer un fichier\"" [ref=e105] [cursor=pointer]:
+                  - img [ref=e106]: add_2
+                - button "Outils" [ref=e112]:
+                  - img [ref=e113]: page_info
+                  - generic [ref=e116]: Outils
+              - generic [ref=e119]:
+                - button "Ouvrir le sélecteur de mode" [ref=e122]:
+                  - generic [ref=e124]:
+                    - generic [ref=e125]: Rapide
+                    - img [ref=e126]: keyboard_arrow_down
+                - generic [ref=e129]:
+                  - button "Micro" [ref=e132] [cursor=pointer]:
+                    - img [ref=e134]: mic
+                  - text: send
+          - paragraph [ref=e139]:
+            - text: Les
+            - link "Conditions d'utilisation de Google S'ouvre dans une nouvelle fenêtre" [ref=e140] [cursor=pointer]:
+              - /url: https://policies.google.com/terms
+              - text: Conditions d'utilisation de Google
+              - generic [ref=e141]: S'ouvre dans une nouvelle fenêtre
+            - text: et les
+            - link "Règles de confidentialité de Google S'ouvre dans une nouvelle fenêtre" [ref=e142] [cursor=pointer]:
+              - /url: https://policies.google.com/privacy
+              - text: Règles de confidentialité de Google
+              - generic [ref=e143]: S'ouvre dans une nouvelle fenêtre
+            - text: s'appliquent. Gemini est une IA et peut se tromper, y compris sur des personnes.
+            - link "Votre confidentialité et Gemini S'ouvre dans une nouvelle fenêtre" [ref=e144] [cursor=pointer]:
+              - /url: https://support.google.com/gemini/answer/13594961#signed_out&zippy=%2Chow-does-google-handle-my-data-when-i-use-gemini-apps-while-signed-out
+              - text: Votre confidentialité et Gemini
+              - generic [ref=e145]: S'ouvre dans une nouvelle fenêtre

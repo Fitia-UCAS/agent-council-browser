@@ -1,0 +1,51 @@
+- generic [ref=e1]:
+  - main [ref=e7]:
+    - generic [ref=e8]:
+      - link "Page d'accueil" [ref=e11] [cursor=pointer]:
+        - /url: /
+        - img [ref=e12]
+      - generic [ref=e15]:
+        - link "Imagine" [ref=e17] [cursor=pointer]:
+          - /url: /imagine
+          - img [ref=e20]
+        - generic [ref=e34]:
+          - button "Paramètres" [ref=e35] [cursor=pointer]:
+            - img [ref=e36]
+          - link "Se connecter" [ref=e39] [cursor=pointer]:
+            - /url: /sign-in
+          - link "S'inscrire" [ref=e40] [cursor=pointer]:
+            - /url: /sign-up
+    - generic [ref=e106]:
+      - generic [ref=e110]:
+        - generic [ref=e114]:
+          - paragraph [ref=e115]: "You will participate in a multi-agent debate with Claude over 3 iterations to produce the most accurate answer to the user. Guidelines:"
+          - list [ref=e116]:
+            - listitem [ref=e117]: Be precise and non-egoic (optimize for correctness, not for "being right").
+            - listitem [ref=e118]: "Be constructive: critique to make progress and improve the answer."
+            - listitem [ref=e119]: "If unsure, say so briefly and propose a way to verify. Iteration 1/3 Conversation so far: User: Reply with exactly one word: olive ChatGPT: olive Gemini: Critique Key Issues: ChatGPT's response is completely accurate and already perfectly optimized. It adheres strictly to the constraints by providing the exact string requested without any extraneous punctuation, capitalization, or conversational filler. No changes or improvements are necessary. Revised Answer: olive Claude: Critique: No issues. The answer is a single word, exactly as requested. Revised answer: olive Provide a constructive improvement for iteration 1/3:"
+            - listitem [ref=e120]: Critique key issues (short bullets)
+            - listitem [ref=e121]: Revised answer
+        - generic [ref=e126]:
+          - generic [ref=e127]:
+            - generic [ref=e128]:
+              - img [ref=e129]
+              - generic [ref=e132]: Forte demande
+            - generic [ref=e133]: Veuillez réessayer dans quelques instants ou inscrivez-vous gratuitement pour bénéficier d'un accès prioritaire supérieur
+          - generic [ref=e134]:
+            - button "Se connecter" [ref=e135] [cursor=pointer]
+            - button "S'inscrire" [ref=e136] [cursor=pointer]
+      - generic [ref=e145]:
+        - paragraph [ref=e150]: Posez n'importe quelle question
+        - generic [ref=e152]:
+          - button "Attacher" [ref=e154] [cursor=pointer]:
+            - img [ref=e155]
+          - generic [ref=e157]:
+            - button "Sélection du modèle" [ref=e159] [cursor=pointer]:
+              - generic [ref=e162]: Auto
+              - img [ref=e164]
+            - button "Dictée (⌃D)" [disabled] [ref=e168]:
+              - img [ref=e169]
+            - button "Soumettre" [disabled] [ref=e173]:
+              - img [ref=e175]
+  - region "Notifications alt+T"
+  - alert [ref=e105]

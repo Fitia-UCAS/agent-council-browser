@@ -16,6 +16,19 @@
         return text;
     }
 
+    function resolveDefaultProfileId({
+        chatProfileId = null,
+        providerDefaultProfileId = null,
+    } = {}) {
+        const chatSelection = normalizeProfileSelection(chatProfileId);
+        if (chatSelection && chatSelection !== 'default') return chatSelection;
+
+        const providerSelection = normalizeProfileSelection(providerDefaultProfileId);
+        if (providerSelection && providerSelection !== 'default') return providerSelection;
+
+        return null;
+    }
+
     function getKnownProfileConnection(profileConnectionStatus, profileId) {
         if (!profileId) return null;
         if (!profileConnectionStatus || typeof profileConnectionStatus !== 'object') return null;
@@ -88,6 +101,7 @@
     globalScope.MLCRouteBinding = {
         normalizeProviderId,
         normalizeProfileSelection,
+        resolveDefaultProfileId,
         pickRouteAgentIndexForNewTabBinding,
     };
 })(typeof self !== 'undefined' ? self : window);

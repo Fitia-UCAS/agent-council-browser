@@ -1,0 +1,121 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - button "Chats" [ref=e5] [cursor=pointer]:
+          - generic [ref=e6]: ☰
+        - button "New chat" [ref=e7] [cursor=pointer]:
+          - generic [ref=e8]: +
+        - generic "Minions Council" [ref=e9]:
+          - img "Minions Council logo" [ref=e10]
+          - generic [ref=e11]: Minions Council
+      - generic [ref=e12]:
+        - button "Providers" [ref=e13] [cursor=pointer]: "Route: 0/1 ready"
+        - button "Settings" [ref=e14] [cursor=pointer]:
+          - generic [ref=e15]: ⚙
+    - main [ref=e16]:
+      - generic [ref=e17]:
+        - generic [ref=e18]: Connect to start
+        - generic [ref=e19]: Reconnect ChatGPT • ChatGPT profile to start.
+        - button "Fix connections" [ref=e21] [cursor=pointer]
+    - contentinfo [ref=e22]:
+      - generic [ref=e23]: Prompt
+      - generic [ref=e24]:
+        - textbox "Prompt" [ref=e25]:
+          - /placeholder: Connect ChatGPT to start...
+        - generic [ref=e26]: Reconnect ChatGPT • ChatGPT profile to start.
+        - generic [ref=e27]:
+          - button "Attach files" [ref=e28] [cursor=pointer]:
+            - generic [ref=e29]: 📎
+          - button "ChatGPT • ChatGPT profile ▾" [ref=e30] [cursor=pointer]:
+            - generic [ref=e31]: ChatGPT • ChatGPT profile
+            - generic [ref=e32]: ▾
+          - button "Connect" [disabled] [ref=e33]
+        - generic [ref=e34]:
+          - generic [ref=e35]: "0"
+          - text: chars
+  - complementary [ref=e36]:
+    - generic [ref=e37]:
+      - generic [ref=e38]: Chats
+      - button [ref=e39] [cursor=pointer]:
+        - generic [ref=e40]: ✕
+    - button [ref=e42] [cursor=pointer]:
+      - generic [ref=e43]: +
+      - generic [ref=e44]: New chat
+  - complementary [ref=e45]:
+    - generic [ref=e46]:
+      - generic [ref=e47]: Settings
+      - button [ref=e48] [cursor=pointer]:
+        - generic [ref=e49]: ✕
+    - generic [ref=e50]:
+      - generic [ref=e51]:
+        - generic [ref=e52]: Passphrase quick controls
+        - generic [ref=e53]:
+          - generic [ref=e54]: Passphrase protection
+          - generic [ref=e55]: "Off"
+        - generic [ref=e56]: Passphrase is off. New chats are created without encryption.
+        - button [ref=e58] [cursor=pointer]: Set passphrase…
+        - generic [ref=e59]:
+          - checkbox [disabled] [ref=e60]
+          - generic [ref=e61]: Require passphrase for new chats
+        - generic [ref=e62]: If disabled, new chats stay readable while existing protected chats remain locked.
+      - generic [ref=e63]:
+        - generic [ref=e64]: Templates
+        - generic [ref=e65]: Start with a preset, then adjust the fields you need.
+        - tablist [ref=e66]:
+          - tab [selected] [ref=e67] [cursor=pointer]: Simple
+          - tab [ref=e68] [cursor=pointer]: Advanced JSON
+        - generic [ref=e69]:
+          - generic [ref=e70]: Quick presets
+          - generic [ref=e71]:
+            - button [ref=e72] [cursor=pointer]: Balanced rewrite
+            - button [ref=e73] [cursor=pointer]: Concise paraphrase
+            - button [ref=e74] [cursor=pointer]: Final answer only
+        - generic [ref=e75]:
+          - generic [ref=e76]: Insert variable token
+          - generic [ref=e77]:
+            - button [ref=e78] [cursor=pointer]: "{other_llm}"
+            - button [ref=e79] [cursor=pointer]: "{round}"
+            - button [ref=e80] [cursor=pointer]: "{rounds}"
+            - button [ref=e81] [cursor=pointer]: "{other_answer}"
+        - generic [ref=e82]:
+          - generic [ref=e83]:
+            - generic [ref=e84]: Start style (first turns)
+            - textbox [ref=e85]:
+              - /placeholder: Context and debate rules for the first turn.
+              - text: "You will participate in a multi-agent debate with {other_llm} over {rounds} iterations to produce the most accurate answer to the user. Guidelines: - Be precise and non-egoic (optimize for correctness, not for \"being right\"). - Be constructive: critique to make progress and improve the answer. - If unsure, say so briefly and propose a way to verify."
+            - generic [ref=e86]: Sent at the start so both models follow the same style.
+          - generic [ref=e87]: "When used: first two turns."
+          - generic [ref=e88]:
+            - generic [ref=e89]: Round style
+            - textbox [ref=e90]:
+              - /placeholder: How each agent should critique and improve in intermediate rounds.
+              - text: "Provide a constructive improvement for iteration {round}/{rounds}: - Critique key issues (short bullets) - Revised answer"
+            - generic [ref=e91]: Used for each round before the final answer.
+          - generic [ref=e92]: "When used: middle turns."
+          - generic [ref=e93]:
+            - generic [ref=e94]: Final style
+            - textbox [ref=e95]:
+              - /placeholder: How the final turn should answer the user.
+              - text: Provide your final best answer for the user. Output only the final answer (no critique section).
+            - generic [ref=e96]: Used only for the final response.
+          - generic [ref=e97]: "When used: last turn only."
+        - group [ref=e98]:
+          - generic [ref=e99] [cursor=pointer]:
+            - generic [ref=e100]: Advanced editor (JSON)
+            - generic [ref=e101]: ▾
+        - generic [ref=e102]:
+          - button [ref=e103] [cursor=pointer]: Load current
+          - button [ref=e104] [cursor=pointer]: Save changes
+          - button [ref=e105] [cursor=pointer]: Reset defaults
+        - generic [ref=e106]: Loaded default templates (no override saved).
+      - generic [ref=e107]:
+        - generic [ref=e108]: Passphrase details
+        - generic [ref=e109]:
+          - generic [ref=e110]:
+            - generic [ref=e111]: Passphrase protection
+            - generic [ref=e112]: "Off"
+          - generic [ref=e113]: History is always saved on this device. Set a passphrase to protect new chats.
+        - group [ref=e114]:
+          - generic [ref=e115]: Danger zone ▾
+        - generic [ref=e116]: "Passphrase: off. New chats are saved without encryption."

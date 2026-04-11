@@ -1,0 +1,153 @@
+- generic [ref=e1]:
+  - link "Ignorer et passer au contenu" [ref=e3] [cursor=pointer]:
+    - /url: "#main"
+  - generic [ref=e5]:
+    - generic [ref=e7]:
+      - generic [ref=e9]:
+        - generic:
+          - generic:
+            - generic:
+              - button "Ouvrir la barre latérale":
+                - img
+          - generic:
+            - generic:
+              - link "Nouveau chat":
+                - /url: /
+                - generic:
+                  - img
+                - generic: Nouveau chat
+            - generic:
+              - generic:
+                - generic:
+                  - img
+                - generic: Rechercher des chats
+            - generic:
+              - link "Images":
+                - /url: /images
+                - generic:
+                  - img
+                - generic: Images
+        - generic [ref=e10]:
+          - heading "Historique de chat" [level=2] [ref=e11]
+          - navigation "Historique de chat" [ref=e12]:
+            - generic [ref=e15]:
+              - link "Dom." [ref=e16] [cursor=pointer]:
+                - /url: /
+                - img [ref=e17]
+              - button "Fermer la barre latérale" [expanded] [ref=e20]:
+                - img [ref=e21]
+            - complementary [ref=e23]:
+              - list [ref=e24]:
+                - listitem [ref=e25]:
+                  - link "Nouveau chat Maj Commande O" [ref=e26] [cursor=pointer]:
+                    - /url: /
+                    - generic [ref=e27]:
+                      - img [ref=e29]
+                      - generic [ref=e32]: Nouveau chat
+                    - generic [ref=e34]:
+                      - generic "Maj" [ref=e35]:
+                        - generic [ref=e36]: ⇧
+                      - generic "Commande" [ref=e37]:
+                        - generic [ref=e38]: ⌘
+                      - generic [ref=e40]: O
+                - listitem [ref=e41]:
+                  - generic [ref=e42] [cursor=pointer]:
+                    - generic [ref=e43]:
+                      - img [ref=e45]
+                      - generic [ref=e48]: Rechercher des chats
+                    - generic [ref=e50]:
+                      - generic "Commande" [ref=e51]:
+                        - generic [ref=e52]: ⌘
+                      - generic [ref=e54]: K
+            - link "Images" [ref=e55] [cursor=pointer]:
+              - /url: /images
+              - img [ref=e57]
+              - generic [ref=e60]: Images
+            - generic [ref=e61]:
+              - link "Applications" [ref=e62] [cursor=pointer]:
+                - /url: /apps
+                - img [ref=e64]
+                - generic [ref=e67]: Applications
+              - generic [ref=e68] [cursor=pointer]:
+                - img [ref=e70]
+                - generic [ref=e73]: Recherche approfondie
+              - generic [ref=e74] [cursor=pointer]:
+                - img [ref=e76]
+                - generic [ref=e79]: Santé
+            - generic [ref=e81]:
+              - link "Voir les offres et les tarifs" [ref=e82] [cursor=pointer]:
+                - /url: https://openai.com/chatgpt/pricing/
+                - generic [ref=e83]:
+                  - img [ref=e85]
+                  - text: Voir les offres et les tarifs
+                - img [ref=e88]
+              - generic [ref=e90] [cursor=pointer]:
+                - img [ref=e92]
+                - text: Paramètres
+              - generic [ref=e94] [cursor=pointer]:
+                - generic [ref=e95]:
+                  - img [ref=e97]
+                  - generic [ref=e100]: Aide
+                - img [ref=e102]
+            - generic [ref=e104]:
+              - generic [ref=e105]:
+                - paragraph [ref=e106]: Obtenez des réponses personnalisées pour vous
+                - paragraph [ref=e107]: Connectez-vous pour obtenir des réponses sur la base des chats enregistrés, créer des images et charger des fichiers.
+              - button "Se connecter" [ref=e109] [cursor=pointer]:
+                - generic [ref=e110]: Se connecter
+      - generic [ref=e112]:
+        - banner:
+          - button "Sélecteur de modèle" [ref=e114] [cursor=pointer]:
+            - generic [ref=e115]: ChatGPT
+            - img [ref=e116]
+          - generic [ref=e122]:
+            - button "Se connecter" [ref=e123] [cursor=pointer]:
+              - generic [ref=e125]: Se connecter
+            - button "Inscription gratuite" [ref=e126] [cursor=pointer]:
+              - generic [ref=e127]: Inscription gratuite
+        - main [ref=e128]:
+          - generic [ref=e129]:
+            - heading "Quel est le programme aujourd’hui ?" [level=1] [ref=e137]:
+              - generic [ref=e138]: Quel est le programme aujourd’hui ?
+            - generic [ref=e139]:
+              - generic [ref=e143]:
+                - generic [ref=e147]:
+                  - button "Ajouter des fichiers et plus encore" [ref=e150] [cursor=pointer]:
+                    - img
+                  - textbox "Discuter avec ChatGPT" [ref=e153]:
+                    - paragraph [ref=e154]: Poser une question
+                  - button "Démarrer le mode vocal" [ref=e160] [cursor=pointer]:
+                    - img [ref=e162]
+                    - generic [ref=e164]: Voix
+                - button [ref=e165]
+                - button [ref=e166]
+              - generic [ref=e173]:
+                - text: En envoyant des messages à ChatGPT, un chatbot d’IA, vous confirmez que vous acceptez nos
+                - link "conditions d’utilisation" [ref=e174] [cursor=pointer]:
+                  - /url: https://openai.com/terms
+                - text: et que vous avez pris connaissance de notre
+                - link "politique de confidentialité" [ref=e175] [cursor=pointer]:
+                  - /url: https://openai.com/privacy
+                - text: . Voir les préférences en matière de cookies.
+    - dialog [ref=e177]:
+      - generic [ref=e178]:
+        - heading "Nous utilisons des cookies" [level=1] [ref=e179]
+        - button "Fermer" [ref=e180] [cursor=pointer]:
+          - img [ref=e181]
+      - generic [ref=e183]:
+        - paragraph [ref=e184]:
+          - text: Nous utilisons des cookies pour assurer le fonctionnement de ce site, comprendre l’utilisation de nos services et soutenir les opérations marketing. Vous pouvez modifier vos préférences à tout moment dans la rubrique
+          - button "Gérer les cookies" [ref=e185] [cursor=pointer]
+          - text: . Consultez notre
+          - link "politique relative aux cookies" [ref=e186] [cursor=pointer]:
+            - /url: https://openai.com/policies/cookie-policy/
+          - text: pour plus d’informations.
+        - generic [ref=e187]:
+          - button "Gérer les cookies" [ref=e188] [cursor=pointer]:
+            - generic [ref=e189]: Gérer les cookies
+          - button "Refuser les cookies non essentiels" [ref=e190] [cursor=pointer]:
+            - generic [ref=e191]: Refuser les cookies non essentiels
+          - button "Tout accepter" [active] [ref=e192] [cursor=pointer]:
+            - generic [ref=e193]: Tout accepter
+  - alert [ref=e194]
+  - status [ref=e195]

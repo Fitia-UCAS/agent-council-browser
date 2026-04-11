@@ -19,8 +19,13 @@
         providerFromRegistry?.id ||
         (isChatGPT ? 'chatgpt' : isGemini ? 'gemini' : isClaude ? 'claude' : 'grok');
     const providerCaptureProfile = captureProviders[currentLLM] || null;
-    const CONTENT_SCRIPT_BUILD = 'grok-capture-r7-2026-02-13';
+    const CONTENT_SCRIPT_BUILD = 'readiness-r1-2026-04-05';
     const CAPTURE_TEST_MODE = globalThis.__MLC_CAPTURE_TEST_MODE__ === true;
+    const READINESS_REASON_READY = 'ready';
+    const READINESS_REASON_AUTH_REQUIRED = 'auth_required';
+    const READINESS_REASON_LOADING = 'loading';
+    const READINESS_REASON_COMPOSER_MISSING = 'composer_missing';
+    const READINESS_REASON_NOT_RESPONDING = 'not_responding';
 
     console.log(
         `[MLC ContentScript] Initializing for ${currentLLM} (build=${CONTENT_SCRIPT_BUILD}).`
@@ -85,8 +90,14 @@
     // Global message listener for connection testing and capture arming
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.type === 'PING') {
+            const readiness = probeProviderReadiness();
             console.log(`[MLC ContentScript - ${currentLLM}] Received PING, responding with PONG`);
-            sendResponse({ type: 'PONG', llm: currentLLM, status: 'ready' });
+            sendResponse({
+                type: 'PONG',
+                llm: currentLLM,
+                status: readiness.ready ? 'ready' : 'not_ready',
+                readiness,
+            });
             return true; // Keep message channel open for async response
         }
         if (message.type === 'MLC_PROMPT_SENT') {
@@ -264,8 +275,10 @@
         } catch (error) {
             rect = null;
         }
-        if (!rect) return false;
-        if (!(rect.width > 0 && rect.height > 0)) return false;
+        if (!rect) return CAPTURE_TEST_MODE;
+        if (!(rect.width > 0 && rect.height > 0)) {
+            return CAPTURE_TEST_MODE;
+        }
 
         return (
             rect.bottom > 0 &&
@@ -273,6 +286,197 @@
             rect.top < window.innerHeight &&
             rect.left < window.innerWidth
         );
+    }
+
+    function isElementDisabled(el) {
+        if (!el || !(el instanceof Element)) return true;
+        if ('disabled' in el && el.disabled) return true;
+        if ('readOnly' in el && el.readOnly) return true;
+        const ariaDisabled = el.getAttribute?.('aria-disabled');
+        if (typeof ariaDisabled === 'string' && ariaDisabled.toLowerCase() === 'true') return true;
+        if (el.getAttribute?.('disabled') !== null) return true;
+        return false;
+    }
+
+    function findVisibleElement(selectors, { root = document, allowDisabled = true } = {}) {
+        const list = Array.isArray(selectors) ? selectors : [];
+        for (const selector of list) {
+            let nodes = [];
+            try {
+                nodes = Array.from(root.querySelectorAll(selector));
+            } catch (error) {
+                nodes = [];
+            }
+            for (const node of nodes) {
+                if (!(node instanceof Element)) continue;
+                if (!isElementVisible(node)) continue;
+                if (!allowDisabled && isElementDisabled(node)) continue;
+                return node;
+            }
+        }
+        return null;
+    }
+
+    function getElementActionLabel(element) {
+        if (!element) return '';
+        const candidates = [
+            element.getAttribute?.('aria-label') || '',
+            element.getAttribute?.('title') || '',
+            element.getAttribute?.('value') || '',
+            element.textContent || '',
+        ];
+        return String(candidates.filter(Boolean).join(' '))
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function findSendControlForReadiness() {
+        if (isGrok) {
+            return (
+                findGrokControlButton('send', { allowDisabled: true, includeDocument: true }) ||
+                findVisibleElement(
+                    [
+                        'button[aria-label*="send" i]',
+                        'button[title*="send" i]',
+                        'button[type="submit"]',
+                    ],
+                    { allowDisabled: true }
+                )
+            );
+        }
+
+        const selectors = isChatGPT
+            ? [
+                  'button[data-testid="send-button"]',
+                  'button[aria-label*="send" i]',
+                  'button[title*="send" i]',
+                  'button[type="submit"]',
+              ]
+            : isGemini
+              ? [
+                    'button[aria-label*="send" i]',
+                    'button[title*="send" i]',
+                    'button[type="submit"]',
+                  ]
+              : [
+                    'button[data-testid*="send" i]',
+                    'button[aria-label*="send" i]',
+                    'button[title*="send" i]',
+                    'button[type="submit"]',
+                  ];
+
+        const inputEl = findInput({ silent: true });
+        const composerRoot = inputEl
+            ? inputEl.closest('form') ||
+              inputEl.closest('footer') ||
+              inputEl.closest('[role="form"]') ||
+              inputEl.parentElement
+            : null;
+
+        return (
+            (composerRoot ? findVisibleElement(selectors, { root: composerRoot }) : null) ||
+            findVisibleElement(selectors)
+        );
+    }
+
+    function hasVisibleAuthPrompt() {
+        const visibleAuthField = findVisibleElement(
+            [
+                'input[type="password"]',
+                'input[name*="password" i]',
+                'input[autocomplete="current-password"]',
+                'input[autocomplete="username"]',
+                'input[autocomplete="email"]',
+            ],
+            { allowDisabled: true }
+        );
+        if (visibleAuthField) return true;
+
+        const authCtaPattern =
+            /\b(sign in|sign-in|log in|login|log-in|se connecter|connexion|inscription|sign up|signup|create account|continue with google|continue with apple|continue with email|get started|commencer)\b/i;
+        const candidates = Array.from(
+            document.querySelectorAll('button, a, [role="button"], input[type="submit"], input[type="button"]')
+        );
+        return candidates.some((node) => {
+            if (!(node instanceof Element) || !isElementVisible(node)) return false;
+            const label = getElementActionLabel(node);
+            return Boolean(label) && authCtaPattern.test(label);
+        });
+    }
+
+    function hasVisibleLoadingIndicator() {
+        return Boolean(
+            findVisibleElement(
+                [
+                    '[role="progressbar"]',
+                    'mat-progress-spinner',
+                    'mat-spinner',
+                    '.loading',
+                    '.spinner',
+                    '.animate-spin',
+                ],
+                { allowDisabled: true }
+            )
+        );
+    }
+
+    function createReadinessResult({
+        ready = false,
+        reason = READINESS_REASON_NOT_RESPONDING,
+        hasInput = false,
+        hasSendControl = false,
+    } = {}) {
+        return {
+            ready: Boolean(ready),
+            reason: ready ? READINESS_REASON_READY : reason || READINESS_REASON_NOT_RESPONDING,
+            hasInput: Boolean(hasInput),
+            hasSendControl: Boolean(hasSendControl),
+        };
+    }
+
+    function probeProviderReadiness() {
+        try {
+            const inputEl = findInput({ silent: true });
+            const hasInput = Boolean(
+                inputEl && isElementVisible(inputEl) && !isElementDisabled(inputEl)
+            );
+            const sendControl = findSendControlForReadiness();
+            const hasSendControl = Boolean(sendControl && isElementVisible(sendControl));
+
+            if (hasInput || hasSendControl) {
+                return createReadinessResult({
+                    ready: true,
+                    hasInput,
+                    hasSendControl,
+                });
+            }
+
+            if (hasVisibleAuthPrompt()) {
+                return createReadinessResult({
+                    reason: READINESS_REASON_AUTH_REQUIRED,
+                    hasInput,
+                    hasSendControl,
+                });
+            }
+
+            if (document.readyState !== 'complete' || hasVisibleLoadingIndicator()) {
+                return createReadinessResult({
+                    reason: READINESS_REASON_LOADING,
+                    hasInput,
+                    hasSendControl,
+                });
+            }
+
+            return createReadinessResult({
+                reason: READINESS_REASON_COMPOSER_MISSING,
+                hasInput,
+                hasSendControl,
+            });
+        } catch (error) {
+            return createReadinessResult({
+                reason: READINESS_REASON_NOT_RESPONDING,
+            });
+        }
     }
 
     function isChatGPTGenerating() {
@@ -3283,6 +3487,16 @@
             return false;
         }
 
+        if (looksLikePromptEcho(text)) {
+            captureDebug('Capture emit skipped (prompt_echo)', {
+                llm: currentLLM,
+                reason,
+                source,
+                textLen: String(text || '').length,
+            });
+            return false;
+        }
+
         if (isGrok) {
             text = stripGrokUiFooterArtifacts(text);
             if (!normalizeCaptureCandidateText(text)) {
@@ -3899,6 +4113,8 @@
             armCapture,
             evaluateCapture,
             captureState,
+            emitCaptureFromResolvedExtraction,
+            probeProviderReadiness,
         };
         return;
     }

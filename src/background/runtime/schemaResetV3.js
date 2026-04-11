@@ -3,6 +3,13 @@
 
     const SCHEMA_VERSION = 3;
     const META_KEY = 'mlc_schema_v3_meta';
+    const LEGACY_STORAGE_KEYS = [
+        'mlc_preferred_tabs',
+        'mlc_chats_v1',
+        'mlc_active_session_v2',
+        'mlc_sessions_v1',
+    ];
+    const LEGACY_DATABASE_NAMES = ['mlc_history_v1'];
 
     function getChromeApi() {
         if (globalScope?.chrome) return globalScope.chrome;
@@ -127,6 +134,18 @@
         };
     }
 
+    function findLegacyStorageKeys(allStorage) {
+        return LEGACY_STORAGE_KEYS.filter((key) =>
+            Object.prototype.hasOwnProperty.call(allStorage || {}, key)
+        );
+    }
+
+    function findLegacyDatabaseNames(dbNames) {
+        return (Array.isArray(dbNames) ? dbNames : []).filter((name) =>
+            LEGACY_DATABASE_NAMES.includes(name)
+        );
+    }
+
     async function detectLegacyState() {
         const allStorage = await storageGetAll();
         const meta = allStorage?.[META_KEY];
@@ -137,17 +156,28 @@
             meta.initialized === true
         );
 
-        const extraStorageKeys = Object.keys(allStorage || {}).filter((key) => key !== META_KEY);
-        const dbNames = await listDatabaseNames();
-        const legacyDetected = extraStorageKeys.length > 0 || dbNames.length > 0;
+        const legacyStorageKeys = findLegacyStorageKeys(allStorage);
+        const legacyDatabaseNames = findLegacyDatabaseNames(await listDatabaseNames());
+        if (initialized) {
+            return {
+                version: SCHEMA_VERSION,
+                initialized: true,
+                resetRequired: false,
+                legacyDetected: false,
+                extraStorageKeys: [],
+                databaseNames: [],
+            };
+        }
+
+        const legacyDetected = legacyStorageKeys.length > 0 || legacyDatabaseNames.length > 0;
 
         return {
             version: SCHEMA_VERSION,
             initialized,
             resetRequired: legacyDetected,
             legacyDetected,
-            extraStorageKeys,
-            databaseNames: dbNames,
+            extraStorageKeys: legacyStorageKeys,
+            databaseNames: legacyDatabaseNames,
         };
     }
 
@@ -170,12 +200,12 @@
 
     async function performReset() {
         const allStorage = await storageGetAll();
-        const keysToRemove = Object.keys(allStorage || {});
+        const keysToRemove = findLegacyStorageKeys(allStorage);
         if (keysToRemove.length > 0) {
             await storageRemove(keysToRemove);
         }
 
-        const dbNames = await listDatabaseNames();
+        const dbNames = findLegacyDatabaseNames(await listDatabaseNames());
         await Promise.all(dbNames.map((name) => deleteDatabase(name)));
 
         await storageSet(createMetaPatch('perform_reset'));
@@ -189,6 +219,8 @@
     }
 
     globalScope.MLCSchemaResetV3 = {
+        LEGACY_STORAGE_KEYS,
+        LEGACY_DATABASE_NAMES,
         META_KEY,
         SCHEMA_VERSION,
         detectLegacyState,

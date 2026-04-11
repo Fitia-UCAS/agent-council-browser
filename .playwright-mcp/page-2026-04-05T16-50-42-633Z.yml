@@ -1,0 +1,119 @@
+- generic [active] [ref=e1]:
+  - link "Ignorer et passer au contenu" [ref=e3] [cursor=pointer]:
+    - /url: "#main"
+  - generic [ref=e9]:
+    - banner:
+      - generic:
+        - button "Ouvrir la barre latérale" [ref=e10] [cursor=pointer]:
+          - generic [ref=e11]: Ouvrir la barre latérale
+          - img [ref=e12]
+        - button "Sélecteur de modèle" [ref=e15] [cursor=pointer]:
+          - generic [ref=e16]: ChatGPT
+          - img [ref=e17]
+      - generic [ref=e23]:
+        - button "Se connecter" [ref=e24] [cursor=pointer]:
+          - generic [ref=e26]: Se connecter
+        - button "Inscription gratuite" [ref=e27] [cursor=pointer]:
+          - generic [ref=e28]: Inscription gratuite
+    - main [ref=e29]:
+      - generic [ref=e30]:
+        - generic [ref=e32]:
+          - generic [ref=e33]:
+            - heading "Vous avez dit :" [level=4] [ref=e34]
+            - generic [ref=e36]:
+              - generic [ref=e41]: how to write in my .env file abt=dsfjf from temrinal without opening
+              - generic [ref=e42]:
+                - group "Vos actions sur les messages":
+                  - button "Copier le message":
+                    - generic:
+                      - img
+          - generic [ref=e44]:
+            - heading "ChatGPT a dit :" [level=4] [ref=e45]
+            - generic [ref=e47]:
+              - generic [ref=e51]:
+                - paragraph [ref=e52]:
+                  - text: You can write directly to a
+                  - code [ref=e53]: .env
+                  - text: file from the terminal using shell commands—no need to open it manually.
+                - heading "✅ Append a variable" [level=3] [ref=e54]
+                - paragraph [ref=e55]:
+                  - text: This adds the line to your
+                  - code [ref=e56]: .env
+                  - text: "file:"
+                - generic [ref=e64]:
+                  - generic [ref=e66]:
+                    - generic [ref=e67]:
+                      - img [ref=e68]
+                      - text: Bash
+                    - button "Copier" [ref=e71] [cursor=pointer]:
+                      - img [ref=e72]
+                  - generic [ref=e78]: echo "abt=dsfjf" >> .env
+                - heading "⚠️ Overwrite the file" [level=3] [ref=e79]
+                - paragraph [ref=e80]:
+                  - text: This replaces everything in
+                  - code [ref=e81]: .env
+                  - text: "with that one line:"
+                - generic [ref=e89]:
+                  - generic [ref=e91]:
+                    - generic [ref=e92]:
+                      - img [ref=e93]
+                      - text: Bash
+                    - button "Copier" [ref=e96] [cursor=pointer]:
+                      - img [ref=e97]
+                  - generic [ref=e103]: echo "abt=dsfjf" > .env
+                - heading "✅ Safer method (avoids weird formatting issues)" [level=3] [ref=e104]
+                - generic [ref=e112]:
+                  - generic [ref=e114]:
+                    - generic [ref=e115]:
+                      - img [ref=e116]
+                      - text: Bash
+                    - button "Copier" [ref=e119] [cursor=pointer]:
+                      - img [ref=e120]
+                  - generic [ref=e126]: printf "abt=dsfjf\n" >> .env
+                - heading "🔍 Check the result" [level=3] [ref=e127]
+                - generic [ref=e135]:
+                  - generic [ref=e137]:
+                    - generic [ref=e138]:
+                      - img [ref=e139]
+                      - text: Bash
+                    - button "Copier" [ref=e142] [cursor=pointer]:
+                      - img [ref=e143]
+                  - generic [ref=e149]: cat .env
+                - separator [ref=e150]
+                - 'heading "💡 Bonus: Prevent duplicates" [level=3] [ref=e151]'
+                - paragraph [ref=e152]: "If you don’t want to add it twice:"
+                - generic [ref=e160]:
+                  - generic [ref=e162]:
+                    - generic [ref=e163]:
+                      - img [ref=e164]
+                      - text: Bash
+                    - button "Copier" [ref=e167] [cursor=pointer]:
+                      - img [ref=e168]
+                  - generic [ref=e174]: grep -qxF "abt=dsfjf" .env || echo "abt=dsfjf" >> .env
+                - separator [ref=e175]
+                - paragraph [ref=e176]: If you want, I can show you how to update an existing variable (replace its value instead of appending).
+              - generic [ref=e177]:
+                - group "Actions sur la réponse":
+                  - button "Copier la réponse":
+                    - generic:
+                      - img
+                  - button "Partager":
+                    - generic:
+                      - img
+        - generic [ref=e178]:
+          - button "Aller en bas" [ref=e179] [cursor=pointer]:
+            - img [ref=e180]
+          - generic [ref=e185]:
+            - generic [ref=e189]:
+              - button "Ajouter des fichiers et plus encore" [ref=e192] [cursor=pointer]:
+                - img
+              - textbox "Discuter avec ChatGPT" [ref=e195]:
+                - paragraph [ref=e196]: Poser une question
+              - button "Démarrer le mode vocal" [ref=e202] [cursor=pointer]:
+                - img [ref=e204]
+                - generic [ref=e206]: Voix
+            - button [ref=e207]
+            - button [ref=e208]
+          - generic [ref=e212]: ChatGPT peut commettre des erreurs. Il est recommandé de vérifier les informations importantes. Voir les préférences en matière de cookies.
+  - alert [ref=e213]
+  - status [ref=e214]
