@@ -3516,29 +3516,34 @@
         }
 
         if (isGrok) {
-            const trimmedPrimary = maybeTrimGrokIncrementalCandidate(text, {
-                allowFullWhenNoBaseline: false,
-            });
-            if (trimmedPrimary.trimmed) {
-                text = trimmedPrimary.text;
-                resolved.text = text;
-                const currentSource = source || 'primary';
-                source = currentSource.includes('incremental')
-                    ? currentSource
-                    : `${currentSource}_incremental_trim`;
-                resolved.meta = {
-                    ...(resolved.meta || {}),
-                    source,
-                    incrementalTrimmed: true,
-                    incrementalTrimReductionChars: trimmedPrimary.reductionChars,
-                };
-                captureDebug('Grok primary capture trimmed to incremental answer', {
-                    llm: currentLLM,
-                    reason,
-                    source,
-                    reductionChars: trimmedPrimary.reductionChars,
-                    textLen: text.length,
+            const alreadyIncrementalTailDelta =
+                source.startsWith('transcript_tail') ||
+                source === 'reused_last_incremental_candidate';
+            if (!alreadyIncrementalTailDelta) {
+                const trimmedPrimary = maybeTrimGrokIncrementalCandidate(text, {
+                    allowFullWhenNoBaseline: false,
                 });
+                if (trimmedPrimary.trimmed) {
+                    text = trimmedPrimary.text;
+                    resolved.text = text;
+                    const currentSource = source || 'primary';
+                    source = currentSource.includes('incremental')
+                        ? currentSource
+                        : `${currentSource}_incremental_trim`;
+                    resolved.meta = {
+                        ...(resolved.meta || {}),
+                        source,
+                        incrementalTrimmed: true,
+                        incrementalTrimReductionChars: trimmedPrimary.reductionChars,
+                    };
+                    captureDebug('Grok primary capture trimmed to incremental answer', {
+                        llm: currentLLM,
+                        reason,
+                        source,
+                        reductionChars: trimmedPrimary.reductionChars,
+                        textLen: text.length,
+                    });
+                }
             }
             const shouldUseStrictTailGate = source.startsWith('transcript_tail');
             if (shouldUseStrictTailGate) {

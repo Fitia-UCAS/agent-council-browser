@@ -434,4 +434,56 @@ describe('Content capture fixtures', () => {
         );
         expect(harness.sentMessages[0].content).not.toContain('Previous Grok answer line one.');
     });
+
+    test('Grok transcript-tail emission preserves a repeated opening line in the final answer', () => {
+        const harness = loadCaptureHarness({
+            provider: 'grok',
+            html: buildLongGrokTailFixture(),
+        });
+
+        harness.hooks.armCapture({
+            promptId: 'grok_repeat_opening_prompt',
+            sessionId: 'grok_repeat_opening_session',
+            turnIndex: 6,
+            agentId: 'agent_grok_1',
+            timestamp: Date.now() - 7000,
+        });
+
+        const main = harness.document.querySelector('main');
+        if (!main) {
+            throw new Error('Grok fixture is missing the main transcript root.');
+        }
+
+        main.insertAdjacentHTML(
+            'beforeend',
+            `
+                <section class="tail-only-final">
+                    <p>Previous Grok answer line three closes the prior turn.</p>
+                    <p>Final Grok answer detail should still include the repeated opening line.</p>
+                </section>
+            `
+        );
+
+        harness.hooks.evaluateCapture();
+
+        expect(harness.sentMessages).toHaveLength(0);
+        expect(normalizeText(harness.hooks.captureState.lastText)).toContain(
+            'Previous Grok answer line three closes the prior turn.'
+        );
+        expect(normalizeText(harness.hooks.captureState.lastText)).toContain(
+            'Final Grok answer detail should still include the repeated opening line.'
+        );
+
+        harness.hooks.captureState.lastTextChangeAt = Date.now() - 1500;
+        harness.hooks.evaluateCapture();
+
+        expect(harness.sentMessages).toHaveLength(1);
+        expect(harness.sentMessages[0].type).toBe('MLC_RESPONSE_CAPTURED');
+        expect(normalizeText(harness.sentMessages[0].content)).toContain(
+            'Previous Grok answer line three closes the prior turn.'
+        );
+        expect(normalizeText(harness.sentMessages[0].content)).toContain(
+            'Final Grok answer detail should still include the repeated opening line.'
+        );
+    });
 });
