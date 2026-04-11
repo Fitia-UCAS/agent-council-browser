@@ -139,6 +139,31 @@ function buildAuthFixture(label) {
     return `<!doctype html><html><body><main><a href="/login">${label}</a><button>${label}</button></main></body></html>`;
 }
 
+function buildLongGrokTailFixture() {
+    const filler = 'baseline tail filler keeps the transcript long enough to force truncation.';
+    const history = Array.from(
+        { length: 320 },
+        (_, index) => `<p>History line ${index + 1}: ${filler} ${filler}</p>`
+    ).join('');
+
+    return `<!doctype html>
+        <html>
+            <body>
+                <main>
+                    <section class="history-log">${history}</section>
+                    <article data-testid="assistant-turn">
+                        <div class="response-content-markdown">
+                            <p>Previous Grok answer line one.</p>
+                            <p>Previous Grok answer line two keeps the primary extractor pinned to the older reply.</p>
+                            <p>Previous Grok answer line three closes the prior turn.</p>
+                        </div>
+                    </article>
+                    <button aria-label="Send"></button>
+                </main>
+            </body>
+        </html>`;
+}
+
 describe('Content capture fixtures', () => {
     test.each([
         ['chatgpt', buildReadyFixture('chatgpt')],
@@ -357,5 +382,56 @@ describe('Content capture fixtures', () => {
             'This is still a partial streamed answer.'
         );
         expect(harness.hooks.captureState.active).toBe(false);
+    });
+
+    test('Grok captures the final incremental answer from a truncated transcript tail after completion controls settle', () => {
+        const harness = loadCaptureHarness({
+            provider: 'grok',
+            html: buildLongGrokTailFixture(),
+        });
+
+        harness.hooks.armCapture({
+            promptId: 'grok_final_turn_prompt',
+            sessionId: 'grok_final_turn_session',
+            turnIndex: 6,
+            agentId: 'agent_grok_1',
+            timestamp: Date.now() - 7000,
+        });
+
+        const main = harness.document.querySelector('main');
+        if (!main) {
+            throw new Error('Grok fixture is missing the main transcript root.');
+        }
+
+        main.insertAdjacentHTML(
+            'beforeend',
+            `
+                <section class="tail-only-final">
+                    <p>Final Grok answer sentence one resolves the last-turn fetch boundary.</p>
+                    <p>Final Grok answer sentence two confirms the loop can terminate cleanly.</p>
+                </section>
+            `
+        );
+
+        harness.hooks.evaluateCapture();
+
+        expect(harness.sentMessages).toHaveLength(0);
+        expect(harness.hooks.captureState.hasNewText).toBe(true);
+        expect(normalizeText(harness.hooks.captureState.lastText)).toContain(
+            'Final Grok answer sentence one resolves the last-turn fetch boundary.'
+        );
+
+        harness.hooks.captureState.lastTextChangeAt = Date.now() - 1500;
+        harness.hooks.evaluateCapture();
+
+        expect(harness.sentMessages).toHaveLength(1);
+        expect(harness.sentMessages[0].type).toBe('MLC_RESPONSE_CAPTURED');
+        expect(normalizeText(harness.sentMessages[0].content)).toContain(
+            'Final Grok answer sentence one resolves the last-turn fetch boundary.'
+        );
+        expect(normalizeText(harness.sentMessages[0].content)).toContain(
+            'Final Grok answer sentence two confirms the loop can terminate cleanly.'
+        );
+        expect(harness.sentMessages[0].content).not.toContain('Previous Grok answer line one.');
     });
 });

@@ -1928,11 +1928,7 @@
 
         const fullLines = getGrokComparableLines(fullRaw);
         const baselineLines = getGrokComparableLines(baselineRaw);
-        if (
-            !fullLines.length ||
-            !baselineLines.length ||
-            fullLines.length <= baselineLines.length
-        ) {
+        if (!fullLines.length || !baselineLines.length) {
             return '';
         }
 
@@ -1972,6 +1968,98 @@
             .trim();
     }
 
+    function stripGrokTailOverlapDelta(fullText, baselineText) {
+        const fullRaw = String(fullText || '').trim();
+        const baselineRaw = String(baselineText || '').trim();
+        if (!fullRaw || !baselineRaw || fullRaw === baselineRaw) return '';
+
+        const maxRawOverlap = Math.min(fullRaw.length - 1, baselineRaw.length);
+        const minRawOverlap =
+            baselineRaw.length <= 80
+                ? Math.min(baselineRaw.length, 24)
+                : Math.max(24, Math.min(240, Math.floor(baselineRaw.length * 0.25)));
+
+        for (let overlap = maxRawOverlap; overlap >= minRawOverlap; overlap -= 1) {
+            if (baselineRaw.slice(baselineRaw.length - overlap) !== fullRaw.slice(0, overlap)) {
+                continue;
+            }
+            return String(fullRaw.slice(overlap) || '').trim();
+        }
+
+        const fullLines = getGrokComparableLines(fullText);
+        const baselineLines = getGrokComparableLines(baselineText);
+        if (!fullLines.length || !baselineLines.length || fullLines.length < 2) return '';
+
+        const maxOverlap = Math.min(fullLines.length - 1, baselineLines.length);
+        if (maxOverlap < 1) return '';
+
+        const minRequiredPrefixLines =
+            baselineLines.length <= 2
+                ? baselineLines.length
+                : Math.max(2, Math.floor(Math.min(baselineLines.length, 10) * 0.6));
+
+        for (let overlap = maxOverlap; overlap >= minRequiredPrefixLines; overlap -= 1) {
+            let matched = 0;
+            const baselineStart = baselineLines.length - overlap;
+            while (matched < overlap) {
+                const fullLineNorm = normalizeCaptureCandidateText(fullLines[matched]);
+                const baselineLineNorm = normalizeCaptureCandidateText(
+                    baselineLines[baselineStart + matched]
+                );
+                if (!fullLineNorm || !baselineLineNorm || fullLineNorm !== baselineLineNorm) {
+                    break;
+                }
+                matched += 1;
+            }
+            if (matched === overlap) {
+                return fullLines
+                    .slice(overlap)
+                    .join('\n')
+                    .trim();
+            }
+        }
+
+        return '';
+    }
+
+    function boundGrokTranscriptTail(fullTranscript, maxChars) {
+        const raw = String(fullTranscript || '').trim();
+        if (!raw) {
+            return {
+                text: '',
+                truncated: false,
+                droppedLeadingPartialLine: false,
+            };
+        }
+        if (raw.length <= maxChars) {
+            return {
+                text: raw,
+                truncated: false,
+                droppedLeadingPartialLine: false,
+            };
+        }
+
+        const start = raw.length - maxChars;
+        let bounded = raw.slice(start);
+        let droppedLeadingPartialLine = false;
+        const prevChar = start > 0 ? raw.charAt(start - 1) : '';
+        const startsMidLine = Boolean(start > 0 && prevChar !== '\n' && prevChar !== '\r');
+        if (startsMidLine) {
+            const newlineMatch = bounded.match(/\r?\n/);
+            const newlineIndex = Number.isFinite(newlineMatch?.index) ? newlineMatch.index : -1;
+            if (newlineIndex >= 0 && newlineIndex + newlineMatch[0].length < bounded.length) {
+                bounded = bounded.slice(newlineIndex + newlineMatch[0].length);
+                droppedLeadingPartialLine = true;
+            }
+        }
+
+        return {
+            text: bounded.trim(),
+            truncated: true,
+            droppedLeadingPartialLine,
+        };
+    }
+
     function extractGrokIncrementalTranscriptText(
         transcriptText,
         { allowFullWhenNoBaseline = false } = {}
@@ -1987,7 +2075,9 @@
         let bestDeltaText = '';
         let bestBaselineWeight = -1;
         for (const baseline of baselines) {
-            const deltaRaw = stripLeadingGrokBaseline(rawTranscript, baseline);
+            const deltaRaw =
+                stripLeadingGrokBaseline(rawTranscript, baseline) ||
+                stripGrokTailOverlapDelta(rawTranscript, baseline);
             if (!deltaRaw) continue;
             const deltaSanitized = sanitizeGrokTranscriptCandidate(deltaRaw, { allowShort: true });
             if (!deltaSanitized) continue;
@@ -3129,10 +3219,8 @@
         }
 
         const MAX_CHARS = 20000;
-        const bounded =
-            fullTranscript.length > MAX_CHARS
-                ? fullTranscript.slice(fullTranscript.length - MAX_CHARS)
-                : fullTranscript;
+        const boundedResult = boundGrokTranscriptTail(fullTranscript, MAX_CHARS);
+        const bounded = boundedResult.text;
         const finalText = sanitizeGrokTranscriptCandidate(bounded, { allowShort: false });
         if (!finalText) {
             return options.withMeta
@@ -3157,9 +3245,10 @@
                     source: 'transcript_tail',
                     lineCount: lines.length,
                     chunkCount: 0,
-                    usedChunk: fullTranscript.length > MAX_CHARS,
+                    usedChunk: boundedResult.truncated,
                     fullLen: fullTranscript.length,
-                    truncated: fullTranscript.length > MAX_CHARS,
+                    truncated: boundedResult.truncated,
+                    droppedLeadingPartialLine: boundedResult.droppedLeadingPartialLine,
                 },
             };
         }
@@ -3660,7 +3749,8 @@
                         : Number.isFinite(baselineGrokCandidateCount)
                           ? baselineGrokCandidateCount + 1
                           : 1,
-                    bestShapeSignature: `fallback:${reason}:${stableTextSignature(incrementalFallbackText)}`,
+                    bestShapeSignature: `fallback:${stableTextSignature(incrementalFallbackText)}`,
+                    fallbackReason: reason,
                 },
             };
             text = extraction.text;
@@ -3875,6 +3965,37 @@
                 !tryGrokFallbackExtraction('post_has_new_empty')
             ) {
                 return;
+            }
+        }
+
+        if (isGrok && captureState.hasNewText) {
+            const baselineNormalized = normalizeCaptureCandidateText(captureState.baselineText || '');
+            const textNormalized = normalizeCaptureCandidateText(text);
+            const lastIncrementalText = String(captureState.lastText || '').trim();
+            const lastIncrementalNormalized = normalizeCaptureCandidateText(lastIncrementalText);
+            const currentLooksRegressed = Boolean(
+                lastIncrementalNormalized &&
+                    (!baselineNormalized || lastIncrementalNormalized !== baselineNormalized) &&
+                    (!textNormalized ||
+                        isGrokControlOnlyText(text) ||
+                        (baselineNormalized && textNormalized === baselineNormalized))
+            );
+            if (currentLooksRegressed && (grokCompletedByControls || grokLooksComplete)) {
+                const recovered = tryGrokFallbackExtraction('regressed_after_new_text');
+                if (!recovered) {
+                    text = lastIncrementalText;
+                    extraction = {
+                        ...extraction,
+                        text,
+                        meta: {
+                            ...(extraction.meta || {}),
+                            source: 'reused_last_incremental_candidate',
+                            reusedLastIncrementalCandidate: true,
+                        },
+                    };
+                    captureState.lastExtractionMeta = extraction.meta || null;
+                    meta = captureState.lastExtractionMeta || {};
+                }
             }
         }
 
