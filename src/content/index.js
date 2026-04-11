@@ -4024,7 +4024,14 @@
                 : 4000;
 
         if (generating) {
-            if (stableForMs >= finalForceCaptureMs && text.length >= minTextLen) {
+            // ChatGPT can sit on a stable partial answer for tens of seconds while the turn is
+            // still running, so text stability alone is not a safe completion signal there.
+            const allowForceCaptureWhileGenerating = !isChatGPT;
+            if (
+                allowForceCaptureWhileGenerating &&
+                stableForMs >= finalForceCaptureMs &&
+                text.length >= minTextLen
+            ) {
                 if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
                 captureDebug('Force capture', {
                     llm: currentLLM,

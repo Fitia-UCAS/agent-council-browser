@@ -298,4 +298,64 @@ describe('Content capture fixtures', () => {
         expect(emitted).toBe(false);
         expect(harness.sentMessages).toHaveLength(0);
     });
+
+    test('ChatGPT does not force-capture while the stop control still shows generation in progress', () => {
+        const harness = loadCaptureHarness({
+            provider: 'chatgpt',
+            html: readFixture('capture', 'chatgpt', 'reference-heavy-answer.html'),
+        });
+
+        harness.hooks.armCapture({
+            promptId: 'chatgpt_force_capture_guard',
+            sessionId: 'chatgpt_force_capture_guard_session',
+            turnIndex: 2,
+            agentId: 'agent_chatgpt_1',
+            timestamp: Date.now() - 70000,
+        });
+
+        const conversation = harness.document.querySelector('[role="log"]');
+        if (!conversation) {
+            throw new Error('ChatGPT fixture is missing the conversation root.');
+        }
+
+        conversation.insertAdjacentHTML(
+            'beforeend',
+            `
+                <article data-message-author-role="assistant">
+                    <div data-testid="message-content">
+                        <p>This is still a partial streamed answer.</p>
+                        <p>ChatGPT has not finished its reasoning yet.</p>
+                    </div>
+                </article>
+            `
+        );
+
+        const composer = harness.document.querySelector('textarea');
+        if (!composer) {
+            throw new Error('ChatGPT fixture is missing the composer textarea.');
+        }
+        composer.insertAdjacentHTML(
+            'afterend',
+            '<button data-testid="stop-button" aria-label="Stop generating">Stop</button>'
+        );
+
+        harness.hooks.evaluateCapture();
+        expect(harness.hooks.captureState.hasNewText).toBe(true);
+        harness.hooks.captureState.lastTextChangeAt = Date.now() - 70000;
+
+        harness.hooks.evaluateCapture();
+        expect(harness.sentMessages).toHaveLength(0);
+        expect(harness.hooks.captureState.active).toBe(true);
+
+        harness.document.querySelector('[data-testid="stop-button"]')?.remove();
+        harness.hooks.captureState.lastTextChangeAt = Date.now() - 7000;
+        harness.hooks.evaluateCapture();
+
+        expect(harness.sentMessages).toHaveLength(1);
+        expect(harness.sentMessages[0].type).toBe('MLC_RESPONSE_CAPTURED');
+        expect(normalizeText(harness.sentMessages[0].content)).toContain(
+            'This is still a partial streamed answer.'
+        );
+        expect(harness.hooks.captureState.active).toBe(false);
+    });
 });
