@@ -2094,6 +2094,23 @@
         return sanitizeGrokTranscriptCandidate(rawTranscript, { allowShort: false });
     }
 
+    function isGrokUnconfirmedFallbackCandidate(text) {
+        const raw = String(text || '').trim();
+        if (!raw) return false;
+
+        const wordCount = getCaptureWordCount(raw);
+        const lineCount = raw
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean).length;
+        const looksSentenceLike = /[.!?](?:\s|$)/.test(raw);
+
+        if (wordCount >= 5) return true;
+        if (lineCount >= 2) return true;
+        if (looksSentenceLike && raw.length >= 16) return true;
+        return raw.length >= 40;
+    }
+
     function maybeTrimGrokIncrementalCandidate(
         candidateText,
         { allowFullWhenNoBaseline = false } = {}
@@ -3667,6 +3684,7 @@
             !grokControl?.stopVisible &&
             (grokControl?.voiceVisible || grokControl?.sendVisible)
         );
+        const grokFinalizedByControlTransition = grokCompletedByControls || grokLooksComplete;
 
         let currentGrokBestBottom =
             isGrok && Number.isFinite(meta.bestBottom) ? meta.bestBottom : null;
@@ -3719,7 +3737,10 @@
             }
         }
 
-        const tryGrokFallbackExtraction = (reason) => {
+        const tryGrokFallbackExtraction = (
+            reason,
+            { allowWithoutControlCompletion = false } = {}
+        ) => {
             if (!isGrok) return false;
             const fallback = extractGrokTranscriptTailText({ withMeta: true });
             const fallbackText = String(fallback?.text || '').trim();
@@ -3739,6 +3760,17 @@
             }
             const incrementalNormalized = normalizeCaptureCandidateText(incrementalFallbackText);
             if (!incrementalNormalized) return false;
+            if (
+                allowWithoutControlCompletion &&
+                !isGrokUnconfirmedFallbackCandidate(incrementalFallbackText)
+            ) {
+                captureDebug('Grok fallback rejected: waiting for stronger no-control delta', {
+                    reason,
+                    fallbackTextLen: fallbackText.length,
+                    incrementalTextLen: incrementalFallbackText.length,
+                });
+                return false;
+            }
 
             extraction = {
                 text: incrementalFallbackText,
@@ -3756,6 +3788,7 @@
                           : 1,
                     bestShapeSignature: `fallback:${stableTextSignature(incrementalFallbackText)}`,
                     fallbackReason: reason,
+                    fallbackWithoutControlCompletion: allowWithoutControlCompletion,
                 },
             };
             text = extraction.text;
@@ -3781,10 +3814,16 @@
         };
 
         if (!captureState.hasNewText) {
+            const grokMissingCompletionSignal =
+                isGrok && !grokCompletedByControls && !grokLooksComplete;
             if (!text) {
                 if (
-                    !(grokCompletedByControls || grokLooksComplete) ||
-                    !tryGrokFallbackExtraction('empty_primary')
+                    !tryGrokFallbackExtraction(
+                        grokMissingCompletionSignal ? 'empty_primary_without_controls' : 'empty_primary',
+                        {
+                            allowWithoutControlCompletion: grokMissingCompletionSignal,
+                        }
+                    )
                 ) {
                     return;
                 }
@@ -3851,46 +3890,59 @@
                         currentGrokCandidateCount > baselineGrokCandidateCount)
                 );
                 if (sameAsBaseline && !shapeSuggestsNewTurn) {
-                    if (!grokCompletedByControls && !grokLooksComplete) return;
-                    const latestExtraction = extractLatestResponse({
-                        withMeta: true,
-                        withHtml: true,
-                        grokPreferLatestBottom: true,
-                    });
-                    const latestText = latestExtraction.text || '';
-                    const latestNormalized = normalizeCaptureCandidateText(latestText);
-                    const latestSameAsBaseline = Boolean(
-                        baselineNormalized &&
-                        latestNormalized &&
-                        latestNormalized === baselineNormalized
-                    );
-                    if (!latestText || latestSameAsBaseline || isGrokControlOnlyText(latestText)) {
-                        if (!tryGrokFallbackExtraction('same_as_baseline_after_latest')) {
+                    if (grokMissingCompletionSignal) {
+                        if (
+                            !tryGrokFallbackExtraction('same_as_baseline_without_controls', {
+                                allowWithoutControlCompletion: true,
+                            })
+                        ) {
                             return;
                         }
                     } else {
-                        extraction = latestExtraction;
-                        text = latestText;
-                        captureState.lastExtractionMeta = latestExtraction.meta || null;
-                        meta = captureState.lastExtractionMeta || {};
-                        currentGrokBestBottom = Number.isFinite(meta.bestBottom)
-                            ? meta.bestBottom
-                            : null;
-                        currentGrokCandidateCount = Number.isFinite(meta.candidateCount)
-                            ? meta.candidateCount
-                            : null;
-                        currentGrokShapeSignature =
-                            typeof meta.bestShapeSignature === 'string'
-                                ? meta.bestShapeSignature
-                                : '';
-                        captureDebug(
-                            'Grok switched to latest-bottom candidate after control completion',
-                            {
-                                baselineBottom: baselineGrokBestBottom,
-                                selectedBottom: currentGrokBestBottom,
-                                selectedShape: currentGrokShapeSignature,
-                            }
+                        const latestExtraction = extractLatestResponse({
+                            withMeta: true,
+                            withHtml: true,
+                            grokPreferLatestBottom: true,
+                        });
+                        const latestText = latestExtraction.text || '';
+                        const latestNormalized = normalizeCaptureCandidateText(latestText);
+                        const latestSameAsBaseline = Boolean(
+                            baselineNormalized &&
+                            latestNormalized &&
+                            latestNormalized === baselineNormalized
                         );
+                        if (
+                            !latestText ||
+                            latestSameAsBaseline ||
+                            isGrokControlOnlyText(latestText)
+                        ) {
+                            if (!tryGrokFallbackExtraction('same_as_baseline_after_latest')) {
+                                return;
+                            }
+                        } else {
+                            extraction = latestExtraction;
+                            text = latestText;
+                            captureState.lastExtractionMeta = latestExtraction.meta || null;
+                            meta = captureState.lastExtractionMeta || {};
+                            currentGrokBestBottom = Number.isFinite(meta.bestBottom)
+                                ? meta.bestBottom
+                                : null;
+                            currentGrokCandidateCount = Number.isFinite(meta.candidateCount)
+                                ? meta.candidateCount
+                                : null;
+                            currentGrokShapeSignature =
+                                typeof meta.bestShapeSignature === 'string'
+                                    ? meta.bestShapeSignature
+                                    : '';
+                            captureDebug(
+                                'Grok switched to latest-bottom candidate after control completion',
+                                {
+                                    baselineBottom: baselineGrokBestBottom,
+                                    selectedBottom: currentGrokBestBottom,
+                                    selectedShape: currentGrokShapeSignature,
+                                }
+                            );
+                        }
                     }
                 }
                 if (sameAsBaseline && shapeSuggestsNewTurn) {
@@ -3966,8 +4018,15 @@
 
         if (!text) {
             if (
-                !(grokCompletedByControls || grokLooksComplete) ||
-                !tryGrokFallbackExtraction('post_has_new_empty')
+                !tryGrokFallbackExtraction(
+                    grokCompletedByControls || grokLooksComplete
+                        ? 'post_has_new_empty'
+                        : 'post_has_new_empty_without_controls',
+                    {
+                        allowWithoutControlCompletion:
+                            !(grokCompletedByControls || grokLooksComplete),
+                    }
+                )
             ) {
                 return;
             }
@@ -3985,8 +4044,16 @@
                         isGrokControlOnlyText(text) ||
                         (baselineNormalized && textNormalized === baselineNormalized))
             );
-            if (currentLooksRegressed && (grokCompletedByControls || grokLooksComplete)) {
-                const recovered = tryGrokFallbackExtraction('regressed_after_new_text');
+            if (currentLooksRegressed) {
+                const recovered = tryGrokFallbackExtraction(
+                    grokCompletedByControls || grokLooksComplete
+                        ? 'regressed_after_new_text'
+                        : 'regressed_after_new_text_without_controls',
+                    {
+                        allowWithoutControlCompletion:
+                            !(grokCompletedByControls || grokLooksComplete),
+                    }
+                );
                 if (!recovered) {
                     text = lastIncrementalText;
                     extraction = {
@@ -3996,6 +4063,8 @@
                             ...(extraction.meta || {}),
                             source: 'reused_last_incremental_candidate',
                             reusedLastIncrementalCandidate: true,
+                            fallbackWithoutControlCompletion:
+                                !(grokCompletedByControls || grokLooksComplete),
                         },
                     };
                     captureState.lastExtractionMeta = extraction.meta || null;
@@ -4105,6 +4174,12 @@
             if (wordCount > 0 && wordCount < 10) {
                 stableCaptureMs = Math.max(stableCaptureMs, 4200);
             }
+            if (
+                !grokFinalizedByControlTransition &&
+                captureState.lastExtractionMeta?.fallbackWithoutControlCompletion
+            ) {
+                stableCaptureMs = Math.max(stableCaptureMs, 6500);
+            }
         }
 
         const nonEmptyLineCount = String(text || '')
@@ -4173,7 +4248,6 @@
             return;
         }
 
-        const grokFinalizedByControlTransition = grokCompletedByControls || grokLooksComplete;
         if (grokFinalizedByControlTransition && text.length >= minTextLen && stableForMs >= 800) {
             if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
             captureDebug('Stable capture (grok stop->voice/idle)', {
