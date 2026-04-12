@@ -2094,23 +2094,6 @@
         return sanitizeGrokTranscriptCandidate(rawTranscript, { allowShort: false });
     }
 
-    function isGrokUnconfirmedFallbackCandidate(text) {
-        const raw = String(text || '').trim();
-        if (!raw) return false;
-
-        const wordCount = getCaptureWordCount(raw);
-        const lineCount = raw
-            .split(/\r?\n/)
-            .map((line) => line.trim())
-            .filter(Boolean).length;
-        const looksSentenceLike = /[.!?](?:\s|$)/.test(raw);
-
-        if (wordCount >= 5) return true;
-        if (lineCount >= 2) return true;
-        if (looksSentenceLike && raw.length >= 16) return true;
-        return raw.length >= 40;
-    }
-
     function maybeTrimGrokIncrementalCandidate(
         candidateText,
         { allowFullWhenNoBaseline = false } = {}
@@ -3564,7 +3547,14 @@
             }
             const shouldUseStrictTailGate = source.startsWith('transcript_tail');
             if (shouldUseStrictTailGate) {
-                const sanitizedTail = sanitizeGrokTranscriptCandidate(text, { allowShort: false });
+                const allowShortTail =
+                    Boolean(
+                        resolved?.meta?.fallbackWithoutControlCompletion &&
+                            /[A-Za-z0-9]/.test(String(text || ''))
+                    );
+                const sanitizedTail = sanitizeGrokTranscriptCandidate(text, {
+                    allowShort: allowShortTail,
+                });
                 if (!sanitizedTail) {
                     captureDebug('Capture emit skipped (grok tail rejected)', {
                         llm: currentLLM,
@@ -3760,17 +3750,6 @@
             }
             const incrementalNormalized = normalizeCaptureCandidateText(incrementalFallbackText);
             if (!incrementalNormalized) return false;
-            if (
-                allowWithoutControlCompletion &&
-                !isGrokUnconfirmedFallbackCandidate(incrementalFallbackText)
-            ) {
-                captureDebug('Grok fallback rejected: waiting for stronger no-control delta', {
-                    reason,
-                    fallbackTextLen: fallbackText.length,
-                    incrementalTextLen: incrementalFallbackText.length,
-                });
-                return false;
-            }
 
             extraction = {
                 text: incrementalFallbackText,
@@ -4121,6 +4100,23 @@
                       .trim()
                       .split(/\s+/)
                       .filter(Boolean).length;
+        const nonEmptyLineCount = String(text || '')
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean).length;
+        const grokNoControlFallback = Boolean(
+            isGrok && captureState.lastExtractionMeta?.fallbackWithoutControlCompletion
+        );
+        const grokHasAlphaNumericText = Boolean(isGrok && /[A-Za-z0-9]/.test(String(text || '')));
+        const grokHasTerminalPunctuation = Boolean(
+            isGrok && /[.!?](?:["')\]]|\s|$)/.test(String(text || ''))
+        );
+        const grokTerseNoControlFallback = Boolean(
+            grokNoControlFallback && wordCount <= 2 && nonEmptyLineCount <= 1 && text.length < 24
+        );
+        const grokPotentialPartialNoControlFallback = Boolean(
+            grokTerseNoControlFallback && !grokHasTerminalPunctuation
+        );
 
         const looksUrlishOnly = isChatGPT
             ? wordCount > 0 &&
@@ -4152,7 +4148,7 @@
         const forceCaptureMs = isLikelyReferenceOnly
             ? Math.max(baseForceCaptureMs, 60000)
             : baseForceCaptureMs;
-        const minTextLen = 5;
+        let minTextLen = 5;
         let stableCaptureMs = isLikelyReferenceOnly
             ? isChatGPT
                 ? 9000
@@ -4174,18 +4170,20 @@
             if (wordCount > 0 && wordCount < 10) {
                 stableCaptureMs = Math.max(stableCaptureMs, 4200);
             }
-            if (
-                !grokFinalizedByControlTransition &&
-                captureState.lastExtractionMeta?.fallbackWithoutControlCompletion
-            ) {
-                stableCaptureMs = Math.max(stableCaptureMs, 6500);
+            if (!grokFinalizedByControlTransition && grokNoControlFallback) {
+                stableCaptureMs = Math.max(
+                    stableCaptureMs,
+                    grokPotentialPartialNoControlFallback
+                        ? 18000
+                        : grokTerseNoControlFallback
+                          ? 12000
+                          : 6500
+                );
+            }
+            if (grokNoControlFallback && grokHasAlphaNumericText) {
+                minTextLen = 1;
             }
         }
-
-        const nonEmptyLineCount = String(text || '')
-            .split(/\r?\n/)
-            .map((line) => line.trim())
-            .filter(Boolean).length;
 
         // If we never observed ChatGPT's "generating" UI, be more conservative to avoid
         // prematurely capturing small fragments during UI pauses.

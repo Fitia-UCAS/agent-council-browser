@@ -486,6 +486,58 @@ describe('Content capture fixtures', () => {
         expect(harness.sentMessages[0].content).not.toContain('Previous Grok answer line one.');
     });
 
+    test.each([
+        ['turn 1', 1, 'Yes.'],
+        ['final turn', 6, 'Done.'],
+    ])(
+        'Grok no-control fallback captures terse valid answers on %s after an extended stability window',
+        (_label, turnIndex, answerText) => {
+            const harness = loadCaptureHarness({
+                provider: 'grok',
+                html: buildLongGrokTailFixture({ controlMarkup: '' }),
+            });
+
+            harness.hooks.armCapture({
+                promptId: `grok_terse_no_controls_${turnIndex}`,
+                sessionId: `grok_terse_no_controls_session_${turnIndex}`,
+                turnIndex,
+                agentId: 'agent_grok_1',
+                timestamp: Date.now() - 10000,
+            });
+
+            const main = harness.document.querySelector('main');
+            if (!main) {
+                throw new Error('Grok fixture is missing the main transcript root.');
+            }
+
+            main.insertAdjacentHTML(
+                'beforeend',
+                `
+                    <section class="tail-only-final">
+                        <p>${answerText}</p>
+                    </section>
+                `
+            );
+
+            harness.hooks.evaluateCapture();
+
+            expect(harness.sentMessages).toHaveLength(0);
+            expect(harness.hooks.captureState.hasNewText).toBe(true);
+            expect(normalizeText(harness.hooks.captureState.lastText)).toBe(answerText);
+
+            harness.hooks.captureState.lastTextChangeAt = Date.now() - 7000;
+            harness.hooks.evaluateCapture();
+            expect(harness.sentMessages).toHaveLength(0);
+
+            harness.hooks.captureState.lastTextChangeAt = Date.now() - 13000;
+            harness.hooks.evaluateCapture();
+
+            expect(harness.sentMessages).toHaveLength(1);
+            expect(harness.sentMessages[0].type).toBe('MLC_RESPONSE_CAPTURED');
+            expect(normalizeText(harness.sentMessages[0].content)).toBe(answerText);
+        }
+    );
+
     test('Grok transcript-tail emission preserves a repeated opening line in the final answer', () => {
         const harness = loadCaptureHarness({
             provider: 'grok',
