@@ -164,6 +164,33 @@ function buildLongGrokTailFixture({ controlMarkup = '<button aria-label="Send"><
         </html>`;
 }
 
+function buildGrokHiddenMirrorComposerFixture() {
+    return `<!doctype html>
+        <html>
+            <body>
+                <main>
+                    <textarea
+                        aria-hidden="true"
+                        style="min-height: 0 !important; max-height: none !important; height: 0 !important; visibility: hidden !important; overflow: hidden !important; position: absolute !important; z-index: -1000 !important;"
+                    ></textarea>
+                    <form>
+                        <textarea
+                            dir="auto"
+                            placeholder="Que voulez-vous savoir ?"
+                            aria-label="Poser une question a Grok"
+                            style="height: 60px !important;"
+                        ></textarea>
+                        <button
+                            aria-label="Soumettre"
+                            style="min-height: 0 !important; max-height: none !important; height: 0 !important; visibility: hidden !important; overflow: hidden !important; position: absolute !important; z-index: -1000 !important;"
+                        ></button>
+                        <button aria-label="Passer en mode vocal"></button>
+                    </form>
+                </main>
+            </body>
+        </html>`;
+}
+
 describe('Content capture fixtures', () => {
     test.each([
         ['chatgpt', buildReadyFixture('chatgpt')],
@@ -191,6 +218,20 @@ describe('Content capture fixtures', () => {
         expect(payload.status).toBe('not_ready');
         expect(payload.readiness.ready).toBe(false);
         expect(payload.readiness.reason).toBe('auth_required');
+    });
+
+    test('Grok readiness ignores hidden mirror textareas and reports ready from the visible composer', () => {
+        const harness = loadCaptureHarness({
+            provider: 'grok',
+            html: buildGrokHiddenMirrorComposerFixture(),
+        });
+
+        const readiness = harness.hooks.probeProviderReadiness();
+
+        expect(readiness.ready).toBe(true);
+        expect(readiness.reason).toBe('ready');
+        expect(readiness.hasInput).toBe(true);
+        expect(readiness.hasSendControl).toBe(false);
     });
 
     test('ChatGPT captures reference-heavy answers without toolbar noise', () => {

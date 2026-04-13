@@ -162,17 +162,49 @@
                       '[contenteditable="true"]',
                       '[role="textbox"]',
                   ];
+        const seen = new Set();
+        const candidates = [];
         for (const sel of selectors) {
-            const el = document.querySelector(sel);
-            if (el) {
-                // console.log(`[MLC ContentScript - ${currentLLM}] Found input with selector:`, sel, el);
-                return el;
+            let nodes = [];
+            try {
+                nodes = Array.from(document.querySelectorAll(sel));
+            } catch (error) {
+                nodes = [];
+            }
+            for (const node of nodes) {
+                if (!(node instanceof Element)) continue;
+                if (seen.has(node)) continue;
+                seen.add(node);
+                candidates.push(node);
             }
         }
-        if (!options.silent) {
-            console.error(`[MLC ContentScript - ${currentLLM}] Input element NOT found.`);
+        if (candidates.length === 0) {
+            if (!options.silent) {
+                console.error(`[MLC ContentScript - ${currentLLM}] Input element NOT found.`);
+            }
+            return null;
         }
-        return null;
+
+        // Prefer a visible, bottom-most composer so hidden autosize mirrors do not mask
+        // the real Grok editor during readiness checks.
+        let bestVisible = null;
+        let bestVisibleBottom = -Infinity;
+        for (const candidate of candidates) {
+            if (!isElementVisible(candidate)) continue;
+            let rect = null;
+            try {
+                rect = candidate.getBoundingClientRect();
+            } catch (error) {
+                rect = null;
+            }
+            const bottom = Number.isFinite(rect?.bottom) ? rect.bottom : 0;
+            if (!bestVisible || bottom >= bestVisibleBottom) {
+                bestVisible = candidate;
+                bestVisibleBottom = bottom;
+            }
+        }
+        if (bestVisible) return bestVisible;
+        return candidates[0];
     }
 
     function armCapture(message) {
