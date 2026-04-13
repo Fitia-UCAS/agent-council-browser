@@ -357,9 +357,7 @@
             element.getAttribute?.('value') || '',
             element.textContent || '',
         ];
-        return String(candidates.filter(Boolean).join(' '))
-            .replace(/\s+/g, ' ')
-            .trim();
+        return String(candidates.filter(Boolean).join(' ')).replace(/\s+/g, ' ').trim();
     }
 
     function findSendControlForReadiness() {
@@ -385,17 +383,13 @@
                   'button[type="submit"]',
               ]
             : isGemini
-              ? [
-                    'button[aria-label*="send" i]',
-                    'button[title*="send" i]',
-                    'button[type="submit"]',
-                  ]
+              ? ['button[aria-label*="send" i]', 'button[title*="send" i]', 'button[type="submit"]']
               : [
                     'button[data-testid*="send" i]',
                     'button[aria-label*="send" i]',
                     'button[title*="send" i]',
                     'button[type="submit"]',
-                  ];
+                ];
 
         const inputEl = findInput({ silent: true });
         const composerRoot = inputEl
@@ -427,7 +421,9 @@
         const authCtaPattern =
             /\b(sign in|sign-in|log in|login|log-in|se connecter|connexion|inscription|sign up|signup|create account|continue with google|continue with apple|continue with email|get started|commencer)\b/i;
         const candidates = Array.from(
-            document.querySelectorAll('button, a, [role="button"], input[type="submit"], input[type="button"]')
+            document.querySelectorAll(
+                'button, a, [role="button"], input[type="submit"], input[type="button"]'
+            )
         );
         return candidates.some((node) => {
             if (!(node instanceof Element) || !isElementVisible(node)) return false;
@@ -876,6 +872,40 @@
         if (!node) return '';
         const prepared = options.skipSanitize ? node : sanitizeContentClone(node, options);
         return getBoundedHtmlFromNode(prepared);
+    }
+
+    function extractComparableTextFromHtml(html) {
+        if (!html || !String(html).trim()) return '';
+        const probe = document.createElement('div');
+        probe.innerHTML = String(html || '');
+        return getTrimmedText(probe) || String(probe.textContent || '').trim();
+    }
+
+    function maybePreserveGrokRichHtml(html, expectedText, source) {
+        const rawHtml = String(html || '');
+        if (!rawHtml.trim()) return '';
+
+        const sourceLabel = String(source || '');
+        if (sourceLabel.startsWith('transcript_tail')) return '';
+
+        const normalizedExpected = normalizeCaptureCandidateText(expectedText);
+        if (!normalizedExpected) return '';
+
+        const htmlText = extractComparableTextFromHtml(rawHtml);
+        const sanitizedHtmlText = stripGrokUiFooterArtifacts(
+            sanitizeGrokTranscriptCandidate(htmlText, { allowShort: true })
+        );
+        const normalizedHtmlText = normalizeCaptureCandidateText(sanitizedHtmlText);
+        if (!normalizedHtmlText) return '';
+        if (normalizedHtmlText === normalizedExpected) return rawHtml;
+
+        captureDebug('Grok rich html dropped due to text mismatch', {
+            llm: currentLLM,
+            source: sourceLabel,
+            expectedLen: normalizedExpected.length,
+            htmlLen: normalizedHtmlText.length,
+        });
+        return '';
     }
 
     function looksLikeChatGPTSourcesOnly(text) {
@@ -2044,10 +2074,7 @@
                 matched += 1;
             }
             if (matched === overlap) {
-                return fullLines
-                    .slice(overlap)
-                    .join('\n')
-                    .trim();
+                return fullLines.slice(overlap).join('\n').trim();
             }
         }
 
@@ -2781,7 +2808,9 @@
                             assistantRoot,
                             selector,
                             text,
-                            html: options.withHtml ? extractCleanHtmlFromNode(node) : '',
+                            html: options.withHtml
+                                ? extractCleanHtmlFromNode(node, { provider: 'grok' })
+                                : '',
                             bottom,
                             shapeSignature: `assistant_scoped|${Math.round(bottom)}|${text.length}`,
                         });
@@ -2930,7 +2959,7 @@
                 localSeen.add(normalized);
                 parts.push(sanitizedText);
                 if (options.withHtml) {
-                    const html = extractCleanHtmlFromNode(child);
+                    const html = extractCleanHtmlFromNode(child, { provider: 'grok' });
                     if (html) htmlParts.push(html);
                 }
             }
@@ -3142,7 +3171,9 @@
         if (options.withHtml) {
             result.html =
                 bestCandidate?.html ||
-                (bestCandidate?.node ? extractCleanHtmlFromNode(bestCandidate.node) : '');
+                (bestCandidate?.node
+                    ? extractCleanHtmlFromNode(bestCandidate.node, { provider: 'grok' })
+                    : '');
         }
         return options.withMeta ? { ...result, meta } : result;
     }
@@ -3579,11 +3610,10 @@
             }
             const shouldUseStrictTailGate = source.startsWith('transcript_tail');
             if (shouldUseStrictTailGate) {
-                const allowShortTail =
-                    Boolean(
-                        resolved?.meta?.fallbackWithoutControlCompletion &&
-                            /[A-Za-z0-9]/.test(String(text || ''))
-                    );
+                const allowShortTail = Boolean(
+                    resolved?.meta?.fallbackWithoutControlCompletion &&
+                    /[A-Za-z0-9]/.test(String(text || ''))
+                );
                 const sanitizedTail = sanitizeGrokTranscriptCandidate(text, {
                     allowShort: allowShortTail,
                 });
@@ -3640,15 +3670,25 @@
                 });
                 return false;
             }
-            // Grok rich HTML frequently includes UI footer widgets; render as plain text only.
-            resolved.html = '';
-            resolved.contentHtml = '';
+            const preservedRichHtml = maybePreserveGrokRichHtml(
+                resolved.html || resolved.contentHtml || '',
+                text,
+                source
+            );
+            if (preservedRichHtml) {
+                resolved.html = preservedRichHtml;
+                resolved.contentHtml = preservedRichHtml;
+            } else {
+                resolved.html = '';
+                resolved.contentHtml = '';
+            }
             captureDebug('Grok full text length before emit', {
                 llm: currentLLM,
                 reason,
                 source,
                 textLen: text.length,
                 usesTranscriptTail: source.startsWith('transcript_tail'),
+                hasRichHtml: Boolean(preservedRichHtml),
             });
         }
         resolved.text = text;
@@ -3830,7 +3870,9 @@
             if (!text) {
                 if (
                     !tryGrokFallbackExtraction(
-                        grokMissingCompletionSignal ? 'empty_primary_without_controls' : 'empty_primary',
+                        grokMissingCompletionSignal
+                            ? 'empty_primary_without_controls'
+                            : 'empty_primary',
                         {
                             allowWithoutControlCompletion: grokMissingCompletionSignal,
                         }
@@ -4034,8 +4076,9 @@
                         ? 'post_has_new_empty'
                         : 'post_has_new_empty_without_controls',
                     {
-                        allowWithoutControlCompletion:
-                            !(grokCompletedByControls || grokLooksComplete),
+                        allowWithoutControlCompletion: !(
+                            grokCompletedByControls || grokLooksComplete
+                        ),
                     }
                 )
             ) {
@@ -4044,16 +4087,18 @@
         }
 
         if (isGrok && captureState.hasNewText) {
-            const baselineNormalized = normalizeCaptureCandidateText(captureState.baselineText || '');
+            const baselineNormalized = normalizeCaptureCandidateText(
+                captureState.baselineText || ''
+            );
             const textNormalized = normalizeCaptureCandidateText(text);
             const lastIncrementalText = String(captureState.lastText || '').trim();
             const lastIncrementalNormalized = normalizeCaptureCandidateText(lastIncrementalText);
             const currentLooksRegressed = Boolean(
                 lastIncrementalNormalized &&
-                    (!baselineNormalized || lastIncrementalNormalized !== baselineNormalized) &&
-                    (!textNormalized ||
-                        isGrokControlOnlyText(text) ||
-                        (baselineNormalized && textNormalized === baselineNormalized))
+                (!baselineNormalized || lastIncrementalNormalized !== baselineNormalized) &&
+                (!textNormalized ||
+                    isGrokControlOnlyText(text) ||
+                    (baselineNormalized && textNormalized === baselineNormalized))
             );
             if (currentLooksRegressed) {
                 const recovered = tryGrokFallbackExtraction(
@@ -4061,8 +4106,9 @@
                         ? 'regressed_after_new_text'
                         : 'regressed_after_new_text_without_controls',
                     {
-                        allowWithoutControlCompletion:
-                            !(grokCompletedByControls || grokLooksComplete),
+                        allowWithoutControlCompletion: !(
+                            grokCompletedByControls || grokLooksComplete
+                        ),
                     }
                 );
                 if (!recovered) {
@@ -4074,8 +4120,9 @@
                             ...(extraction.meta || {}),
                             source: 'reused_last_incremental_candidate',
                             reusedLastIncrementalCandidate: true,
-                            fallbackWithoutControlCompletion:
-                                !(grokCompletedByControls || grokLooksComplete),
+                            fallbackWithoutControlCompletion: !(
+                                grokCompletedByControls || grokLooksComplete
+                            ),
                         },
                     };
                     captureState.lastExtractionMeta = extraction.meta || null;

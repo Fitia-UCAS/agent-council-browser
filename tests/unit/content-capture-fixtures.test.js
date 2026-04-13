@@ -40,7 +40,9 @@ function buildProviderRegistry() {
         claude: {
             id: 'claude',
             matchesHost(hostname) {
-                return String(hostname || '').toLowerCase().includes('claude.ai');
+                return String(hostname || '')
+                    .toLowerCase()
+                    .includes('claude.ai');
             },
             forceCaptureStableMs: 20000,
         },
@@ -132,7 +134,11 @@ function buildReadyFixture(provider) {
     if (provider === 'grok') {
         return `<!doctype html><html><body><main><div role="textbox" contenteditable="true">Draft</div><button aria-label="Send"></button></main></body></html>`;
     }
-    return readFixture('capture', provider, provider === 'claude' ? 'long-answer-with-noise.html' : 'reference-heavy-answer.html');
+    return readFixture(
+        'capture',
+        provider,
+        provider === 'claude' ? 'long-answer-with-noise.html' : 'reference-heavy-answer.html'
+    );
 }
 
 function buildAuthFixture(label) {
@@ -159,6 +165,44 @@ function buildLongGrokTailFixture({ controlMarkup = '<button aria-label="Send"><
                         </div>
                     </article>
                     ${controlMarkup}
+                </main>
+            </body>
+        </html>`;
+}
+
+function buildGrokStructuredRichFixture() {
+    return `<!doctype html>
+        <html>
+            <body>
+                <main>
+                    <form>
+                        <div role="textbox" contenteditable="true">Draft</div>
+                        <button aria-label="Send"></button>
+                    </form>
+                    <article data-testid="assistant-turn">
+                        <div class="response-content-markdown">
+                            <h2>Policy Summary</h2>
+                            <p>Structured Grok answer intro with useful context.</p>
+                            <ul>
+                                <li>First structured point</li>
+                                <li>Second structured point</li>
+                            </ul>
+                            <table>
+                                <thead>
+                                    <tr><th>Model</th><th>Status</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td>Grok</td><td>Ready</td></tr>
+                                </tbody>
+                            </table>
+                            <div class="answer-footer">
+                                <span>773ms</span>
+                                <span>Are you satisfied with Grok's answer?</span>
+                                <button>Passer en mode vocal</button>
+                            </div>
+                        </div>
+                    </article>
+                    <button aria-label="Passer en mode vocal"></button>
                 </main>
             </body>
         </html>`;
@@ -327,7 +371,9 @@ describe('Content capture fixtures', () => {
         expect(preferredText).toContain('Short new reply.');
         expect(preferredText).toContain('It answers the latest user turn directly.');
         expect(preferredText).not.toContain('Copy');
-        expect(preferred.meta.bestOrder).toBeGreaterThan(harness.hooks.captureState.baselineBestOrder);
+        expect(preferred.meta.bestOrder).toBeGreaterThan(
+            harness.hooks.captureState.baselineBestOrder
+        );
 
         harness.hooks.captureState.startedAt = Date.now() - 7000;
         harness.hooks.evaluateCapture();
@@ -425,6 +471,81 @@ describe('Content capture fixtures', () => {
         expect(harness.hooks.captureState.active).toBe(false);
     });
 
+    test('Grok preserves structured rich HTML when the emitted answer matches the extracted rich content', () => {
+        const harness = loadCaptureHarness({
+            provider: 'grok',
+            html: buildGrokStructuredRichFixture(),
+        });
+
+        harness.hooks.armCapture({
+            promptId: 'grok_rich_html_prompt',
+            sessionId: 'grok_rich_html_session',
+            turnIndex: 1,
+            agentId: 'agent_grok_1',
+            timestamp: Date.now() - 4000,
+        });
+
+        const extraction = harness.hooks.extractLatestResponse({ withMeta: true, withHtml: true });
+        expect(normalizeText(extraction.text)).toContain('Policy Summary');
+        expect(normalizeText(extraction.text)).toContain('First structured point');
+        expect(extraction.html).toContain('<h2>Policy Summary</h2>');
+        expect(extraction.html).toContain('<table>');
+        expect(extraction.html).not.toContain('Are you satisfied with Grok');
+        expect(extraction.html).not.toContain('773ms');
+        expect(extraction.html).not.toContain('<button');
+
+        harness.hooks.emitCaptureFromResolvedExtraction('grok_stop_voice_idle', extraction);
+
+        expect(harness.sentMessages).toHaveLength(1);
+        expect(harness.sentMessages[0].type).toBe('MLC_RESPONSE_CAPTURED');
+        expect(harness.sentMessages[0].contentHtml).toContain('<h2>Policy Summary</h2>');
+        expect(harness.sentMessages[0].contentHtml).toContain('<ul>');
+        expect(harness.sentMessages[0].contentHtml).toContain('<table>');
+        expect(harness.sentMessages[0].contentHtml).not.toContain('Are you satisfied with Grok');
+        expect(harness.sentMessages[0].contentHtml).not.toContain('773ms');
+        expect(harness.sentMessages[0].contentHtml).not.toContain('<button');
+    });
+
+    test('Grok drops rich HTML when incremental trimming changes the emitted answer text', () => {
+        const harness = loadCaptureHarness({
+            provider: 'grok',
+            html: buildReadyFixture('grok'),
+        });
+
+        harness.hooks.armCapture({
+            promptId: 'grok_incremental_html_guard_prompt',
+            sessionId: 'grok_incremental_html_guard_session',
+            turnIndex: 2,
+            agentId: 'agent_grok_1',
+            timestamp: Date.now() - 4000,
+        });
+        harness.hooks.captureState.baselineText = 'Previous Grok answer sentence.';
+        harness.hooks.captureState.grokBaselineTranscriptTail = 'Previous Grok answer sentence.';
+
+        harness.hooks.emitCaptureFromResolvedExtraction('stable_capture', {
+            text: [
+                'Previous Grok answer sentence.',
+                'Fresh structured heading',
+                'Fresh structured detail that should still be emitted.',
+            ].join('\n\n'),
+            html: [
+                '<p>Previous Grok answer sentence.</p>',
+                '<h2>Fresh structured heading</h2>',
+                '<p>Fresh structured detail that should still be emitted.</p>',
+            ].join(''),
+            meta: {
+                provider: 'grok',
+                source: 'assistant_response_markdown',
+            },
+        });
+
+        expect(harness.sentMessages).toHaveLength(1);
+        expect(normalizeText(harness.sentMessages[0].content)).toBe(
+            'Fresh structured heading Fresh structured detail that should still be emitted.'
+        );
+        expect(harness.sentMessages[0].contentHtml).toBe('');
+    });
+
     test('Grok captures the final incremental answer from a truncated transcript tail after completion controls settle', () => {
         const harness = loadCaptureHarness({
             provider: 'grok',
@@ -474,6 +595,7 @@ describe('Content capture fixtures', () => {
             'Final Grok answer sentence two confirms the loop can terminate cleanly.'
         );
         expect(harness.sentMessages[0].content).not.toContain('Previous Grok answer line one.');
+        expect(harness.sentMessages[0].contentHtml).toBe('');
     });
 
     test('Grok transcript-tail fallback recovers when completion controls never appear and the primary extractor stays on the previous answer', () => {
@@ -525,6 +647,7 @@ describe('Content capture fixtures', () => {
             'Final Grok answer sentence two confirms the fallback can recover the stalled turn.'
         );
         expect(harness.sentMessages[0].content).not.toContain('Previous Grok answer line one.');
+        expect(harness.sentMessages[0].contentHtml).toBe('');
     });
 
     test.each([
@@ -576,6 +699,7 @@ describe('Content capture fixtures', () => {
             expect(harness.sentMessages).toHaveLength(1);
             expect(harness.sentMessages[0].type).toBe('MLC_RESPONSE_CAPTURED');
             expect(normalizeText(harness.sentMessages[0].content)).toBe(answerText);
+            expect(harness.sentMessages[0].contentHtml).toBe('');
         }
     );
 
@@ -629,5 +753,6 @@ describe('Content capture fixtures', () => {
         expect(normalizeText(harness.sentMessages[0].content)).toContain(
             'Final Grok answer detail should still include the repeated opening line.'
         );
+        expect(harness.sentMessages[0].contentHtml).toBe('');
     });
 });
