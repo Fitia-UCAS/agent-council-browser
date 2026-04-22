@@ -132,6 +132,7 @@ function patchState(patch, actionType = 'patch') {
 
 const elements = {};
 const HISTORY_PAGE_SIZE = 60;
+const TIMELINE_AUTO_SCROLL_THRESHOLD_PX = 72;
 
 const ROUTE_STORAGE_KEY_V1 = 'mlc_last_route_v1';
 const ROUTE_STORAGE_KEY_V2 = 'mlc_last_route_v2';
@@ -311,6 +312,33 @@ function persistUiPreferences(nextPrefs) {
     state.uiPrefs = prefs;
     storageSet({ [UI_PREFS_STORAGE_KEY]: prefs });
     return prefs;
+}
+
+function isTimelineNearBottom() {
+    if (!elements.timeline) return true;
+    const remaining =
+        elements.timeline.scrollHeight -
+        elements.timeline.clientHeight -
+        elements.timeline.scrollTop;
+    return remaining <= TIMELINE_AUTO_SCROLL_THRESHOLD_PX;
+}
+
+function setTimelineAutoScroll(enabled) {
+    state.autoScroll = Boolean(enabled);
+    if (elements.autoScroll) {
+        elements.autoScroll.checked = state.autoScroll;
+    }
+}
+
+function syncTimelineAutoScroll() {
+    setTimelineAutoScroll(isTimelineNearBottom());
+}
+
+function scrollTimelineToBottom({ force = false } = {}) {
+    if (!elements.timeline) return;
+    if (!force && !state.autoScroll) return;
+    elements.timeline.scrollTop = elements.timeline.scrollHeight;
+    setTimelineAutoScroll(true);
 }
 
 function cacheSession(session) {
@@ -1462,6 +1490,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.charCount = document.getElementById('char-count');
     elements.autoScroll = document.getElementById('auto-scroll');
     elements.timeline = document.getElementById('timeline');
+    if (elements.timeline) {
+        elements.timeline.addEventListener('scroll', syncTimelineAutoScroll, { passive: true });
+    }
     elements.emptyState = document.getElementById('empty-state');
     elements.providersButton = document.getElementById('providers-button');
     elements.sessionStatus = document.getElementById('session-status');
@@ -1709,8 +1740,12 @@ function bindEvents() {
     }
 
     if (elements.autoScroll) {
+        elements.autoScroll.checked = state.autoScroll;
         elements.autoScroll.addEventListener('change', () => {
-            state.autoScroll = elements.autoScroll.checked;
+            setTimelineAutoScroll(elements.autoScroll.checked);
+            if (state.autoScroll) {
+                scrollTimelineToBottom({ force: true });
+            }
         });
     }
 
@@ -3870,9 +3905,13 @@ function loadChat(chatId) {
         syncActiveChatConnectionPolicy();
         requestConnectionStatus();
         clearTranscript();
-        if (Array.isArray(response.chat?.messages) && response.chat.messages.length) {
-            response.chat.messages.forEach(addMessage);
+        const messages = Array.isArray(response.chat?.messages) ? response.chat.messages : [];
+        setTimelineAutoScroll(false);
+        if (messages.length) {
+            messages.forEach(addMessage);
+            scrollTimelineToBottom({ force: true });
         } else {
+            setTimelineAutoScroll(true);
             updateEmptyState();
         }
         updateLoadOlderUi();
@@ -5184,9 +5223,7 @@ function renderPendingTranscriptEntries() {
         fragment.appendChild(buildPendingTranscriptElement(entry));
     });
     elements.timeline.appendChild(fragment);
-    if (state.autoScroll) {
-        elements.timeline.scrollTop = elements.timeline.scrollHeight;
-    }
+    scrollTimelineToBottom();
 }
 
 function setPendingTranscriptEntries(entries) {
@@ -5689,10 +5726,7 @@ function addMessage(message) {
     }
 
     elements.timeline.appendChild(buildMessageElement(message));
-
-    if (state.autoScroll) {
-        elements.timeline.scrollTop = elements.timeline.scrollHeight;
-    }
+    scrollTimelineToBottom();
 }
 
 function formatRoleLabel(role) {

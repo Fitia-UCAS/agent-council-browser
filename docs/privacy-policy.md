@@ -6,7 +6,7 @@ _Last updated: February 13, 2026_
 
 ## Scope
 
-This policy covers the Minions Council Chrome extension and its public repository.
+This policy covers the Multi Agent Council Chrome extension and its public repository.
 
 ## What data is processed
 

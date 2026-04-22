@@ -6,6 +6,9 @@
 2. Search existing issues.
 3. Open a new issue with reproduction steps, logs, and screenshots (redacted).
 
+Browser note:
+On Chrome, clicking the extension icon should open the side panel. On Arc, the extension tries the side panel first and falls back to an extension tab if the panel does not open reliably.
+
 ## Security issues
 
 Do not open public issues for vulnerabilities. Use private reporting in `SECURITY.md`.

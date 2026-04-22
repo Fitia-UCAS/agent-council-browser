@@ -1,7 +1,7 @@
 {
     "name": "minions-council",
     "version": "0.1.0",
-    "description": "Run an LLM council in Chrome: compare ChatGPT, Claude, Gemini, and Grok directly in your provider tabs.",
+    "description": "Cross-check important answers by comparing ChatGPT, Claude, Gemini, and Grok in Chrome, directly on their own websites.",
     "main": "background.js",
     "scripts": {
         "build:src": "node scripts/build/build-from-src.mjs --mode=dev",
@@ -18,6 +18,8 @@
         "verify:release-artifact": "bash scripts/release/verify-release-artifact.sh",
         "build:variant": "npm run build:src && bash scripts/dev/build-extension-variant.sh",
         "build:release": "bash scripts/release/build-release-artifact.sh",
+        "docs:screenshots:setup": "npm run build:src && node scripts/dev/capture-readme-screenshots.mjs setup",
+        "docs:screenshots": "npm run build:src && node scripts/dev/capture-readme-screenshots.mjs capture",
         "build:variant:all-local-worktrees": "bash scripts/dev/build-all-local-worktrees-variants.sh",
         "brand:in-place": "npm run build:src && bash scripts/dev/build-extension-variant.sh --in-place",
         "icons:council": "bash scripts/dev/render-council-icon.sh",

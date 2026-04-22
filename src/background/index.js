@@ -1,5 +1,5 @@
 /**
- * Minions Council Extension - Background Service Worker
+ * Multi Agent Council Extension - Background Service Worker
  * Handles communication with LLM websites and tab management
  */
 
@@ -25,6 +25,12 @@ try {
     importScripts('runtime/safeLogger.js');
 } catch (error) {
     console.error('[MLC Runtime] Failed to import safe logger:', error);
+}
+
+try {
+    importScripts('runtime/background/extensionUiOpenFlow.js');
+} catch (error) {
+    console.error('[MLC Runtime] Failed to import extension UI open flow helpers:', error);
 }
 
 try {
@@ -98,6 +104,10 @@ const mlcMessageRouter =
     self.MLCMessageRouter && typeof self.MLCMessageRouter === 'object'
         ? self.MLCMessageRouter
         : null;
+const mlcExtensionUiOpenFlowModule =
+    self.MLCExtensionUiOpenFlow && typeof self.MLCExtensionUiOpenFlow === 'object'
+        ? self.MLCExtensionUiOpenFlow
+        : null;
 const mlcSchemaHandlersModule =
     self.MLCSchemaHandlers && typeof self.MLCSchemaHandlers === 'object'
         ? self.MLCSchemaHandlers
@@ -135,6 +145,18 @@ function mlcDebugLog(event, meta) {
     mlcLogger.debug(event, meta);
 }
 
+const extensionUiOpenFlow =
+    mlcExtensionUiOpenFlowModule &&
+    typeof mlcExtensionUiOpenFlowModule.createExtensionUiOpenFlow === 'function'
+        ? mlcExtensionUiOpenFlowModule.createExtensionUiOpenFlow({
+              runtime: chrome.runtime,
+              sidePanel: chrome.sidePanel,
+              tabs: chrome.tabs,
+              windows: chrome.windows,
+              logger: mlcLogger,
+          })
+        : null;
+
 async function primeSchemaV3Status(reason) {
     if (!mlcSchemaReset || typeof mlcSchemaReset.primeStatus !== 'function') return null;
     try {
@@ -166,19 +188,25 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 async function ensureSidePanelActionClickBehavior(reason) {
-    if (!chrome.sidePanel || !chrome.sidePanel.setPanelBehavior) return;
-    try {
-        // Clicking the extension action should open the side panel only (never a full tab).
-        await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-    } catch (error) {
-        console.warn(
-            `[MLC Background] Failed to enable side panel action click behavior (${reason}):`,
-            error
-        );
-    }
+    if (!extensionUiOpenFlow || typeof extensionUiOpenFlow.setManualActionClickBehavior !== 'function') return;
+    await extensionUiOpenFlow.setManualActionClickBehavior(reason);
 }
 
 ensureSidePanelActionClickBehavior('workerInit');
+if (
+    chrome.action &&
+    chrome.action.onClicked &&
+    extensionUiOpenFlow &&
+    typeof extensionUiOpenFlow.openExtensionUiFromAction === 'function'
+) {
+    chrome.action.onClicked.addListener((tab) => {
+        extensionUiOpenFlow.openExtensionUiFromAction(tab).catch((error) => {
+            mlcLogger.warn('extension_ui_open_from_action_failed', {
+                error: error?.message || String(error),
+            });
+        });
+    });
+}
 primeSchemaV3Status('workerInit').catch(() => {});
 
 // Safe message sending function

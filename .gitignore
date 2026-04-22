@@ -26,6 +26,7 @@ resources/.arch-internal-preview.css
 node_modules/
 test-results/
 playwright-report/
+.playwright-profiles/
 *.log
 .DS_Store
 **/.DS_Store

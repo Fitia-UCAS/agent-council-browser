@@ -13,6 +13,7 @@ test('build artifacts required for extension runtime exist', async () => {
         'runtime/protocolV3.js',
         'runtime/safeLogger.js',
         'runtime/schemaResetV3.js',
+        'runtime/background/extensionUiOpenFlow.js',
     ];
 
     required.forEach((relPath) => {

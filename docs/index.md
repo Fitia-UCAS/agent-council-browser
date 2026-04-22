@@ -1,4 +1,4 @@
-# Minions Council Docs
+# Multi Agent Council Docs
 
 ## Public Policies
 

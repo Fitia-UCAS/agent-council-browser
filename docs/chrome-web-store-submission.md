@@ -1,11 +1,11 @@
 # Chrome Web Store Submission Guide
 
-Use this file as the canonical pre-submit checklist for Minions Council. Keep it in sync with the release artifact, public policy pages, and the current permission model.
+Use this file as the canonical pre-submit checklist for Multi Agent Council. Keep it in sync with the release artifact, public policy pages, and the current permission model.
 
 ## 1) Release artifact
 
 - Build from a clean tree with `npm run build:release`.
-- Upload only `release/minions-council-v<version>.zip`.
+- Upload only `release/multi-agent-council-v<version>.zip`.
 - Do not upload an unpacked dev build or files from repo root.
 
 ## 2) Public links
@@ -36,27 +36,43 @@ Still required before submission:
 
 ### Short description
 
-`Run an LLM council in Chrome: compare ChatGPT, Claude, Gemini, and Grok directly in your provider tabs.`
+`Compare multiple AI models in Chrome to cross-check important questions across your ChatGPT, Claude, Gemini, and Grok tabs.`
 
 ### Long description
 
-`Minions Council is a side-panel Chrome extension for running prompts across multiple LLM provider websites without an API relay. Build a route of agents, compare answers side by side, or run debate rounds across ChatGPT, Claude, Gemini, and Grok using the browser tabs you already use.`
+`Multi Agent Council is a Chrome side-panel extension for comparing and debating answers across ChatGPT, Claude, Gemini, and Grok directly in the browser tabs you already use. Inspired by the LLM Council idea, it works through vendor websites instead of APIs, so you keep the native provider experience, current web features, attachments, and model tooling without paying API costs or routing prompts through a relay backend.`
 
-`The extension is local-first: chat history stays on-device, optional passphrase protection is available for saved chats, and provider interactions happen through the provider websites in your own browser session.`
+`This extension is built for questions where the answer matters. LLMs are often better at challenging, correcting, and refining answers than at getting everything right on the first pass. Running multiple models with different strengths, retrieval behavior, style biases, and blind spots gives you a clearer map of where answers agree, where they disagree, and what still needs verification.`
+
+Feature highlights:
+
+- `Compare`: run the same prompt across multiple AI models in parallel.
+- `Debate`: let models challenge and improve each other's answers across rounds.
+- `Tab Profiles`: use multiple tabs from the same provider for duplicate agents or independent contexts.
+- `Attachments`: send files with provider-specific browser automation.
+- `Local-first history`: keep chats on-device with optional passphrase protection.
+
+Use cases:
+
+- Cross-checking important decisions when one answer feels too narrow or too confident.
+- Comparing conflicting explanations and drafting better follow-up questions before another appointment.
+- Pressure-testing research, planning, and everyday choices such as finding the best date spot in Paris.
+
+`Multi Agent Council helps you compare perspectives and prepare better questions. It does not replace licensed professional judgment, medical advice, or ordinary due diligence.`
 
 ### Suggested screenshots
 
-- Side panel with a multi-agent route configured
-- Compare run showing two providers answering the same prompt
-- Debate run showing round-by-round transcript
+- Side panel with a four-model route configured for an important question
+- Compare run showing visible agreement and disagreement across providers
+- Debate run showing one model refining its answer after another model responds
 - Route builder with multiple profiles of the same provider
-- Security settings showing passphrase protection
+- Security settings showing local-first history and passphrase protection
 
 ## 4) Reviewer notes
 
 Paste or adapt the following note in the Chrome Web Store reviewer field:
 
-`Minions Council opens a side panel and coordinates prompts across already-open provider websites (ChatGPT, Claude, Gemini, Grok). It does not use provider APIs or a project-operated relay backend.`
+`Multi Agent Council opens a side panel and coordinates prompts across already-open provider websites (ChatGPT, Claude, Gemini, Grok). It does not use provider APIs or a project-operated relay backend.`
 
 `The debugger permission is used only for Claude prompt sending because Claude's web UI can disable normal DOM automation while attachments and hydrated composer state are settling. The extension uses Chrome DevTools Protocol on claude.ai to type and confirm prompt submission more reliably.`
 

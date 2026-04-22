@@ -32,6 +32,10 @@ const COPY_SPECS = [
     { src: 'src/background/security/safeLogger.js', dst: 'runtime/safeLogger.js' },
     { src: 'src/background/runtime/schemaResetV3.js', dst: 'runtime/schemaResetV3.js' },
     { src: 'src/background/runtime/messageRouter.js', dst: 'runtime/background/messageRouter.js' },
+    {
+        src: 'src/background/runtime/extensionUiOpenFlow.js',
+        dst: 'runtime/background/extensionUiOpenFlow.js',
+    },
     { src: 'src/background/sessions/sessionEngine.js', dst: 'runtime/background/sessionEngine.js' },
     {
         src: 'src/background/sessions/sessionStateStore.js',
@@ -193,7 +197,7 @@ async function main() {
     }
 
     if (mode === 'release') {
-        manifest.name = stripVariantSuffix(manifest.name || 'Minions Council');
+        manifest.name = stripVariantSuffix(manifest.name || 'Multi Agent Council');
         const existingAction =
             manifest.action && typeof manifest.action === 'object' ? manifest.action : {};
         manifest.action = {

@@ -10,10 +10,11 @@ The extension could start background checks (tab/profile/connection logs) but st
 1. Added a manual action-click open flow in `/background.js` instead of relying only on auto side-panel behavior.
 2. Disabled automatic side-panel opening on action click with:
    - `chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false })`
-3. Added Arc detection (`navigator.userAgent` / `userAgentData`) and forced Arc to open the extension UI in a normal extension tab (`sidepanel.html`).
-4. Kept side-panel support for non-Arc browsers, with a safety fallback:
+3. Kept the open flow browser-agnostic:
    - Try `chrome.sidePanel.open(...)`
-   - If it fails (or no side-panel context appears), open `sidepanel.html` in a tab.
+   - Verify a `SIDE_PANEL` context exists for `sidepanel.html`
+   - If open fails, or no side-panel context appears, focus an existing `sidepanel.html` tab or open a new one
+4. Arc compatibility now comes from that verified fallback path rather than a dedicated Arc user-agent branch.
 
 ## Important clarification
 

@@ -27,7 +27,7 @@ This pipeline:
 
 Output:
 
-- `release/minions-council-v<version>.zip`
+- `release/multi-agent-council-v<version>.zip`
 
 ## 3) CI gate expectations
 

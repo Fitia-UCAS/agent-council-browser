@@ -129,6 +129,12 @@ This file is the durable memory for the repo. It is the canonical reference for 
   - Shared capture heuristics (reference-list detection + candidate scoring) used by `contentScript.js`.
   - Loaded before `contentScript.js` via `manifest.json` content script ordering.
 
+- `docs/assets/multi_llm_council_redesign.png`
+  - Current transparent council logo source used in the README and for extension icon generation.
+
+- `variant-icons/`
+  - Generated PNG branding icons for Chrome (`16/32/48/128/512`), currently rasterized from `docs/assets/multi_llm_council_redesign.png`.
+
 - `contentScript.js`
   - Runs in ChatGPT/Gemini/Claude/Grok pages.
   - Captures LLM responses and posts them back to background.
@@ -650,7 +656,7 @@ When multiple branches/worktrees are loaded in Chrome at once, build and load a 
   - Copies the current workspace into `.dist/<branch-label>/`.
   - Supports `--in-place` to rewrite the current workspace manifest/icons directly (useful when Chrome already points to that folder).
   - Rewrites `.dist/<branch-label>/manifest.json` with:
-    - `name: "Multi-LLM Coder [<branch-label>]"`
+    - `name: "Multi Agent Council [<branch-label>]"`
     - `action.default_title: "... [<branch-label>]"`
     - `version_name: "dev-<branch-label>"`
     - `icons` and `action.default_icon` set to generated branch-specific PNG icons (`variant-icons/variant-16.png`, `variant-icons/variant-32.png`, `variant-icons/variant-48.png`, `variant-icons/variant-128.png`)

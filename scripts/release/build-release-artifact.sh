@@ -46,7 +46,7 @@ done < "$allowlist_file"
 "$verify_script" "$build_dir"
 
 final_version="$(node -e "const m=require('${build_dir}/manifest.json'); process.stdout.write(String(m.version||'0.0.0'))")"
-zip_name="minions-council-v${final_version}.zip"
+zip_name="multi-agent-council-v${final_version}.zip"
 zip_path="$release_root/$zip_name"
 
 rm -f "$zip_path"

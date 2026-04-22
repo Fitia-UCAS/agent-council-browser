@@ -1,8 +1,8 @@
 {
     "manifest_version": 3,
-    "name": "Minions Council",
+    "name": "Multi Agent Council",
     "version": "0.1.0",
-    "description": "Your council of LLM minions in Chrome: compare ChatGPT, Claude, Gemini, and Grok directly in your provider tabs, no API keys.",
+    "description": "Cross-check important answers by comparing ChatGPT, Claude, Gemini, and Grok in Chrome, directly on their own websites.",
     "permissions": ["sidePanel", "scripting", "storage", "tabs", "debugger"],
     "host_permissions": [
         "https://gemini.google.com/*",
@@ -69,7 +69,7 @@
         "default_path": "sidepanel.html"
     },
     "action": {
-        "default_title": "Click to open Minions Council",
+        "default_title": "Click to open Multi Agent Council",
         "default_icon": {
             "16": "variant-icons/variant-16.png",
             "32": "variant-icons/variant-32.png",
