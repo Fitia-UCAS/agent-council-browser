@@ -70,8 +70,8 @@ You do not need API keys.
 ### 1. Clone and build
 
 ```bash
-git clone https://github.com/AmT42/multi-llm-ext.git
-cd multi-llm-ext
+git clone https://github.com/AmT42/agent-council-browser.git
+cd agent-council-browser
 npm ci
 npm run build:src
 ```
@@ -81,7 +81,7 @@ npm run build:src
 1. Open `chrome://extensions/`.
 2. Turn on `Developer mode`.
 3. Click `Load unpacked`.
-4. Select the repository root: `multi-llm-ext/`.
+4. Select the repository root: `agent-council-browser/`.
 5. Pin `Multi Agent Council` if you want one-click access.
 6. Click the extension icon to open the UI.
    - Chrome should open the side panel.

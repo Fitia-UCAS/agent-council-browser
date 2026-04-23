@@ -7,7 +7,7 @@ body:
           value: |
               Do not post vulnerabilities publicly in Issues.
               Open a private advisory draft instead:
-              https://github.com/AmT42/multi-llm-ext/security/advisories/new
+              https://github.com/AmT42/agent-council-browser/security/advisories/new
 
               Full policy:
               - `SECURITY.md`

@@ -12,7 +12,7 @@ Use this file as the canonical pre-submit checklist for Multi Agent Council. Kee
 
 Before every submission, confirm these URLs are public and resolve without authentication:
 
-- Homepage: `https://github.com/AmT42/multi-llm-ext`
+- Homepage: `https://github.com/AmT42/agent-council-browser`
 - Privacy policy: GitHub Pages URL generated from `docs/privacy-policy.md`
 - Security policy: GitHub Pages URL generated from `docs/security-policy.md`
 - Support page: GitHub Pages URL generated from `docs/support-policy.md`

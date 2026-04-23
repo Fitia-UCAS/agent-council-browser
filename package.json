@@ -1,5 +1,5 @@
 {
-    "name": "minions-council",
+    "name": "agent-council-browser",
     "version": "0.1.0",
     "description": "Cross-check important answers by comparing ChatGPT, Claude, Gemini, and Grok in Chrome, directly on their own websites.",
     "main": "background.js",
