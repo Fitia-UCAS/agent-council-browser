@@ -4,7 +4,7 @@
   <img src="docs/assets/multi_llm_council_redesign.png" alt="Multi Agent Council logo" width="220" />
 </p>
 
-Compare and debate ChatGPT, Claude, Gemini, and Grok from one extension workspace, directly in the tabs you already use.
+Compare and debate ChatGPT, Claude, Gemini, and Grok from one extension workspace, directly in your web browser.
 
 Inspired by the LLM Council idea, Multi Agent Council runs through vendor websites in your browser instead of through APIs or a relay backend. That means no API spend, no extra middleware, and no giving up the native provider experience, attachments, or current web features.
 
