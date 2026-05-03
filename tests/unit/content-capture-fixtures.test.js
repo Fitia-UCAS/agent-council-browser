@@ -127,6 +127,16 @@ function sendRuntimeMessage(harness, message) {
     return payload;
 }
 
+function settleChatGPTCapture(harness, { idleMs = 16000 } = {}) {
+    const now = Date.now();
+    harness.hooks.captureState.lastTextChangeAt = now - idleMs;
+    harness.hooks.captureState.chatgptIdleSince = now - idleMs;
+    harness.hooks.captureState.chatgptLastActivityAt = now - idleMs;
+    harness.hooks.evaluateCapture();
+    harness.hooks.captureState.chatgptFinalTextStableSince = Date.now() - 1500;
+    harness.hooks.evaluateCapture();
+}
+
 function buildReadyFixture(provider) {
     if (provider === 'gemini') {
         return `<!doctype html><html><body><main><div class="ql-editor" role="textbox">Draft</div><button aria-label="Send prompt"></button></main></body></html>`;
@@ -249,6 +259,40 @@ describe('Content capture fixtures', () => {
         expect(readiness.reason).toBe('ready');
     });
 
+    test('Grok readiness reports ready from a usable input without a send control', () => {
+        const harness = loadCaptureHarness({
+            provider: 'grok',
+            html: `<!doctype html><html><body><main><form><div role="textbox" contenteditable="true">Draft</div></form></main></body></html>`,
+        });
+        const readiness = harness.hooks.probeProviderReadiness();
+
+        expect(readiness.ready).toBe(true);
+        expect(readiness.reason).toBe('ready');
+        expect(readiness.hasInput).toBe(true);
+        expect(readiness.hasSendControl).toBe(false);
+    });
+
+    test.each([
+        ['enabled send control only', '<button aria-label="Send message"></button>', true],
+        [
+            'disabled send control only',
+            '<button aria-label="Send message" disabled></button>',
+            false,
+        ],
+        ['voice control only', '<button aria-label="Microphone"></button>', false],
+    ])('Grok readiness does not report ready from %s', (_label, controlMarkup, hasSendControl) => {
+        const harness = loadCaptureHarness({
+            provider: 'grok',
+            html: `<!doctype html><html><body><main><form>${controlMarkup}</form></main></body></html>`,
+        });
+        const readiness = harness.hooks.probeProviderReadiness();
+
+        expect(readiness.ready).toBe(false);
+        expect(['composer_missing', 'loading']).toContain(readiness.reason);
+        expect(readiness.hasInput).toBe(false);
+        expect(readiness.hasSendControl).toBe(hasSendControl);
+    });
+
     test.each([
         ['chatgpt', buildAuthFixture('Se connecter')],
         ['gemini', buildAuthFixture('Sign in')],
@@ -317,6 +361,307 @@ describe('Content capture fixtures', () => {
         expect(secondParagraphIndex).toBeGreaterThan(citationIndex);
         expect(referenceIndex).toBeGreaterThan(secondParagraphIndex);
         expect(text).not.toContain('Copy');
+    });
+
+    test('ChatGPT accepts same-assistant streamed updates when capture arms after generation starts', () => {
+        const harness = loadCaptureHarness({
+            provider: 'chatgpt',
+            html: readFixture('capture', 'chatgpt', 'reference-heavy-answer.html'),
+        });
+
+        const conversation = harness.document.querySelector('[role="log"]');
+        if (!conversation) {
+            throw new Error('ChatGPT fixture is missing the conversation root.');
+        }
+        conversation.insertAdjacentHTML(
+            'beforeend',
+            `
+                <article data-message-author-role="assistant">
+                    <div data-testid="message-content" data-testid-streaming-answer>
+                        <p>Parallel ChatGPT partial answer has already started streaming before capture is armed.</p>
+                        <p>The capture baseline must not lock this partial text as the final answer.</p>
+                    </div>
+                </article>
+            `
+        );
+
+        const composer = harness.document.querySelector('textarea');
+        if (!composer) {
+            throw new Error('ChatGPT fixture is missing the composer textarea.');
+        }
+        composer.insertAdjacentHTML(
+            'afterend',
+            '<button data-testid="stop-button" aria-label="Stop generating">Stop</button>'
+        );
+
+        harness.hooks.armCapture({
+            promptId: 'parallel_chatgpt_late_arm',
+            sessionId: 'parallel_chatgpt_late_arm_session',
+            turnIndex: 1,
+            agentId: 'agent_chatgpt_1',
+            timestamp: Date.now() - 2500,
+        });
+
+        harness.hooks.captureState.lastTextChangeAt = Date.now() - 12000;
+        harness.hooks.evaluateCapture();
+        expect(harness.sentMessages).toHaveLength(0);
+        expect(harness.hooks.captureState.active).toBe(true);
+
+        const streamingNode = harness.document.querySelector('[data-testid-streaming-answer]');
+        streamingNode.innerHTML = `
+            <p>Parallel ChatGPT final answer sentence one should be captured.</p>
+            <p>Sentence two extends the same assistant block after the baseline was recorded.</p>
+            <p>Sentence three confirms this is the current parallel reply, not the previous answer.</p>
+        `;
+
+        harness.hooks.evaluateCapture();
+
+        expect(harness.hooks.captureState.hasNewText).toBe(true);
+        expect(normalizeText(harness.hooks.captureState.lastText)).toContain(
+            'Parallel ChatGPT final answer sentence one should be captured.'
+        );
+        expect(harness.sentMessages).toHaveLength(0);
+
+        harness.document.querySelector('[data-testid="stop-button"]')?.remove();
+        settleChatGPTCapture(harness);
+
+        expect(harness.sentMessages).toHaveLength(1);
+        expect(harness.sentMessages[0].type).toBe('MLC_RESPONSE_CAPTURED');
+        expect(harness.sentMessages[0].agentId).toBe('agent_chatgpt_1');
+        expect(normalizeText(harness.sentMessages[0].content)).toContain(
+            'Parallel ChatGPT final answer sentence one should be captured.'
+        );
+    });
+
+    test('ChatGPT waits through search tool status before capturing the final answer', () => {
+        const harness = loadCaptureHarness({
+            provider: 'chatgpt',
+            html: readFixture('capture', 'chatgpt', 'reference-heavy-answer.html'),
+        });
+
+        harness.hooks.armCapture({
+            promptId: 'chatgpt_search_status',
+            sessionId: 'chatgpt_search_status_session',
+            turnIndex: 1,
+            agentId: 'agent_chatgpt_search',
+            timestamp: Date.now() - 20000,
+        });
+
+        const conversation = harness.document.querySelector('[role="log"]');
+        conversation.insertAdjacentHTML(
+            'beforeend',
+            `
+                <article data-message-author-role="assistant" data-search-turn>
+                    <div role="status" data-testid="web-search-status">
+                        Searching the web and checking Maps for current details
+                    </div>
+                </article>
+            `
+        );
+
+        harness.hooks.evaluateCapture();
+        expect(harness.sentMessages).toHaveLength(0);
+        expect(harness.hooks.captureState.active).toBe(true);
+
+        harness.hooks.captureState.lastTextChangeAt = Date.now() - 20000;
+        harness.hooks.evaluateCapture();
+        expect(harness.sentMessages).toHaveLength(0);
+
+        const searchTurn = harness.document.querySelector('[data-search-turn]');
+        searchTurn.innerHTML = `
+            <div data-testid="message-content">
+                <p>Final ChatGPT answer after the web search should be captured completely.</p>
+                <p>This paragraph proves the answer text, not the transient status, is selected.</p>
+            </div>
+            <section class="sources-list">
+                <div class="reference-row">Reference summary after search</div>
+            </section>
+        `;
+
+        harness.hooks.evaluateCapture();
+        expect(harness.hooks.captureState.hasNewText).toBe(true);
+        expect(harness.sentMessages).toHaveLength(0);
+
+        settleChatGPTCapture(harness);
+
+        expect(harness.sentMessages).toHaveLength(1);
+        const captured = normalizeText(harness.sentMessages[0].content);
+        expect(captured).toContain('Final ChatGPT answer after the web search');
+        expect(captured).toContain('Reference summary after search');
+        expect(captured).not.toContain('Searching the web');
+        expect(harness.sentMessages[0].contentHtml).toContain('Reference summary after search');
+        expect(harness.sentMessages[0].contentHtml).not.toContain('web-search-status');
+    });
+
+    test('ChatGPT does not suppress concise final answers that mention using search', () => {
+        const harness = loadCaptureHarness({
+            provider: 'chatgpt',
+            html: readFixture('capture', 'chatgpt', 'reference-heavy-answer.html'),
+        });
+
+        harness.hooks.armCapture({
+            promptId: 'chatgpt_short_answer',
+            sessionId: 'chatgpt_short_answer_session',
+            turnIndex: 1,
+            agentId: 'agent_chatgpt_short',
+            timestamp: Date.now() - 12000,
+        });
+
+        harness.document.querySelector('[role="log"]').insertAdjacentHTML(
+            'beforeend',
+            `
+                <article data-message-author-role="assistant">
+                    <div data-testid="message-content">
+                        <p>Using React state is the simplest fix.</p>
+                    </div>
+                </article>
+            `
+        );
+
+        harness.hooks.evaluateCapture();
+        settleChatGPTCapture(harness, { idleMs: 7000 });
+
+        expect(harness.sentMessages).toHaveLength(1);
+        expect(normalizeText(harness.sentMessages[0].content)).toBe(
+            'Using React state is the simplest fix.'
+        );
+    });
+
+    test('ChatGPT does not emit sources-only blocks as final answers', () => {
+        const harness = loadCaptureHarness({
+            provider: 'chatgpt',
+            html: readFixture('capture', 'chatgpt', 'reference-heavy-answer.html'),
+        });
+
+        harness.hooks.armCapture({
+            promptId: 'chatgpt_sources_only',
+            sessionId: 'chatgpt_sources_only_session',
+            turnIndex: 1,
+            agentId: 'agent_chatgpt_sources',
+            timestamp: Date.now() - 20000,
+        });
+
+        harness.document.querySelector('[role="log"]').insertAdjacentHTML(
+            'beforeend',
+            `
+                <article data-message-author-role="assistant">
+                    <div data-testid="message-content">
+                        <p>Sources</p>
+                        <p>example.com</p>
+                        <p>openai.com</p>
+                        <p>maps.google.com</p>
+                    </div>
+                </article>
+            `
+        );
+
+        harness.hooks.evaluateCapture();
+        settleChatGPTCapture(harness);
+
+        expect(harness.sentMessages).toHaveLength(0);
+        expect(harness.hooks.captureState.active).toBe(true);
+    });
+
+    test('ChatGPT waits while tool status remains visible beside the final answer', () => {
+        const harness = loadCaptureHarness({
+            provider: 'chatgpt',
+            html: readFixture('capture', 'chatgpt', 'reference-heavy-answer.html'),
+        });
+
+        harness.hooks.armCapture({
+            promptId: 'chatgpt_answer_with_visible_status',
+            sessionId: 'chatgpt_answer_with_visible_status_session',
+            turnIndex: 1,
+            agentId: 'agent_chatgpt_status_visible',
+            timestamp: Date.now() - 20000,
+        });
+
+        harness.document.querySelector('[role="log"]').insertAdjacentHTML(
+            'beforeend',
+            `
+                <article data-message-author-role="assistant">
+                    <div role="status" data-testid="web-search-status">
+                        Searching the web for current details
+                    </div>
+                    <div data-testid="message-content">
+                        <p>Final answer should wait until the status disappears.</p>
+                        <p>The emitted content should not include the status text.</p>
+                    </div>
+                </article>
+            `
+        );
+
+        harness.hooks.evaluateCapture();
+        harness.hooks.captureState.lastTextChangeAt = Date.now() - 20000;
+        harness.hooks.evaluateCapture();
+        expect(harness.sentMessages).toHaveLength(0);
+
+        harness.document.querySelector('[data-testid="web-search-status"]')?.remove();
+        settleChatGPTCapture(harness);
+
+        expect(harness.sentMessages).toHaveLength(1);
+        const captured = normalizeText(harness.sentMessages[0].content);
+        expect(captured).toContain('Final answer should wait until the status disappears.');
+        expect(captured).not.toContain('Searching the web');
+        expect(harness.sentMessages[0].contentHtml).not.toContain('web-search-status');
+    });
+
+    test('Parallel ChatGPT captures stay bound to their own agent ids', () => {
+        const first = loadCaptureHarness({
+            provider: 'chatgpt',
+            html: readFixture('capture', 'chatgpt', 'reference-heavy-answer.html'),
+        });
+        const second = loadCaptureHarness({
+            provider: 'chatgpt',
+            html: readFixture('capture', 'chatgpt', 'reference-heavy-answer.html'),
+        });
+        const sessionId = 'parallel_two_chatgpt_session';
+        const cases = [
+            {
+                harness: first,
+                agentId: 'agent_chatgpt_a',
+                promptId: `${sessionId}:parallel:agent_chatgpt_a`,
+                answer: 'Agent A final parallel answer should stay with the first ChatGPT profile.',
+            },
+            {
+                harness: second,
+                agentId: 'agent_chatgpt_b',
+                promptId: `${sessionId}:parallel:agent_chatgpt_b`,
+                answer: 'Agent B final parallel answer should stay with the second ChatGPT profile.',
+            },
+        ];
+
+        for (const item of cases) {
+            item.harness.hooks.armCapture({
+                promptId: item.promptId,
+                sessionId,
+                turnIndex: 1,
+                agentId: item.agentId,
+                timestamp: Date.now() - 12000,
+            });
+            item.harness.document.querySelector('[role="log"]').insertAdjacentHTML(
+                'beforeend',
+                `
+                    <article data-message-author-role="assistant">
+                        <div data-testid="message-content">
+                            <p>${item.answer}</p>
+                            <p>The capture must not reuse another tab's partial response.</p>
+                        </div>
+                    </article>
+                `
+            );
+            item.harness.hooks.evaluateCapture();
+            settleChatGPTCapture(item.harness, { idleMs: 7000 });
+        }
+
+        expect(first.sentMessages).toHaveLength(1);
+        expect(second.sentMessages).toHaveLength(1);
+        expect(first.sentMessages[0].agentId).toBe('agent_chatgpt_a');
+        expect(second.sentMessages[0].agentId).toBe('agent_chatgpt_b');
+        expect(first.sentMessages[0].promptId).toBe(`${sessionId}:parallel:agent_chatgpt_a`);
+        expect(second.sentMessages[0].promptId).toBe(`${sessionId}:parallel:agent_chatgpt_b`);
+        expect(normalizeText(first.sentMessages[0].content)).toContain('Agent A final parallel');
+        expect(normalizeText(second.sentMessages[0].content)).toContain('Agent B final parallel');
     });
 
     test('Claude captures long answers with citations while stripping toolbar noise from text and html', () => {
@@ -460,8 +805,7 @@ describe('Content capture fixtures', () => {
         expect(harness.hooks.captureState.active).toBe(true);
 
         harness.document.querySelector('[data-testid="stop-button"]')?.remove();
-        harness.hooks.captureState.lastTextChangeAt = Date.now() - 7000;
-        harness.hooks.evaluateCapture();
+        settleChatGPTCapture(harness);
 
         expect(harness.sentMessages).toHaveLength(1);
         expect(harness.sentMessages[0].type).toBe('MLC_RESPONSE_CAPTURED');

@@ -6,7 +6,7 @@
 
 Compare and debate ChatGPT, Claude, Gemini, and Grok from one extension workspace, directly in your web browser.
 
-Inspired by the LLM Council idea, Multi Agent Council runs through vendor websites in your browser instead of through APIs or a relay backend. That means no API spend, no extra middleware, and no giving up the native provider experience, attachments, or current web features.
+Inspired by the LLM Council idea, Multi Agent Council runs through vendor websites in your browser instead of through APIs or a relay backend. That means no API spend, no extra middleware, no giving up the native provider experience, and support for provider-native features like file attachments where automation is available.
 
 ## What It Does
 
@@ -16,8 +16,8 @@ Multi Agent Council is a Chrome extension for cross-checking important questions
 - `Compare`: send the same prompt to multiple agents in parallel to see agreement and disagreement.
 - `Debate`: run multi-round round-robin exchanges so models can challenge and refine each other.
 - `Tab Profiles`: use multiple tabs from the same provider when you want duplicate agents or separate contexts.
-- `Attachments`: supported with provider-specific upload behavior.
-- `Local history`: chats stay on-device, with optional passphrase protection.
+- `Attachments`: append files in the side panel and send them to supported provider chats with provider-specific upload automation.
+- `Local encrypted history`: chats stay on-device, and protected chats can be encrypted locally with a passphrase.
 
 On Chrome, clicking the extension icon opens the side panel. On Arc, the extension tries the side panel first and falls back to an extension tab when the panel does not materialize. There is no popup UI.
 
@@ -45,9 +45,10 @@ Multi Agent Council helps you compare perspectives and ask better questions. It 
 
 - `No API spend`: use the provider tabs and accounts you already have.
 - `Native provider UX`: keep attachments, model pickers, reasoning modes, and other vendor-specific web features.
+- `File attachments`: add files once in the side panel; supported providers receive them in their own chat UI when automation is available.
 - `No relay backend`: prompts stay between your browser session and the provider websites.
 - `Real multi-tab workflows`: run multiple profiles of the same provider when you want duplicate agents or separate contexts.
-- `Local-first history`: chats stay on-device, with optional passphrase protection.
+- `Passphrase-protected history`: protected chats are encrypted locally at rest, and the unlock key lives only in browser session storage.
 
 ## Before You Install From Source
 
@@ -112,48 +113,7 @@ What you are seeing:
 - `New tab` creates an extra tab profile for that provider.
 - The composer stays disabled until the selected route is valid and connected.
 
-## How To Use It
 
-### 1. Choose your route
-
-Open the route builder from the `Select agents...` pill or the `Choose agents` button.
-
-Route types:
-
-- `Single`: one provider tab.
-- `Compare`: two or more providers in parallel.
-- `Debate`: two or more agents taking turns for the configured number of rounds.
-
-### 2. Bootstrap provider tabs
-
-For the fastest start, click `Connect all`.
-
-That does two things:
-
-1. It seeds the route with one default agent per provider.
-2. It opens or reconnects the provider tabs those agents need.
-
-If you want two agents from the same provider, use `New tab` for that provider. Each agent must have its own tab profile.
-
-### 3. Set the mode and rounds
-
-Once agents exist, you can switch between `Parallel` and `Debate`. Debate also exposes the `Rounds` field.
-
-![Route builder after Connect all](docs/assets/store-screenshots/02-route-builder-debate.png)
-
-### 4. Send the prompt
-
-Type your prompt and click `Send`.
-
-What happens next depends on the route:
-
-- `Single`: one provider answers.
-- `Compare`: all selected agents answer independently.
-- `Debate`: agents answer in round-robin order and the side panel shows one linear transcript.
-
-### 5. Continue the same chat
-
-Send another message in the same chat to continue the conversation. The extension reuses the existing transcript and prior run settings where appropriate.
 
 ## Real Usage Capture
 
@@ -188,8 +148,9 @@ The capture command reuses the same dedicated profile and waits for the real ext
 
 The settings drawer contains:
 
-- Passphrase protection for new chats.
-- Locking for protected chats.
+- Passphrase setup for protected chats.
+- Local encryption for protected history at rest.
+- Locking for protected chats; unlock keys live only in browser session storage.
 - Prompt template editing for debate/direct flows.
 - Danger-zone actions for resetting or clearing local history.
 
@@ -208,6 +169,7 @@ Attachment notes:
 
 - Attachments are stored in memory for the active session only.
 - Attachments are delivered once per agent per session.
+- Supported providers receive files through their own chat UI, not through a separate file API.
 - If a provider requires manual upload, the UI warns you before the run proceeds.
 
 ## Troubleshooting
@@ -257,7 +219,8 @@ npm run docs:screenshots
 ## Privacy And Security
 
 - Chats are stored locally on your device.
-- Protected chats can be encrypted at rest with a passphrase.
+- Protected chats can be encrypted locally at rest with a passphrase.
+- Unlock keys are kept in browser session storage and cleared when the browser session resets or when you lock protected chats.
 - The project does not run a prompt-relay backend.
 - Provider interactions happen through the provider websites in your browser session.
 

@@ -36,11 +36,11 @@ Still required before submission:
 
 ### Short description
 
-`Compare multiple AI models in Chrome to cross-check important questions across your ChatGPT, Claude, Gemini, and Grok tabs.`
+`Compare AI models in Chrome, send files to provider chats, and protect local history with a passphrase.`
 
 ### Long description
 
-`Multi Agent Council is a Chrome side-panel extension for comparing and debating answers across ChatGPT, Claude, Gemini, and Grok directly in the browser tabs you already use. Inspired by the LLM Council idea, it works through vendor websites instead of APIs, so you keep the native provider experience, current web features, attachments, and model tooling without paying API costs or routing prompts through a relay backend.`
+`Multi Agent Council is a Chrome side-panel extension for comparing and debating answers across ChatGPT, Claude, Gemini, and Grok directly in the browser tabs you already use. Inspired by the LLM Council idea, it works through vendor websites instead of APIs, so you keep the native provider experience, current web features, file attachments, and model tooling without paying API costs or routing prompts through a relay backend.`
 
 `This extension is built for questions where the answer matters. LLMs are often better at challenging, correcting, and refining answers than at getting everything right on the first pass. Running multiple models with different strengths, retrieval behavior, style biases, and blind spots gives you a clearer map of where answers agree, where they disagree, and what still needs verification.`
 
@@ -49,8 +49,12 @@ Feature highlights:
 - `Compare`: run the same prompt across multiple AI models in parallel.
 - `Debate`: let models challenge and improve each other's answers across rounds.
 - `Tab Profiles`: use multiple tabs from the same provider for duplicate agents or independent contexts.
-- `Attachments`: send files with provider-specific browser automation.
-- `Local-first history`: keep chats on-device with optional passphrase protection.
+- `Attachments`: append files in the side panel and send them to supported provider chats with provider-specific browser automation.
+- `Passphrase-protected history`: keep chats on-device and encrypt protected local history at rest with a passphrase.
+
+Attachment behavior is provider-specific. ChatGPT and Claude support best-effort auto-upload, Grok uses best-effort upload with a text-only fallback if automation is blocked, and Gemini currently receives text-only with a manual-upload warning.
+
+Protected chat history is encrypted locally at rest when passphrase protection is enabled. Provider conversations still happen on the vendor websites in your browser session.
 
 Use cases:
 

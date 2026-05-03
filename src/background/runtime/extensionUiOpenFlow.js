@@ -3,8 +3,8 @@
 
     const DEFAULT_UI_PATH = 'sidepanel.html';
     const SIDE_PANEL_CONTEXT_TYPE = 'SIDE_PANEL';
-    const DEFAULT_CONTEXT_POLL_ATTEMPTS = 3;
-    const DEFAULT_CONTEXT_POLL_DELAY_MS = 150;
+    const DEFAULT_CONTEXT_POLL_ATTEMPTS = 6;
+    const DEFAULT_CONTEXT_POLL_DELAY_MS = 250;
 
     function createNoopLogger() {
         return {
@@ -51,6 +51,8 @@
         const windows = options.windows || null;
         const timers = options.timers || globalScope;
         const logger = normalizeLogger(options.logger);
+        const browserInfo = options.browserInfo || options.navigator || globalScope.navigator || null;
+        const arcBrowserOverride = options.isArcBrowser;
         const uiPath =
             typeof options.uiPath === 'string' && options.uiPath.trim()
                 ? options.uiPath.trim()
@@ -69,6 +71,31 @@
                 throw new Error('Extension runtime URL helper is unavailable.');
             }
             return runtime.getURL(uiPath);
+        }
+
+        function isLikelyArcBrowser() {
+            if (typeof arcBrowserOverride === 'function') {
+                return Boolean(arcBrowserOverride({ browserInfo }));
+            }
+            if (typeof arcBrowserOverride === 'boolean') {
+                return arcBrowserOverride;
+            }
+
+            try {
+                const userAgent = String(browserInfo?.userAgent || '');
+                if (/\bArc\/\d+/i.test(userAgent)) return true;
+
+                const brands = browserInfo?.userAgentData?.brands;
+                return (
+                    Array.isArray(brands) &&
+                    brands.some((brand) => /\barc\b/i.test(String(brand?.brand || '')))
+                );
+            } catch (error) {
+                logger.warn('extension_ui_arc_detection_failed', {
+                    error: error?.message || String(error),
+                });
+                return false;
+            }
         }
 
         async function resolveTargetWindowId(actionTab) {
@@ -114,7 +141,7 @@
                 }
                 return matching.some(
                     (context) =>
-                        isValidWindowId(context?.windowId) && context.windowId === windowId
+                        !isValidWindowId(context?.windowId) || context.windowId === windowId
                 );
             } catch (error) {
                 logger.warn('extension_ui_context_query_failed', {
@@ -210,43 +237,91 @@
             }
         }
 
-        async function openExtensionUiFromAction(actionTab) {
-            const windowId = await resolveTargetWindowId(actionTab);
-
-            if (sidePanel && typeof sidePanel.open === 'function' && isValidWindowId(windowId)) {
+        async function tryOpenSidePanel(windowId, options = {}) {
+            const allowMissingWindow = options.allowMissingWindow === true;
+            if (
+                sidePanel &&
+                typeof sidePanel.open === 'function' &&
+                (isValidWindowId(windowId) || allowMissingWindow)
+            ) {
                 try {
-                    await sidePanel.open({ windowId });
+                    // Must be called before any awaited work in the action-click path; Chrome
+                    // requires sidePanel.open() to run directly from a user gesture.
+                    await sidePanel.open(isValidWindowId(windowId) ? { windowId } : {});
                     const sidePanelReady = await waitForSidePanelContext(windowId);
                     if (sidePanelReady !== false) {
                         return {
                             ok: true,
                             mode: 'side_panel',
                             action: 'opened',
-                            windowId,
+                            windowId: isValidWindowId(windowId) ? windowId : null,
                             verified: sidePanelReady === true,
                         };
                     }
                     logger.warn('extension_ui_side_panel_context_missing', { windowId });
+                    return {
+                        ok: true,
+                        mode: 'side_panel',
+                        action: 'opened',
+                        windowId: isValidWindowId(windowId) ? windowId : null,
+                        verified: false,
+                    };
                 } catch (error) {
                     logger.warn('extension_ui_side_panel_open_failed', {
                         windowId,
                         error: error?.message || String(error),
                     });
                 }
-            } else if (sidePanel && typeof sidePanel.open === 'function') {
+            }
+            return null;
+        }
+
+        async function openExtensionUiFromAction(actionTab) {
+            const actionWindowId = isValidWindowId(actionTab?.windowId) ? actionTab.windowId : null;
+
+            if (isLikelyArcBrowser()) {
+                const windowId = isValidWindowId(actionWindowId)
+                    ? actionWindowId
+                    : await resolveTargetWindowId(actionTab);
+                logger.info('extension_ui_arc_tab_fallback', {
+                    windowId: isValidWindowId(windowId) ? windowId : null,
+                });
+                return focusOrOpenExtensionUiTab(windowId);
+            }
+
+            const immediateSidePanelResult = await tryOpenSidePanel(actionWindowId, {
+                allowMissingWindow: true,
+            });
+            if (immediateSidePanelResult) {
+                return immediateSidePanelResult;
+            }
+
+            if (isValidWindowId(actionWindowId)) {
+                return focusOrOpenExtensionUiTab(actionWindowId);
+            }
+
+            const windowId = await resolveTargetWindowId(actionTab);
+
+            if (sidePanel && typeof sidePanel.open === 'function' && !isValidWindowId(windowId)) {
                 logger.warn('extension_ui_side_panel_window_unresolved', {
                     hasActionTab: Boolean(actionTab),
                 });
             }
 
+            const sidePanelResult = await tryOpenSidePanel(windowId);
+            if (sidePanelResult) {
+                return sidePanelResult;
+            }
             return focusOrOpenExtensionUiTab(windowId);
         }
 
         return {
             getExtensionUiUrl,
             resolveTargetWindowId,
+            isLikelyArcBrowser,
             hasOpenSidePanelContext,
             waitForSidePanelContext,
+            tryOpenSidePanel,
             focusOrOpenExtensionUiTab,
             setManualActionClickBehavior,
             openExtensionUiFromAction,

@@ -73,6 +73,14 @@
         baselineBestSignature: '',
         baselineAssistantCount: null,
         baselineAssistantIndex: null,
+        chatgptSawActivity: false,
+        chatgptLastActivityAt: 0,
+        chatgptLastActivityReason: '',
+        chatgptToolActivitySeen: false,
+        chatgptIdleSince: 0,
+        chatgptFinalTextSignature: '',
+        chatgptFinalTextStableCount: 0,
+        chatgptFinalTextStableSince: 0,
         hasNewText: false,
         sawGenerating: false,
         lastTextChangeAt: 0,
@@ -249,6 +257,14 @@
                     ? Math.max(0, baselineIndex + 1)
                     : getChatGPTConversationAssistantNodes().length;
         }
+        captureState.chatgptSawActivity = false;
+        captureState.chatgptLastActivityAt = 0;
+        captureState.chatgptLastActivityReason = '';
+        captureState.chatgptToolActivitySeen = false;
+        captureState.chatgptIdleSince = 0;
+        captureState.chatgptFinalTextSignature = '';
+        captureState.chatgptFinalTextStableCount = 0;
+        captureState.chatgptFinalTextStableSince = 0;
         captureState.hasNewText = false;
         captureState.sawGenerating = false;
         captureState.lastTextChangeAt = captureState.startedAt;
@@ -362,17 +378,20 @@
 
     function findSendControlForReadiness() {
         if (isGrok) {
-            return (
-                findGrokControlButton('send', { allowDisabled: true, includeDocument: true }) ||
-                findVisibleElement(
-                    [
-                        'button[aria-label*="send" i]',
-                        'button[title*="send" i]',
-                        'button[type="submit"]',
-                    ],
-                    { allowDisabled: true }
-                )
+            const direct = findGrokControlButton('send', {
+                allowDisabled: false,
+                includeDocument: true,
+            });
+            if (direct) return direct;
+            const fallback = findVisibleElement(
+                [
+                    'button[aria-label*="send" i]',
+                    'button[title*="send" i]',
+                    'button[type="submit"]',
+                ],
+                { allowDisabled: false }
             );
+            return fallback && classifyGrokControlElement(fallback) === 'send' ? fallback : null;
         }
 
         const selectors = isChatGPT
@@ -400,8 +419,9 @@
             : null;
 
         return (
-            (composerRoot ? findVisibleElement(selectors, { root: composerRoot }) : null) ||
-            findVisibleElement(selectors)
+            (composerRoot
+                ? findVisibleElement(selectors, { root: composerRoot, allowDisabled: false })
+                : null) || findVisibleElement(selectors, { allowDisabled: false })
         );
     }
 
@@ -471,7 +491,7 @@
             const sendControl = findSendControlForReadiness();
             const hasSendControl = Boolean(sendControl && isElementVisible(sendControl));
 
-            if (hasInput || hasSendControl) {
+            if (hasInput) {
                 return createReadinessResult({
                     ready: true,
                     hasInput,
@@ -507,11 +527,72 @@
         }
     }
 
-    function isChatGPTGenerating() {
+    function looksLikeChatGPTToolStatusText(text) {
+        if (CaptureUtils && typeof CaptureUtils.looksLikeToolStatusText === 'function') {
+            return CaptureUtils.looksLikeToolStatusText(text, { provider: 'chatgpt' });
+        }
+        const normalized = String(text || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+        if (!normalized) return false;
+        const wordCount = normalized.split(/\s+/).filter(Boolean).length;
+        if (wordCount > 28) return false;
+        if ((normalized.match(/[.!?](?:\s|$)/g) || []).length >= 2) return false;
+        return /\b(searching|browse|browsing|looking up|checking|opening|reading|fetching|thinking|reasoning|web|internet|maps?|tool)\b/.test(
+            normalized
+        );
+    }
+
+    function looksLikeChatGPTActiveToolStatusText(text) {
+        if (!looksLikeChatGPTToolStatusText(text)) return false;
+        const normalized = String(text || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+        return /\b(searching|browsing|looking up|checking|opening|reading|fetching|visiting|viewing|using|thinking|reasoning|working|analyzing|recherche en cours|je cherche|je recherche)\b/.test(
+            normalized
+        );
+    }
+
+    function getChatGPTActivityDescriptor(node) {
+        if (!node || node.nodeType !== 1) return '';
+        const parts = [
+            getElementAttributeValue(node, 'role'),
+            getElementAttributeValue(node, 'aria-label'),
+            getElementAttributeValue(node, 'title'),
+            getElementAttributeValue(node, 'data-testid'),
+            getElementAttributeValue(node, 'data-state'),
+            getElementAttributeValue(node, 'data-status'),
+            String(node.className || '').toLowerCase(),
+        ];
+        return parts.filter(Boolean).join(' ');
+    }
+
+    function getChatGPTActivityScopeRoots(composerRoot) {
+        const roots = [];
+        for (const root of findChatGPTConversationRoots()) {
+            if (root && !roots.includes(root)) roots.push(root);
+        }
+        if (composerRoot && !roots.includes(composerRoot)) roots.push(composerRoot);
+        return roots.length ? roots : [document.body];
+    }
+
+    function isChatGPTScopedActivityNode(node, roots, composerRoot) {
+        if (!node) return false;
+        if (hasChatGPTReflectionAncestor(node)) return false;
+        if (composerRoot && (composerRoot.contains(node) || node.contains(composerRoot))) {
+            return true;
+        }
+        return roots.some((root) => root && root.contains(node));
+    }
+
+    function getChatGPTActivityState() {
         const inputEl = findInput({ silent: true });
         const composerRoot = inputEl
             ? inputEl.closest('form') || inputEl.closest('[role="form"]') || inputEl.parentElement
             : null;
+        const roots = getChatGPTActivityScopeRoots(composerRoot);
 
         const strictStopSelector = [
             'button[data-testid="stop-button"]',
@@ -538,14 +619,118 @@
 
         if (composerRoot) {
             const stopButton = composerRoot.querySelector(looseStopSelector);
-            if (stopButton && isElementVisible(stopButton)) return true;
+            if (stopButton && isElementVisible(stopButton)) {
+                return { active: true, reason: 'stop_button', toolActivity: false };
+            }
         }
 
         const stopCandidates = Array.from(document.querySelectorAll(strictStopSelector));
         for (const candidate of stopCandidates) {
             if (!isElementVisible(candidate)) continue;
-            if (composerRoot && composerRoot.contains(candidate)) return true;
-            if (isBottomViewportControl(candidate)) return true;
+            if (composerRoot && composerRoot.contains(candidate)) {
+                return { active: true, reason: 'stop_button', toolActivity: false };
+            }
+            if (isBottomViewportControl(candidate)) {
+                return { active: true, reason: 'stop_button', toolActivity: false };
+            }
+        }
+
+        const assistantNodes = getChatGPTConversationAssistantNodes();
+        const baselineCount = Number.isFinite(captureState.baselineAssistantCount)
+            ? captureState.baselineAssistantCount
+            : null;
+        const hasNewAssistantAfterBaseline =
+            baselineCount !== null && assistantNodes.length > baselineCount;
+        const activityStart =
+            baselineCount !== null
+                ? hasNewAssistantAfterBaseline
+                    ? baselineCount
+                    : Math.max(0, Math.min(baselineCount - 1, assistantNodes.length - 1))
+                : Math.max(0, assistantNodes.length - 3);
+        const activityRoots = assistantNodes.slice(activityStart).filter(Boolean);
+        if (composerRoot) activityRoots.push(composerRoot);
+        const queryActivityNodes = (root, selector) => {
+            const nodes = [];
+            if (!root) return nodes;
+            try {
+                if (root.matches?.(selector)) nodes.push(root);
+            } catch (error) {
+                // ignore selector mismatch on unusual nodes
+            }
+            try {
+                nodes.push(...Array.from(root.querySelectorAll(selector)));
+            } catch (error) {
+                // ignore
+            }
+            return nodes;
+        };
+
+        const progressSelector = [
+            '[role="progressbar"]',
+            '[aria-busy="true"]',
+            '[data-testid*="spinner" i]',
+            '[data-testid*="loading" i]',
+            '[data-testid*="progress" i]',
+            '[class*="spinner" i]',
+            '[class*="loading" i]',
+            '[class*="animate-spin" i]',
+        ].join(', ');
+        for (const root of activityRoots) {
+            const progressNodes = queryActivityNodes(root, progressSelector);
+            for (const node of progressNodes.slice(0, 40)) {
+                if (!isElementVisible(node)) continue;
+                if (!isChatGPTScopedActivityNode(node, roots, composerRoot)) continue;
+                const descriptor = getChatGPTActivityDescriptor(node);
+                const toolActivity =
+                    /\b(search|browse|browser|web|tool|map|maps|reason|thinking|research|canvas)\b/.test(
+                        descriptor
+                    ) || looksLikeChatGPTActiveToolStatusText(getTrimmedText(node));
+                return {
+                    active: true,
+                    reason: toolActivity ? 'tool_progress' : 'progress',
+                    toolActivity,
+                };
+            }
+        }
+
+        const statusSelector = [
+            '[role="status"]',
+            '[aria-live]',
+            '[data-testid*="search" i]',
+            '[data-testid*="browse" i]',
+            '[data-testid*="browser" i]',
+            '[data-testid*="tool" i]',
+            '[data-testid*="map" i]',
+            '[data-testid*="reason" i]',
+            '[data-testid*="thinking" i]',
+            '[class*="search" i]',
+            '[class*="browse" i]',
+            '[class*="tool" i]',
+            '[class*="map" i]',
+            '[class*="thinking" i]',
+        ].join(', ');
+        for (const root of activityRoots) {
+            const statusNodes = queryActivityNodes(root, statusSelector);
+            for (const node of statusNodes.slice(-60)) {
+                if (!isElementVisible(node)) continue;
+                if (!isChatGPTScopedActivityNode(node, roots, composerRoot)) continue;
+                const descriptor = getChatGPTActivityDescriptor(node);
+                const text = getTrimmedText(node);
+                const descriptorLooksActive =
+                    /\b(searching|browsing|loading|progress|running|busy|thinking|reasoning|tool-call|fetching|researching)\b/.test(
+                        descriptor
+                    ) || getElementAttributeValue(node, 'aria-busy') === 'true';
+                if (descriptorLooksActive || looksLikeChatGPTActiveToolStatusText(text)) {
+                    return { active: true, reason: 'tool_status', toolActivity: true };
+                }
+            }
+        }
+
+        for (let i = activityStart; i < assistantNodes.length; i++) {
+            const text = getTrimmedText(assistantNodes[i]);
+            if (looksLikeChatGPTActiveToolStatusText(text)) {
+                return { active: true, reason: 'assistant_tool_status', toolActivity: true };
+            }
         }
 
         // Fallback: look for a visible button whose text indicates generation is running.
@@ -555,9 +740,15 @@
             if (!isElementVisible(button)) continue;
             const label = (button.textContent || '').trim().toLowerCase();
             if (!label) continue;
-            if (label === 'stop' || label === 'arrêter' || label === 'annuler') return true;
+            if (label === 'stop' || label === 'arrêter' || label === 'annuler') {
+                return { active: true, reason: 'stop_button_text', toolActivity: false };
+            }
         }
-        return false;
+        return { active: false, reason: 'idle', toolActivity: false };
+    }
+
+    function isChatGPTGenerating() {
+        return getChatGPTActivityState().active;
     }
 
     function isGeminiGenerating() {
@@ -622,12 +813,22 @@
         ];
         if (stopPatterns.some((re) => re.test(label))) return 'stop';
 
-        const voicePatterns = [/\bpasser en mode vocal\b/i, /\bmode vocal\b/i, /\bvoice mode\b/i];
-        if (voicePatterns.some((re) => re.test(label))) return 'voice';
-
         const sendPatterns = [/\bsend\b/i, /\bsubmit\b/i, /\bsoumettre\b/i, /\benvoyer\b/i];
         const typeAttr = normalizeGrokControlLabel(element.getAttribute?.('type') || '');
         if (sendPatterns.some((re) => re.test(label)) || typeAttr === 'submit') return 'send';
+
+        const voicePatterns = [
+            /\bpasser en mode vocal\b/i,
+            /\bmode vocal\b/i,
+            /\bvoice mode\b/i,
+            /\bvoice\b/i,
+            /\bmicrophone\b/i,
+            /\bmic\b/i,
+            /\bdictate\b/i,
+            /\bdicter\b/i,
+            /\bparler\b/i,
+        ];
+        if (voicePatterns.some((re) => re.test(label))) return 'voice';
         return 'unknown';
     }
 
@@ -848,11 +1049,39 @@
             '[role="tooltip"]',
             '[contenteditable="true"]',
         ];
+        if (options.provider === 'chatgpt') {
+            removeSelectors.push(
+                '[role="status"]',
+                '[role="progressbar"]',
+                '[aria-live]',
+                '[aria-busy="true"]',
+                '[data-testid*="search" i]',
+                '[data-testid*="browse" i]',
+                '[data-testid*="browser" i]',
+                '[data-testid*="tool" i]',
+                '[data-testid*="map" i]',
+                '[data-testid*="reason" i]',
+                '[data-testid*="thinking" i]',
+                '[data-testid*="loading" i]',
+                '[data-testid*="progress" i]',
+                '[class*="search" i]',
+                '[class*="browse" i]',
+                '[class*="tool" i]',
+                '[class*="thinking" i]',
+                '[class*="loading" i]',
+                '[class*="progress" i]',
+                '[class*="spinner" i]'
+            );
+        }
         clone.querySelectorAll(removeSelectors.join(',')).forEach((el) => el.remove());
 
         const toRemove = [];
         clone.querySelectorAll('*').forEach((el) => {
-            if (looksLikeUiChromeElement(el, options)) {
+            if (
+                looksLikeUiChromeElement(el, options) ||
+                (options.provider === 'chatgpt' &&
+                    looksLikeChatGPTActiveToolStatusText(getTrimmedText(el)))
+            ) {
                 toRemove.push(el);
             }
         });
@@ -1305,10 +1534,12 @@
 
         const analysisByIndex = new Map();
         const referenceByIndex = new Map();
+        const toolStatusByIndex = new Map();
         if (Array.isArray(ranking.ranked)) {
             ranking.ranked.forEach((item) => {
                 analysisByIndex.set(item.index, item.analysis || null);
                 referenceByIndex.set(item.index, Boolean(item.isReferenceList));
+                toolStatusByIndex.set(item.index, Boolean(item.isToolStatus));
             });
         }
 
@@ -1366,6 +1597,52 @@
             if (referenceByIndex.has(index)) return referenceByIndex.get(index);
             return looksLikeChatGPTSourcesOnly(texts[index]);
         };
+        const isToolStatusCandidate = (index) => {
+            if (toolStatusByIndex.has(index)) return toolStatusByIndex.get(index);
+            return looksLikeChatGPTToolStatusText(texts[index]);
+        };
+
+        const eligibleAnswerIndices = (Array.isArray(ranking.ranked) && ranking.ranked.length
+            ? ranking.ranked.map((item) => item.index)
+            : texts.map((_, index) => index)
+        ).filter((index) => !isToolStatusCandidate(index) && !isReferenceCandidate(index));
+
+        if (eligibleAnswerIndices.length === 0) {
+            const meta = {
+                provider: 'chatgpt',
+                assistantCount: assistantNodes.length,
+                baselineAssistantCount: captureState.baselineAssistantCount,
+                rootsScanned: roots.map((root) => root.assistantIndex),
+                candidateCount: texts.length,
+                statusCandidateCount: texts.filter((_, index) => isToolStatusCandidate(index))
+                    .length,
+                referenceOnlyCandidateCount: texts.filter((_, index) => isReferenceCandidate(index))
+                    .length,
+                bestIndex: -1,
+                rankingBestIndex,
+                bestIsToolStatus: texts.some((_, index) => isToolStatusCandidate(index)),
+                bestIsReferenceList: texts.some((_, index) => isReferenceCandidate(index)),
+                finalWordCount: 0,
+                finalTextLength: 0,
+                rankingTop: Array.isArray(ranking.ranked)
+                    ? ranking.ranked.slice(0, 6).map((r) => ({
+                          index: r.index,
+                          score: r.score,
+                          isReferenceList: r.isReferenceList,
+                          isToolStatus: r.isToolStatus,
+                          wordCount: r.analysis?.wordCount,
+                          lineCount: r.analysis?.lineCount,
+                          origin: candidates[r.index]?.origin || null,
+                      }))
+                    : [],
+            };
+            captureDebug('extractChatGPTResponse skipped tool/status-only candidates', meta);
+            return options.withMeta ? { text: '', html: '', meta } : { text: '' };
+        }
+
+        if (isToolStatusCandidate(chosenIndex)) {
+            chosenIndex = eligibleAnswerIndices[0];
+        }
 
         // Guardrail: avoid selecting sources-only blocks when a real answer exists.
         const bestIsReference = isReferenceCandidate(chosenIndex);
@@ -1373,6 +1650,7 @@
             const alt = ranking.ranked.find((item) => {
                 if (item.index === chosenIndex) return false;
                 if (item.isReferenceList) return false;
+                if (isToolStatusCandidate(item.index)) return false;
                 const analysis = item.analysis || {};
                 const wordCount = analysis.wordCount || 0;
                 const sentenceEndPunctCount = analysis.sentenceEndPunctCount || 0;
@@ -1397,6 +1675,7 @@
             let bestAltWordCount = chosenWordCount;
             for (let i = 0; i < texts.length; i++) {
                 if (i === chosenIndex) continue;
+                if (isToolStatusCandidate(i)) continue;
                 const wc = getWordCount(i);
                 if (wc <= bestAltWordCount + 10) continue;
                 if (isReferenceCandidate(i) && !isReferenceCandidate(chosenIndex)) continue;
@@ -1417,6 +1696,7 @@
             const chosenWc = getWordCount(chosenIndex);
             for (let i = 0; i < texts.length; i++) {
                 if (i === chosenIndex) continue;
+                if (isToolStatusCandidate(i)) continue;
                 const otherNormalized = normalizeCaptureCandidateText(texts[i]);
                 if (!otherNormalized) continue;
                 if (otherNormalized === chosenNormalized) continue;
@@ -1429,6 +1709,43 @@
             }
             if (substringAltIndex !== null) {
                 chosenIndex = substringAltIndex;
+            }
+        }
+
+        const latestSubstantive = candidates
+            .map((candidate, index) => ({
+                index,
+                assistantIndex: Number.isFinite(candidate.assistantIndex)
+                    ? candidate.assistantIndex
+                    : null,
+            }))
+            .filter((entry) => {
+                if (entry.assistantIndex === null) return false;
+                if (isToolStatusCandidate(entry.index) || isReferenceCandidate(entry.index))
+                    return false;
+                const analysis = getAnalysisForIndex(entry.index) || {};
+                const wordCount = Number.isFinite(analysis.wordCount) ? analysis.wordCount : 0;
+                const sentenceEndPunctCount = Number.isFinite(analysis.sentenceEndPunctCount)
+                    ? analysis.sentenceEndPunctCount
+                    : 0;
+                return wordCount >= 12 || sentenceEndPunctCount >= 1 || analysis.codeFenceCount >= 1;
+            })
+            .sort((a, b) => a.assistantIndex - b.assistantIndex || a.index - b.index)
+            .pop();
+        if (
+            latestSubstantive &&
+            latestSubstantive.index !== chosenIndex &&
+            !isReferenceCandidate(chosenIndex)
+        ) {
+            const chosenCandidate = candidates[chosenIndex] || null;
+            const chosenAssistantIndex = Number.isFinite(chosenCandidate?.assistantIndex)
+                ? chosenCandidate.assistantIndex
+                : null;
+            if (
+                chosenAssistantIndex === null ||
+                latestSubstantive.assistantIndex >= chosenAssistantIndex
+            ) {
+                chosenIndex = latestSubstantive.index;
             }
         }
 
@@ -1489,6 +1806,7 @@
 
                 const normalized = normalizeCaptureCandidateText(entry.text || '');
                 if (!normalized || normalizedSet.has(normalized)) continue;
+                if (isToolStatusCandidate(entry.index)) continue;
 
                 const analysis = getAnalysisForIndex(entry.index) || {};
                 const urlishRatio = getUrlishRatio(entry.index);
@@ -1541,6 +1859,8 @@
             bestIsReferenceList: Array.isArray(ranking.ranked)
                 ? (ranking.ranked.find((r) => r.index === bestIndex)?.isReferenceList ?? null)
                 : (ranking.best?.isReferenceList ?? null),
+            bestIsToolStatus: isToolStatusCandidate(bestIndex),
+            statusCandidateCount: texts.filter((_, index) => isToolStatusCandidate(index)).length,
             supplementalIndices: combined.supplementalIndices || [],
             supplementalCount: combined.supplementalIndices
                 ? combined.supplementalIndices.length
@@ -1552,6 +1872,7 @@
                       index: r.index,
                       score: r.score,
                       isReferenceList: r.isReferenceList,
+                      isToolStatus: r.isToolStatus,
                       wordCount: r.analysis?.wordCount,
                       lineCount: r.analysis?.lineCount,
                       urlishLineCount: r.analysis?.urlishLineCount,
@@ -3717,6 +4038,94 @@
         }, delay);
     }
 
+    function noteChatGPTActivityState(activityState, now) {
+        if (!isChatGPT) return;
+        const state = activityState || { active: false, reason: 'idle', toolActivity: false };
+        if (state.active) {
+            captureState.chatgptSawActivity = true;
+            captureState.chatgptLastActivityAt = now;
+            captureState.chatgptLastActivityReason = state.reason || 'active';
+            captureState.chatgptIdleSince = 0;
+            if (state.toolActivity) captureState.chatgptToolActivitySeen = true;
+            return;
+        }
+        if (!captureState.chatgptIdleSince) {
+            captureState.chatgptIdleSince = now;
+        }
+    }
+
+    function resetChatGPTFinalizationGate() {
+        captureState.chatgptFinalTextSignature = '';
+        captureState.chatgptFinalTextStableCount = 0;
+        captureState.chatgptFinalTextStableSince = 0;
+    }
+
+    function canFinalizeChatGPTCapture({ text, now, tabHidden, isLikelyReferenceOnly }) {
+        if (!isChatGPT) return { ok: true };
+
+        const normalized = normalizeCaptureCandidateText(text);
+        const meta = captureState.lastExtractionMeta || {};
+        if (!normalized) {
+            resetChatGPTFinalizationGate();
+            return { ok: false, reason: 'empty' };
+        }
+        if (meta.bestIsToolStatus || (meta.statusCandidateCount > 0 && !meta.finalWordCount)) {
+            resetChatGPTFinalizationGate();
+            captureState.chatgptToolActivitySeen = true;
+            return { ok: false, reason: 'tool_status_candidate' };
+        }
+
+        const signature = `${meta.bestAssistantIndex ?? 'unknown'}:${stableTextSignature(normalized)}`;
+        if (signature === captureState.chatgptFinalTextSignature) {
+            captureState.chatgptFinalTextStableCount += 1;
+        } else {
+            captureState.chatgptFinalTextSignature = signature;
+            captureState.chatgptFinalTextStableCount = 1;
+            captureState.chatgptFinalTextStableSince = now;
+        }
+
+        const idleSince = captureState.chatgptIdleSince || now;
+        const idleForMs = now - idleSince;
+        const sinceActivityMs = captureState.chatgptLastActivityAt
+            ? now - captureState.chatgptLastActivityAt
+            : Number.POSITIVE_INFINITY;
+        const multiplier = tabHidden ? 2 : 1;
+        const justActiveCooldownMs = (captureState.chatgptToolActivitySeen ? 2500 : 1500) * multiplier;
+        const requiredIdleMs =
+            (captureState.chatgptToolActivitySeen || isLikelyReferenceOnly ? 12000 : 4500) *
+            multiplier;
+        const stableForMs = now - (captureState.chatgptFinalTextStableSince || now);
+
+        if (sinceActivityMs < justActiveCooldownMs) {
+            return {
+                ok: false,
+                reason: 'recent_activity',
+                sinceActivityMs,
+                requiredMs: justActiveCooldownMs,
+            };
+        }
+        if (idleForMs < requiredIdleMs) {
+            return { ok: false, reason: 'idle_window', idleForMs, requiredMs: requiredIdleMs };
+        }
+        if (captureState.chatgptFinalTextStableCount < 2) {
+            return {
+                ok: false,
+                reason: 'needs_second_identical_extraction',
+                stableCount: captureState.chatgptFinalTextStableCount,
+            };
+        }
+        if (stableForMs < 1000 * multiplier) {
+            return { ok: false, reason: 'stable_confirmation_window', stableForMs };
+        }
+
+        return {
+            ok: true,
+            idleForMs,
+            sinceActivityMs,
+            stableCount: captureState.chatgptFinalTextStableCount,
+        };
+    }
+
     function evaluateCapture() {
         if (!captureState.active) return;
         const now = Date.now();
@@ -3743,10 +4152,23 @@
         );
         const grokLooksComplete = Boolean(
             isGrok &&
-            !grokControl?.stopVisible &&
-            (grokControl?.voiceVisible || grokControl?.sendVisible)
+                !grokControl?.stopVisible &&
+                (grokControl?.voiceVisible || grokControl?.sendVisible)
         );
         const grokFinalizedByControlTransition = grokCompletedByControls || grokLooksComplete;
+        const chatgptActivityState = isChatGPT ? getChatGPTActivityState() : null;
+        const chatgptGeneratingNow = isChatGPT ? Boolean(chatgptActivityState?.active) : false;
+        noteChatGPTActivityState(chatgptActivityState, now);
+        if (isChatGPT && meta.statusCandidateCount > 0) {
+            captureState.chatgptToolActivitySeen = true;
+            if (!text) {
+                captureState.chatgptSawActivity = true;
+                captureState.chatgptLastActivityAt = now;
+                captureState.chatgptLastActivityReason = 'tool_status_candidate';
+                captureState.chatgptIdleSince = 0;
+            }
+        }
+        if (chatgptGeneratingNow) captureState.sawGenerating = true;
 
         let currentGrokBestBottom =
             isGrok && Number.isFinite(meta.bestBottom) ? meta.bestBottom : null;
@@ -3907,12 +4329,25 @@
                     const missingNewAssistantTurn =
                         bestAssistantIndex === null || bestAssistantIndex < baselineCount;
                     if (missingNewAssistantTurn) {
-                        const allowSameAssistantUpdate =
-                            textChangedFromBaseline &&
+                        const isBaselineAssistantUpdate =
                             baselineAssistantIndex !== null &&
                             bestAssistantIndex !== null &&
-                            bestAssistantIndex === baselineAssistantIndex &&
-                            (captureState.sawGenerating || now - captureState.startedAt >= 8000);
+                            bestAssistantIndex === baselineAssistantIndex;
+                        const isLatestPreArmAssistantUpdate =
+                            bestAssistantIndex !== null &&
+                            bestAssistantIndex === Math.max(0, baselineCount - 1);
+                        const isGlobalFallbackUpdate =
+                            bestAssistantIndex === null &&
+                            typeof captureState.lastExtractionMeta?.bestOrigin === 'string' &&
+                            captureState.lastExtractionMeta.bestOrigin.startsWith('global[');
+                        const allowSameAssistantUpdate =
+                            textChangedFromBaseline &&
+                            (isBaselineAssistantUpdate ||
+                                isLatestPreArmAssistantUpdate ||
+                                isGlobalFallbackUpdate) &&
+                            (chatgptGeneratingNow ||
+                                captureState.sawGenerating ||
+                                now - captureState.startedAt >= 8000);
                         if (!allowSameAssistantUpdate) return;
                         captureDebug('ChatGPT accepted same-assistant update', {
                             baselineCount,
@@ -4146,6 +4581,9 @@
         if (textChanged || grokShapeChanged) {
             captureState.lastText = text;
             captureState.lastTextChangeAt = now;
+            if (isChatGPT && textChanged) {
+                resetChatGPTFinalizationGate();
+            }
             if (isGrok && grokShapeChanged) {
                 captureDebug('Grok shape progressed', {
                     previousBottom: captureState.grokLastBestBottom,
@@ -4162,7 +4600,7 @@
                 captureState.grokLastShapeSignature = currentGrokShapeSignature;
         }
 
-        const generatingRaw = isGenerating();
+        const generatingRaw = isChatGPT ? chatgptGeneratingNow : isGenerating();
         const generating = isGrok && grokLooksComplete ? false : generatingRaw;
         if (generating) captureState.sawGenerating = true;
         const stableForMs = now - captureState.lastTextChangeAt;
@@ -4345,6 +4783,29 @@
             totalForMs >= finalMaxWaitMs && stableForMs >= minStableForTimeoutMs;
         if (!canStableCapture && !canTimeoutCapture) return;
         if (captureState.lastEmitAt && now - captureState.lastEmitAt < 1500) return;
+
+        if (isChatGPT) {
+            const chatgptFinalization = canFinalizeChatGPTCapture({
+                text,
+                now,
+                tabHidden,
+                isLikelyReferenceOnly,
+            });
+            if (!chatgptFinalization.ok) {
+                captureDebug('ChatGPT finalization gate held capture', {
+                    reason: chatgptFinalization.reason,
+                    stableForMs,
+                    totalForMs,
+                    isLikelyReferenceOnly,
+                    sawActivity: captureState.chatgptSawActivity,
+                    toolActivitySeen: captureState.chatgptToolActivitySeen,
+                    lastActivityReason: captureState.chatgptLastActivityReason,
+                    finalTextStableCount: captureState.chatgptFinalTextStableCount,
+                    meta: captureState.lastExtractionMeta,
+                });
+                return;
+            }
+        }
 
         const reason =
             canTimeoutCapture && !canStableCapture

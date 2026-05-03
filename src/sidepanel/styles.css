@@ -1918,6 +1918,10 @@ button:focus-visible,
     margin-top: 8px;
 }
 
+.security-action-help {
+    margin-top: -4px;
+}
+
 .security-danger-body {
     display: flex;
     flex-direction: column;

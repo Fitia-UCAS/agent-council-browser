@@ -478,7 +478,7 @@
                             protected chats.
                         </div>
                     </div>
-                    <details class="drawer-details" id="history-advanced" hidden>
+                    <details class="drawer-details" id="history-advanced" open hidden>
                         <summary class="drawer-details-summary">
                             <span>Danger zone</span>
                             <span class="material-symbols-rounded">expand_more</span>
@@ -496,6 +496,12 @@
                                 >
                                     Forget passphrase (delete protected chats)…
                                 </button>
+                                <div
+                                    class="field-help security-action-help"
+                                    id="history-reset-protection-help"
+                                >
+                                    Set a passphrase to enable this recovery action.
+                                </div>
                                 <button
                                     class="ghost-button danger"
                                     id="history-clear-all"
@@ -641,6 +647,7 @@
         <script src="runtime/sidepanel/actions.js"></script>
         <script src="runtime/sidepanel/reducer.js"></script>
         <script src="runtime/sidepanel/store.js"></script>
+        <script src="runtime/sidepanel/primaryAction.js"></script>
         <script src="runtime/sidepanel/routeBuilder.js"></script>
         <script src="runtime/sidepanel/routeBinding.js"></script>
         <script src="runtime/sidepanel/transcriptView.js"></script>

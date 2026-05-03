@@ -5292,6 +5292,73 @@ async function resumeDebateSession(sessionId, chatId = null) {
         });
         return { ok: false, error: validation.error };
     }
+
+    const pendingCaptureArm =
+        session.pendingCaptureArm && typeof session.pendingCaptureArm === 'object'
+            ? session.pendingCaptureArm
+            : null;
+    if (
+        pendingCaptureArm &&
+        pendingCaptureArm.promptId === session.lastPromptId &&
+        pendingCaptureArm.turnAttemptId === session.lastTurnAttemptId &&
+        pendingCaptureArm.agentId === expectedParticipant.agentId
+    ) {
+        try {
+            await notifyPromptSentWithRetry(
+                validation.tabId,
+                pendingCaptureArm.payload,
+                {
+                    llmType: expectedProvider,
+                    retries: expectedProvider === 'chatgpt' ? 32 : 14,
+                    delayMs: 500,
+                    reinjectOnFailure: expectedProvider === 'chatgpt',
+                }
+            );
+            session.pendingCaptureArm = null;
+            session.isPaused = false;
+            session.pausedReason = null;
+            session.pausedProvider = null;
+            session.pausedAgentId = null;
+            session.pausedProfileId = null;
+            session.pausedAt = 0;
+            session.autoResume = null;
+            await saveSession(session);
+            sendMessageToPopup({
+                type: 'UI_SESSION_RESUMED',
+                chatId: session.chatId || null,
+                sessionId: session.sessionId,
+            });
+            sendMessageToPopup({
+                type: 'UI_SESSION_PROGRESS',
+                chatId: session.chatId || null,
+                sessionId: session.sessionId,
+                waitingFor: expectedProvider,
+                waitingForAgentId: expectedParticipant.agentId,
+                waitingForLabel:
+                    formatParticipantLabelForPrompt(
+                        getSessionParticipants(session),
+                        expectedParticipant
+                    ) || formatLLMLabel(expectedProvider),
+                roundIndex: getRoundIndex(session.turnIndex, session),
+                totalRounds: session.rounds,
+            });
+            return { ok: true, captureArmedOnly: true };
+        } catch (error) {
+            session.pendingCaptureArm =
+                error?.details?.pendingCaptureArm || session.pendingCaptureArm;
+            await saveSession(session);
+            await pauseDebateSession(
+                session.sessionId,
+                error?.message || 'Prompt was sent, but response capture could not be armed.',
+                expectedProvider,
+                {
+                    agentId: expectedParticipant.agentId,
+                    profileId: expectedParticipant.profileId || null,
+                }
+            );
+            return { ok: false, error: error?.message || 'Capture could not be armed.' };
+        }
+    }
     session.isPaused = false;
     session.pausedReason = null;
     session.pausedProvider = null;
@@ -5822,6 +5889,16 @@ async function sendDebateTurn(session) {
             }
         }
     } catch (error) {
+        if (error?.code === 'CAPTURE_ARM_FAILED' && error?.details?.pendingCaptureArm) {
+            session.pendingCaptureArm = {
+                ...error.details.pendingCaptureArm,
+                turnAttemptId,
+                promptId,
+                turnIndex,
+                agentId: expectedAgentId,
+            };
+            await saveSession(session);
+        }
         const code = error?.code;
         const isAttachmentFailure =
             code === 'ATTACHMENTS_FAILED' ||
@@ -5843,6 +5920,19 @@ async function sendDebateTurn(session) {
                 }
                 return;
             } catch (retryError) {
+                if (
+                    retryError?.code === 'CAPTURE_ARM_FAILED' &&
+                    retryError?.details?.pendingCaptureArm
+                ) {
+                    session.pendingCaptureArm = {
+                        ...retryError.details.pendingCaptureArm,
+                        turnAttemptId,
+                        promptId,
+                        turnIndex,
+                        agentId: expectedAgentId,
+                    };
+                    await saveSession(session);
+                }
                 const rootError = retryError || error;
                 const autoResume =
                     expectedProvider === 'claude' &&
@@ -5891,38 +5981,69 @@ async function handleParallelResponse(session, message) {
     const sessionId = session?.sessionId;
     if (!sessionId) return;
 
-    const agentId =
+    const participants = getSessionParticipants(session);
+    const waitingFor = Array.isArray(session.waitingFor)
+        ? session.waitingFor.map((id) => String(id || '').trim()).filter(Boolean)
+        : [];
+    const messageProvider = normalizeProviderKey(message.sourceLLM || message.provider || '');
+    let agentId =
         typeof message.agentId === 'string' && message.agentId.trim()
             ? message.agentId.trim()
             : typeof message.sourceAgentId === 'string' && message.sourceAgentId.trim()
               ? message.sourceAgentId.trim()
               : '';
+    if (!agentId && messageProvider) {
+        const providerMatches = participants.filter(
+            (participant) =>
+                waitingFor.includes(participant?.agentId) &&
+                normalizeProviderKey(participant?.provider) === messageProvider
+        );
+        if (providerMatches.length === 1) {
+            agentId = providerMatches[0].agentId;
+        }
+    }
     if (!agentId) return;
-
-    const waitingFor = Array.isArray(session.waitingFor)
-        ? session.waitingFor.map((id) => String(id || '').trim()).filter(Boolean)
-        : [];
     if (!waitingFor.includes(agentId)) {
         return;
     }
 
     const expectedPromptId =
         session.parallelPromptIds?.[agentId] || buildParallelPromptId(sessionId, agentId);
-    if (expectedPromptId && message.promptId && expectedPromptId !== message.promptId) {
+    const messagePromptId = typeof message.promptId === 'string' ? message.promptId.trim() : '';
+    if (!messagePromptId || expectedPromptId !== messagePromptId) {
         console.log('[MLC Parallel] Ignoring response with mismatched promptId.', {
             expectedPromptId,
-            messagePromptId: message.promptId,
+            messagePromptId: messagePromptId || null,
             agentId,
         });
         return;
     }
 
-    const participants = getSessionParticipants(session);
+    const messageTurnIndex = Number.isFinite(message.turnIndex)
+        ? Number(message.turnIndex)
+        : parseInt(message.turnIndex, 10);
+    if (Number.isFinite(messageTurnIndex) && messageTurnIndex !== 1) {
+        console.log('[MLC Parallel] Ignoring response with mismatched turnIndex.', {
+            expectedTurnIndex: 1,
+            messageTurnIndex,
+            agentId,
+            promptId: messagePromptId,
+        });
+        return;
+    }
+
     const participant = participants.find((p) => p?.agentId === agentId) || null;
-    const provider = normalizeProviderKey(
-        participant?.provider || message.sourceLLM || message.provider || ''
-    );
+    const provider = normalizeProviderKey(participant?.provider || messageProvider || '');
     if (!provider || !isSupportedProviderKey(provider)) return;
+    if (messageProvider && messageProvider !== provider) {
+        console.log('[MLC Parallel] Ignoring response from unexpected provider.', {
+            expectedProvider: provider,
+            messageProvider,
+            agentId,
+            promptId: messagePromptId,
+        });
+        return;
+    }
 
     const rawContent = typeof message.content === 'string' ? message.content : '';
     const content = rawContent.trim();
@@ -6521,6 +6642,59 @@ async function sendTabMessageWithRetry(tabId, message, options = {}) {
     }
 
     return { ok: false, error: String(lastError?.message || lastError || 'unknown_error') };
+}
+
+async function notifyPromptSentWithRetry(tabId, payload, options = {}) {
+    const provider = normalizeProviderKey(payload?.llmType || options.llmType || '') || null;
+    const retries = Number.isFinite(options.retries)
+        ? Math.max(1, Math.floor(options.retries))
+        : provider === 'chatgpt'
+          ? 24
+          : 14;
+    const delayMs = Number.isFinite(options.delayMs)
+        ? Math.max(50, Math.floor(options.delayMs))
+        : 500;
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const canReinject = provider === 'chatgpt' || options.reinjectOnFailure === true;
+    let lastError = null;
+    let reinjected = false;
+
+    for (let attempt = 1; attempt <= retries; attempt += 1) {
+        try {
+            await chrome.tabs.sendMessage(tabId, payload);
+            return { ok: true, attempt, reinjected };
+        } catch (error) {
+            lastError = error;
+            if (canReinject && isMissingContentScriptError(error)) {
+                const injected = await ensureProviderContentScripts(tabId, provider);
+                reinjected = reinjected || Boolean(injected);
+                if (injected) await sleep(Math.max(250, delayMs));
+            }
+        }
+        await sleep(delayMs);
+    }
+
+    const notifyError = String(lastError?.message || lastError || 'unknown_error');
+
+    const llmLabel = formatLLMLabel(payload?.llmType || options.llmType || 'provider');
+    const error = new Error(
+        `${llmLabel} prompt was sent, but response capture could not be armed (${notifyError || 'content script did not respond'}). Reload or reconnect the ${llmLabel} tab and retry.`
+    );
+    error.code = 'CAPTURE_ARM_FAILED';
+    error.provider = payload?.llmType || options.llmType || null;
+    error.details = {
+        stage: 'capture_arm',
+        notifyError: notifyError || null,
+        attempts: retries,
+        reinjected,
+        pendingCaptureArm: {
+            tabId,
+            provider,
+            payload,
+            createdAt: Date.now(),
+        },
+    };
+    throw error;
 }
 
 async function sendPromptViaClaudeDebugger(tabId, promptText, options = null) {
@@ -7603,9 +7777,16 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                     );
                 }
                 const promptId = context.promptId || generatePromptId();
-                try {
-                    const preview = typeof prompt === 'string' ? prompt.trim().slice(0, 800) : '';
-                    chrome.tabs.sendMessage(tabId, {
+                const preview = typeof prompt === 'string' ? prompt.trim().slice(0, 800) : '';
+                const notifyOptions = {
+                    llmType,
+                    retries: llmType === 'chatgpt' && result.details?.navigated ? 32 : undefined,
+                    delayMs: 500,
+                    reinjectOnFailure: llmType === 'chatgpt',
+                };
+                await notifyPromptSentWithRetry(
+                    tabId,
+                    {
                         type: 'MLC_PROMPT_SENT',
                         sessionId: context.sessionId || null,
                         promptId: promptId,
@@ -7618,13 +7799,9 @@ async function injectAndExecute(tabId, llmType, prompt, context = {}) {
                         turnIndex: context.turnIndex || null,
                         timestamp: Date.now(),
                         promptPreview: preview,
-                    });
-                } catch (error) {
-                    console.warn(
-                        '[MLC Background] Failed to notify content script about prompt:',
-                        error
-                    );
-                }
+                    },
+                    notifyOptions
+                );
                 sendMessageToPopup({ type: 'LLM_PROGRESS', llm: llmType, status: 'Prompt sent.' });
                 return promptId;
             } else {
@@ -7748,13 +7925,14 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
     const promptText = typeof prompt === 'string' ? prompt : String(prompt || '');
     const LARGE_PROMPT_THRESHOLD = 8000;
     const isLargePrompt = promptText.length >= LARGE_PROMPT_THRESHOLD;
-    const SIMPLE_INTERACTION_BUILD = 'grok-fix-r3-2026-02-08';
+    const SIMPLE_INTERACTION_BUILD = 'grok-send-hotfix-2026-04-23';
 
     console.log(
         `[SimpleInteraction INJECTED] Attempting on ${llmType} (mode=${prepareAttachmentsOnly ? 'prepare_attachments' : 'send'}, build=${SIMPLE_INTERACTION_BUILD}, promptChars=${promptText.length}).`
     );
 
     try {
+        const beforeHref = String(window.location?.href || '');
         let inputElement = null;
         const attachmentPayloads = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
 
@@ -8085,6 +8263,10 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                 'textarea[placeholder*="Message"]',
                 'textarea[data-id="root"]',
                 'textarea',
+                'div[contenteditable="true"][role="textbox"]',
+                '[contenteditable="true"][role="textbox"]',
+                '[contenteditable="true"]',
+                '[role="textbox"]',
             ],
             gemini: [
                 // Gemini primarily uses a contenteditable div
@@ -8468,11 +8650,12 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
 
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-        const resolveInputElement = () => {
-            if (inputElement && inputElement.isConnected) return inputElement;
+        const resolveInputElement = ({ force = false } = {}) => {
+            if (!force && inputElement && inputElement.isConnected) return inputElement;
             const selectors = Array.isArray(currentInputSelectors) ? currentInputSelectors : [];
             for (const selector of selectors) {
-                const candidate = document.querySelector(selector);
+                const candidate =
+                    pickBestVisibleElement(selector) || document.querySelector(selector);
                 if (candidate) {
                     inputElement = candidate;
                     break;
@@ -8537,16 +8720,22 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             ];
             if (stopPatterns.some((re) => re.test(label))) return 'stop';
 
+            const sendPatterns = [/\bsend\b/i, /\bsubmit\b/i, /\bsoumettre\b/i, /\benvoyer\b/i];
+            const typeAttr = normalizeControlLabel(button.getAttribute?.('type') || '');
+            if (sendPatterns.some((re) => re.test(label)) || typeAttr === 'submit') return 'send';
+
             const voicePatterns = [
                 /\bpasser en mode vocal\b/i,
                 /\bmode vocal\b/i,
                 /\bvoice mode\b/i,
+                /\bvoice\b/i,
+                /\bmicrophone\b/i,
+                /\bmic\b/i,
+                /\bdictate\b/i,
+                /\bdicter\b/i,
+                /\bparler\b/i,
             ];
             if (voicePatterns.some((re) => re.test(label))) return 'voice';
-
-            const sendPatterns = [/\bsend\b/i, /\bsubmit\b/i, /\bsoumettre\b/i, /\benvoyer\b/i];
-            const typeAttr = normalizeControlLabel(button.getAttribute?.('type') || '');
-            if (sendPatterns.some((re) => re.test(label)) || typeAttr === 'submit') return 'send';
 
             return 'unknown';
         };
@@ -8672,6 +8861,10 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                     seen.add(node);
                     if (!isVisible(node)) continue;
                     if (!allowDisabled && isDisabledButton(node)) continue;
+                    if (llmType === 'grok') {
+                        const role = classifyGrokControlButton(node);
+                        if (role === 'voice' || role === 'stop') continue;
+                    }
                     candidates.push(node);
                 }
             }
@@ -8809,7 +9002,7 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
             }
 
             const before = baseline || captureSendAckBaseline();
-            let sawStop = Boolean(before.stopVisible);
+            let sawNewStop = false;
             const strongSignals = new Set();
             const secondarySignals = new Set();
 
@@ -8824,12 +9017,17 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                 const sendVisible = Boolean(sendBtn && isVisible(sendBtn));
                 const sendDisabled = Boolean(sendBtn && isDisabledButton(sendBtn));
 
-                if (stopBtn && isVisible(stopBtn) && !isDisabledButton(stopBtn)) {
-                    sawStop = true;
-                    strongSignals.add('stop_visible');
+                if (
+                    !before.stopVisible &&
+                    stopBtn &&
+                    isVisible(stopBtn) &&
+                    !isDisabledButton(stopBtn)
+                ) {
+                    sawNewStop = true;
+                    strongSignals.add('stop_visible_after_send');
                 }
 
-                if (sawStop && voiceBtn && isVisible(voiceBtn)) {
+                if (sawNewStop && voiceBtn && isVisible(voiceBtn)) {
                     strongSignals.add('voice_after_stop');
                 }
 
@@ -8848,7 +9046,7 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                     secondarySignals.add('submit_disabled');
                 }
 
-                if (strongSignals.size >= 1 || secondarySignals.size >= 2) {
+                if (strongSignals.size >= 1 || secondarySignals.size >= 1) {
                     const reason =
                         strongSignals.size >= 1
                             ? [...strongSignals].join('+')
@@ -8941,13 +9139,30 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
         const shouldWaitForReadyFirst = hasAttachments || isLargePrompt || disabledCandidate;
         const initialWaitMs = isLargePrompt ? 150 : 75;
         let lastAckReason = '';
+        let lastReadyWaitError = '';
+        let lastGrokButtonSnapshot = null;
 
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
             if (shouldWaitForReadyFirst || attempt > 1) {
                 console.log(
                     `[SimpleInteraction INJECTED] Waiting for Send to be ready for ${llmType} (attempt ${attempt}/${maxAttempts})...`
                 );
-                await waitForSendReady({ timeoutMs: readyTimeoutMs });
+                try {
+                    await waitForSendReady({ timeoutMs: readyTimeoutMs });
+                    lastReadyWaitError = '';
+                } catch (error) {
+                    if (llmType !== 'grok') throw error;
+                    lastReadyWaitError = error?.message || String(error || 'unknown ready timeout');
+                    lastGrokButtonSnapshot = describeVisibleComposerButtons();
+                    console.warn(
+                        `[SimpleInteraction INJECTED] Grok Send did not become ready; trying fallback send path (attempt ${attempt}/${maxAttempts}).`,
+                        {
+                            readyWaitError: lastReadyWaitError,
+                            draftLen: getInputText().trim().length,
+                            buttons: lastGrokButtonSnapshot,
+                        }
+                    );
+                }
             } else {
                 // Allow the UI to enable the Send button after we set the prompt.
                 await sleep(initialWaitMs);
@@ -8998,6 +9213,7 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                 baseline: ackBaseline,
             });
             if (acknowledged.ok) {
+                const afterHref = String(window.location?.href || '');
                 return {
                     success: true,
                     method: button ? `button_click_for_${llmType}` : `enter_key_for_${llmType}`,
@@ -9005,6 +9221,9 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
                         stage: 'send',
                         attempts: attempt,
                         ackReason: acknowledged.reason,
+                        beforeHref,
+                        afterHref,
+                        navigated: Boolean(beforeHref && afterHref && beforeHref !== afterHref),
                     },
                 };
             }
@@ -9016,12 +9235,24 @@ async function simpleInteraction(prompt, llmType, attachments, options = null) {
 
         const errMsg = `[SimpleInteraction INJECTED] Failed to send message for ${llmType}: no acknowledgement after ${maxAttempts} attempt(s).`;
         console.error(errMsg);
+        const finalDraftLen = llmType === 'grok' ? getInputText().trim().length : undefined;
+        const afterHref = String(window.location?.href || '');
+        const finalButtonSnapshot =
+            llmType === 'grok'
+                ? lastGrokButtonSnapshot || describeVisibleComposerButtons()
+                : undefined;
         return {
             success: false,
             error: errMsg,
             details: {
                 stage: 'send_not_acknowledged',
                 ackReason: lastAckReason || null,
+                readyWaitError: lastReadyWaitError || null,
+                draftLen: finalDraftLen,
+                buttons: finalButtonSnapshot,
+                beforeHref,
+                afterHref,
+                navigated: Boolean(beforeHref && afterHref && beforeHref !== afterHref),
             },
         };
     } catch (error) {

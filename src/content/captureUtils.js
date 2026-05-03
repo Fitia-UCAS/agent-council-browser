@@ -260,15 +260,60 @@
         );
     }
 
+    function looksLikeToolStatusText(text, options) {
+        const provider = normalizeForMatch(options?.provider || '');
+        if (provider && provider !== 'chatgpt') return false;
+
+        const analysis = analyzeText(text);
+        if (!analysis.raw) return false;
+        if (analysis.lineCount > 4) return false;
+        if (analysis.wordCount > 28) return false;
+        if (analysis.sentenceEndPunctCount >= 2) return false;
+        if (analysis.codeFenceCount > 0) return false;
+
+        const normalized = normalizeForMatch(analysis.raw);
+        const actionPatterns = [
+            /\b(searching|browsing|looking up|checking|opening|reading|fetching|visiting|viewing|calling|analyzing|thinking|reasoning)\b/,
+            /\b(je cherche|je recherche|recherche en cours|consultation en cours|analyse en cours|lecture en cours)\b/,
+        ];
+        const toolNouns =
+            /\b(web|internet|search|recherche|browser|tool|outil|maps?|carte|location|place|places)\b/;
+        const explicitStatusPatterns = [
+            /^(searching|browsing|looking up|checking|reading|opening)\b(?:[^.!?]*\b(web|internet|maps?|browser|tool|page|site|source|sources)\b)?\s*(?:\.{3}|…)?$/i,
+            /^(thinking|analyzing)\s*(?:\.{3}|…)?$/i,
+            /^(recherche en cours|consultation en cours|analyse en cours|lecture en cours)\b/i,
+            /\b(searching the web|browsing the web|checking maps|using maps|opening maps)\b/i,
+            /\b(recherche sur le web|consultation du web|recherche internet)\b/i,
+            /\b(please wait|one moment|working on it)\b/,
+        ];
+
+        if (explicitStatusPatterns.some((pattern) => pattern.test(normalized))) return true;
+        if (actionPatterns.some((pattern) => pattern.test(normalized)) && toolNouns.test(normalized))
+            return true;
+
+        const statusishLines = analysis.lines.filter((line) => {
+            const normalizedLine = normalizeForMatch(line);
+            if (!normalizedLine) return false;
+            return (
+                explicitStatusPatterns.some((pattern) => pattern.test(normalizedLine)) ||
+                (actionPatterns.some((pattern) => pattern.test(normalizedLine)) &&
+                    toolNouns.test(normalizedLine))
+            );
+        });
+
+        return statusishLines.length > 0 && statusishLines.length === analysis.lines.length;
+    }
+
     function scoreTextCandidate(text, options) {
         const analysis = analyzeText(text);
         if (!analysis.raw) {
-            return { score: -Infinity, analysis, isReferenceList: false };
+            return { score: -Infinity, analysis, isReferenceList: false, isToolStatus: false };
         }
 
         const isReferenceList = looksLikeReferenceList(text, options);
         const isUiControl = looksLikeUiControlText(text, options);
         const isPromptScaffold = looksLikePromptScaffoldText(text, options);
+        const isToolStatus = looksLikeToolStatusText(text, options);
 
         // Base: reward meaningful length but with diminishing returns.
         const lengthScore = Math.min(30, Math.log2(analysis.wordCount + 1) * 8);
@@ -285,6 +330,7 @@
         const referencePenalty = isReferenceList ? 60 : 0;
         const uiControlPenalty = isUiControl ? 120 : 0;
         const scaffoldPenalty = isPromptScaffold ? 90 : 0;
+        const toolStatusPenalty = isToolStatus ? 140 : 0;
 
         const score =
             lengthScore +
@@ -295,8 +341,9 @@
             bulletPenalty -
             referencePenalty -
             uiControlPenalty -
-            scaffoldPenalty;
-        return { score, analysis, isReferenceList };
+            scaffoldPenalty -
+            toolStatusPenalty;
+        return { score, analysis, isReferenceList, isToolStatus };
     }
 
     function rankTextCandidates(candidates, options) {
@@ -307,6 +354,7 @@
                 index,
                 score: result.score,
                 isReferenceList: result.isReferenceList,
+                isToolStatus: result.isToolStatus,
                 analysis: result.analysis,
             };
         });
@@ -359,6 +407,7 @@
         looksLikeReferenceList,
         looksLikeUiControlText,
         looksLikePromptScaffoldText,
+        looksLikeToolStatusText,
         scoreTextCandidate,
         rankTextCandidates,
         chooseBestTextCandidate,

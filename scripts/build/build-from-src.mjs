@@ -108,6 +108,7 @@ const COPY_SPECS = [
     { src: 'src/sidepanel/state/store.js', dst: 'runtime/sidepanel/store.js' },
     { src: 'src/sidepanel/state/actions.js', dst: 'runtime/sidepanel/actions.js' },
     { src: 'src/sidepanel/state/reducer.js', dst: 'runtime/sidepanel/reducer.js' },
+    { src: 'src/sidepanel/features/primaryAction.js', dst: 'runtime/sidepanel/primaryAction.js' },
     { src: 'src/sidepanel/features/routeBuilder.js', dst: 'runtime/sidepanel/routeBuilder.js' },
     { src: 'src/sidepanel/features/routeBinding.js', dst: 'runtime/sidepanel/routeBinding.js' },
     { src: 'src/sidepanel/views/transcriptView.js', dst: 'runtime/sidepanel/transcriptView.js' },

@@ -2,7 +2,7 @@
     "manifest_version": 3,
     "name": "Multi Agent Council",
     "version": "0.1.0",
-    "description": "Cross-check important answers by comparing ChatGPT, Claude, Gemini, and Grok in Chrome, directly on their own websites.",
+    "description": "Compare AI models in Chrome, send files to provider chats, and protect local history with a passphrase.",
     "permissions": ["sidePanel", "scripting", "storage", "tabs", "debugger"],
     "host_permissions": [
         "https://gemini.google.com/*",

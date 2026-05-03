@@ -1,7 +1,7 @@
 {
     "name": "agent-council-browser",
     "version": "0.1.0",
-    "description": "Cross-check important answers by comparing ChatGPT, Claude, Gemini, and Grok in Chrome, directly on their own websites.",
+    "description": "Compare AI models in Chrome, send files to provider chats, and protect local history with a passphrase.",
     "main": "background.js",
     "scripts": {
         "build:src": "node scripts/build/build-from-src.mjs --mode=dev",

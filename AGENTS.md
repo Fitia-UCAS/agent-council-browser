@@ -92,7 +92,8 @@ This file is the durable memory for the repo. It is the canonical reference for 
     - chat-level protect/unprotect controls are intentionally hidden in the UI for simpler UX.
   - Unlock keys live in `chrome.storage.session` only (cleared on browser restart or when manually locked).
   - No inactivity auto-lock timer is applied; locking is explicit (`Lock protected chats`) or by browser/session reset.
-  - “Forgot passphrase” and “Delete all chats” are grouped under a **Danger zone** in Security settings.
+  - When a locked chat or protected-new-chat state blocks the composer, the primary action becomes **Unlock** and the empty state shows an unlock action that opens the passphrase modal.
+  - “Forgot passphrase” and “Delete all chats” are grouped under a visible, open-by-default **Danger zone** in Security settings. “Forgot passphrase” stays visible but disabled until a passphrase is configured; “Delete all chats” stays visible whenever settings are open.
   - The background avoids persisting plaintext transcripts in `chrome.storage.local` (sessions can be hydrated from history after worker restart).
 
 ### Long‑running responses

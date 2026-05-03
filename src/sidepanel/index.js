@@ -34,6 +34,22 @@ const schemaControllerApi =
     typeof globalThis.MLCSidepanelSchemaController.getSchemaStatus === 'function'
         ? globalThis.MLCSidepanelSchemaController
         : null;
+const primaryActionApi =
+    globalThis.MLCSidepanelPrimaryAction &&
+    typeof globalThis.MLCSidepanelPrimaryAction.getPrimaryActionDecision === 'function'
+        ? globalThis.MLCSidepanelPrimaryAction
+        : null;
+const PRIMARY_ACTIONS =
+    primaryActionApi?.PRIMARY_ACTIONS ||
+    Object.freeze({
+        STOP: 'stop',
+        UNLOCK_HISTORY: 'unlock_history',
+        SCHEMA_UPGRADE: 'schema_upgrade',
+        SEND: 'send',
+        CONNECT: 'connect',
+        FIX_ROUTE: 'fix_route',
+        NOOP: 'noop',
+    });
 
 const DEFAULT_PROVIDER_IDS = Array.isArray(routeBuilderApi?.DEFAULT_PROVIDER_IDS)
     ? routeBuilderApi.DEFAULT_PROVIDER_IDS.slice()
@@ -1574,6 +1590,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     elements.historyOverviewText = document.getElementById('history-overview-text');
     elements.historyAdvanced = document.getElementById('history-advanced');
     elements.historyResetProtection = document.getElementById('history-reset-protection');
+    elements.historyResetProtectionHelp = document.getElementById('history-reset-protection-help');
     elements.historyClearAll = document.getElementById('history-clear-all');
     elements.historyStatus = document.getElementById('history-status');
 
@@ -1799,10 +1816,7 @@ function bindEvents() {
     }
 
     if (elements.emptyOpenRoute) {
-        elements.emptyOpenRoute.addEventListener('click', () => {
-            openRoutePopover();
-            elements.routeButton?.focus();
-        });
+        elements.emptyOpenRoute.addEventListener('click', handleEmptyStateAction);
     }
 
     if (elements.resumeButton) {
@@ -2118,17 +2132,27 @@ function isHistoryAppLocked() {
     return false;
 }
 
+function isNewChatCreationLocked() {
+    return Boolean(
+        state.historyStatus?.configured &&
+            state.historyStatus?.lockNewChatsByDefault &&
+            !state.historyStatus?.unlocked &&
+            !state.activeChatId
+    );
+}
+
 function isActiveChatLocked() {
     const summary = getActiveChatSummary();
     return Boolean(summary?.locked);
 }
 
 function isHistoryBlocked() {
-    return Boolean(isActiveChatLocked());
+    return Boolean(isActiveChatLocked() || isNewChatCreationLocked());
 }
 
 function getHistoryBlockedHint() {
     if (isActiveChatLocked()) return 'Unlock this chat to continue.';
+    if (isNewChatCreationLocked()) return 'Unlock history to create protected chats.';
     return '';
 }
 
@@ -2356,12 +2380,22 @@ function updateHistoryUi() {
         elements.historyAdvanced.hidden = false;
     }
     if (elements.historyResetProtection) {
-        elements.historyResetProtection.hidden = !configured;
+        elements.historyResetProtection.hidden = false;
         elements.historyResetProtection.disabled = uiLocked || !configured;
+        elements.historyResetProtection.setAttribute(
+            'aria-disabled',
+            String(uiLocked || !configured)
+        );
+    }
+    if (elements.historyResetProtectionHelp) {
+        elements.historyResetProtectionHelp.textContent = !configured
+            ? 'Set a passphrase to enable this recovery action.'
+            : 'Deletes protected chats and removes the saved passphrase. Unprotected chats remain.';
     }
     if (elements.historyClearAll) {
         elements.historyClearAll.hidden = false;
         elements.historyClearAll.disabled = uiLocked;
+        elements.historyClearAll.setAttribute('aria-disabled', String(uiLocked));
     }
 }
 
@@ -3584,43 +3618,66 @@ function applyRunDefaultsFromActiveChat() {
     }
 }
 
-function updateSendState() {
-    if (!elements.sendButton || !elements.promptInput) return;
-    const locked = state.running || state.paused;
-    if (locked) {
-        elements.sendButton.textContent = 'Stop';
-        elements.sendButton.disabled = false;
-        updateComposerHint();
-        return;
+function getPrimaryActionDecision(input = {}) {
+    if (primaryActionApi) {
+        return primaryActionApi.getPrimaryActionDecision(input);
     }
-    const hasPrompt = elements.promptInput.value.trim().length > 0;
-    const attachmentsReady = !state.attachmentsLoading;
+    if (input.running) return { action: PRIMARY_ACTIONS.STOP, label: 'Stop', disabled: false };
+    if (input.historyBlocked) {
+        return { action: PRIMARY_ACTIONS.UNLOCK_HISTORY, label: 'Unlock', disabled: false };
+    }
+    if (input.paused) return { action: PRIMARY_ACTIONS.STOP, label: 'Stop', disabled: false };
+    if (input.schemaBlocked) {
+        return { action: PRIMARY_ACTIONS.SCHEMA_UPGRADE, label: 'Upgrade', disabled: false };
+    }
+    const canAct =
+        Boolean(input.hasPrompt) &&
+        input.attachmentsReady !== false &&
+        Boolean(input.validRoute) &&
+        Boolean(input.supportedRoute);
+    if (!input.validRoute || !input.supportedRoute) {
+        return { action: PRIMARY_ACTIONS.NOOP, label: 'Send', disabled: !canAct };
+    }
+    if (!input.configuredRoute) {
+        return { action: PRIMARY_ACTIONS.FIX_ROUTE, label: 'Fix route', disabled: !canAct };
+    }
+    if (!input.connected) {
+        return { action: PRIMARY_ACTIONS.CONNECT, label: 'Connect', disabled: !canAct };
+    }
+    return { action: PRIMARY_ACTIONS.SEND, label: 'Send', disabled: !canAct };
+}
+
+function getCurrentPrimaryActionDecision(overrides = {}) {
     const route = getRoute();
     const validRoute = isRouteValid(route);
     const supportedRoute = isRouteSupported(route);
     const configuredRoute = validRoute && supportedRoute && isRouteConfigured(route);
     const connected = configuredRoute && isRouteConnected(route);
-    const historyBlocked = isHistoryBlocked();
-    const schemaBlocked = isSchemaResetRequired();
-    const readyForPrimaryAction =
-        hasPrompt &&
-        attachmentsReady &&
-        validRoute &&
-        supportedRoute &&
-        !historyBlocked &&
-        !schemaBlocked;
-    if (schemaBlocked) {
-        elements.sendButton.textContent = 'Upgrade';
-    } else {
-        elements.sendButton.textContent = connected
-            ? 'Send'
-            : validRoute && supportedRoute
-              ? configuredRoute
-                  ? 'Connect'
-                  : 'Fix route'
-              : 'Send';
-    }
-    elements.sendButton.disabled = !readyForPrimaryAction;
+    const hasPrompt =
+        typeof overrides.hasPrompt === 'boolean'
+            ? overrides.hasPrompt
+            : Boolean(elements.promptInput?.value?.trim());
+
+    return getPrimaryActionDecision({
+        running: state.running,
+        paused: state.paused,
+        hasPrompt,
+        attachmentsReady: !state.attachmentsLoading,
+        validRoute,
+        supportedRoute,
+        configuredRoute,
+        connected,
+        historyBlocked: isHistoryBlocked(),
+        schemaBlocked: isSchemaResetRequired(),
+        ...overrides,
+    });
+}
+
+function updateSendState() {
+    if (!elements.sendButton || !elements.promptInput) return;
+    const decision = getCurrentPrimaryActionDecision();
+    elements.sendButton.textContent = decision.label;
+    elements.sendButton.disabled = Boolean(decision.disabled);
     updateComposerHint();
     updateEmptyState();
 }
@@ -4438,17 +4495,26 @@ function updateEmptyState() {
     const subtitleEl = elements.emptyState.querySelector('.empty-subtitle');
     const actionsEl = elements.emptyState.querySelector('.empty-actions');
     const actionButton = elements.emptyState.querySelector('#empty-open-route');
+    const primaryDecision = getCurrentPrimaryActionDecision({ hasPrompt: true });
 
-    if (ready && historyBlocked) {
+    if (primaryDecision.action === PRIMARY_ACTIONS.UNLOCK_HISTORY || historyBlocked) {
         if (titleEl) titleEl.textContent = isActiveChatLocked() ? 'Unlock chat' : 'Unlock history';
         if (subtitleEl) {
             subtitleEl.textContent = isActiveChatLocked()
                 ? 'This chat is protected. Enter your passphrase to continue.'
                 : 'Enter your passphrase to unlock encrypted history.';
         }
-        if (actionsEl) {
-            actionsEl.hidden = true;
-        }
+        if (actionButton)
+            actionButton.textContent = isActiveChatLocked() ? 'Unlock chat' : 'Unlock history';
+        if (actionsEl) actionsEl.hidden = false;
+        return;
+    }
+
+    if (primaryDecision.action === PRIMARY_ACTIONS.SCHEMA_UPGRADE) {
+        if (titleEl) titleEl.textContent = 'Upgrade required';
+        if (subtitleEl) subtitleEl.textContent = 'Complete the local data upgrade to continue.';
+        if (actionButton) actionButton.textContent = 'Upgrade';
+        if (actionsEl) actionsEl.hidden = false;
         return;
     }
 
@@ -4505,11 +4571,43 @@ function updateEmptyState() {
     if (actionsEl) actionsEl.hidden = true;
 }
 
+function handleEmptyStateAction() {
+    const decision = getCurrentPrimaryActionDecision({ hasPrompt: true });
+    if (
+        decision.action === PRIMARY_ACTIONS.UNLOCK_HISTORY ||
+        decision.action === PRIMARY_ACTIONS.SCHEMA_UPGRADE
+    ) {
+        handlePrimaryAction();
+        return;
+    }
+
+    openRoutePopover();
+    elements.routeButton?.focus();
+}
+
 async function handlePrimaryAction() {
-    if (state.running || state.paused) {
+    const decision = getCurrentPrimaryActionDecision();
+    if (decision.disabled) return;
+
+    if (decision.action === PRIMARY_ACTIONS.STOP) {
         stopSession();
         return;
     }
+
+    if (decision.action === PRIMARY_ACTIONS.UNLOCK_HISTORY) {
+        setSessionStatus(getHistoryBlockedHint() || 'Unlock history to continue.');
+        unlockHistory({ auto: false }).catch((error) => {
+            console.warn('Unlock failed:', error);
+        });
+        return;
+    }
+
+    if (decision.action === PRIMARY_ACTIONS.SCHEMA_UPGRADE) {
+        setSessionStatus('Complete the schema v3 upgrade reset to continue.');
+        renderSchemaResetModal();
+        return;
+    }
+
     try {
         await startSession();
     } catch (error) {
@@ -5693,19 +5791,47 @@ function buildMessageElement(message) {
     return container;
 }
 
+function buildMessageElementSafely(message) {
+    try {
+        return buildMessageElement(message || {});
+    } catch (error) {
+        console.warn('[MLC UI] Failed to render transcript message:', error);
+        const container = document.createElement('div');
+        container.className = 'message system';
+        container.dataset.provider = 'system';
+
+        const meta = document.createElement('div');
+        meta.className = 'message-meta';
+
+        const role = document.createElement('span');
+        role.className = 'message-role';
+        role.textContent = 'System';
+        meta.appendChild(role);
+
+        const content = document.createElement('div');
+        content.className = 'message-content';
+        content.textContent = 'Could not render one saved message.';
+
+        container.appendChild(meta);
+        container.appendChild(content);
+        return container;
+    }
+}
+
 function prependMessages(messages) {
     if (!elements.timeline) return;
     if (!Array.isArray(messages) || messages.length === 0) return;
 
-    if (elements.emptyState && elements.timeline.contains(elements.emptyState)) {
-        elements.emptyState.remove();
-    }
-
     const beforeHeight = elements.timeline.scrollHeight;
     const fragment = document.createDocumentFragment();
     messages.forEach((message) => {
-        fragment.appendChild(buildMessageElement(message));
+        fragment.appendChild(buildMessageElementSafely(message));
     });
+    if (!fragment.childNodes.length) return;
+
+    if (elements.emptyState && elements.timeline.contains(elements.emptyState)) {
+        elements.emptyState.remove();
+    }
 
     const afterLoadOlder =
         elements.loadOlderWrap && elements.timeline.contains(elements.loadOlderWrap)
@@ -5721,11 +5847,13 @@ function addMessage(message) {
     if (!elements.timeline) return;
     consumePendingEntryForMessage(message);
 
+    const messageElement = buildMessageElementSafely(message);
+
     if (elements.emptyState && elements.timeline.contains(elements.emptyState)) {
         elements.emptyState.remove();
     }
 
-    elements.timeline.appendChild(buildMessageElement(message));
+    elements.timeline.appendChild(messageElement);
     scrollTimelineToBottom();
 }
 

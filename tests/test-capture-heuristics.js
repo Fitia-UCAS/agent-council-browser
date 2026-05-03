@@ -109,6 +109,34 @@ runTest('chooseBestTextCandidate: prefers full link list answer over intro fragm
   assert.strictEqual(result.bestIndex, 1);
 });
 
+runTest('looksLikeToolStatusText: detects active ChatGPT search status only', () => {
+  assert.strictEqual(
+    CaptureUtils.looksLikeToolStatusText(
+      'Searching the web and checking Maps for current details',
+      { provider: 'chatgpt' }
+    ),
+    true
+  );
+  assert.strictEqual(
+    CaptureUtils.looksLikeToolStatusText('Using React state is the simplest fix.', {
+      provider: 'chatgpt',
+    }),
+    false
+  );
+  assert.strictEqual(
+    CaptureUtils.looksLikeToolStatusText('Browsing is disabled in this chat.', {
+      provider: 'chatgpt',
+    }),
+    false
+  );
+  assert.strictEqual(
+    CaptureUtils.looksLikeToolStatusText('I searched the web earlier.', {
+      provider: 'chatgpt',
+    }),
+    false
+  );
+});
+
 runTest('looksLikeUiControlText: detects Grok voice control label', () => {
   const text = 'Passer en mode vocal';
   assert.strictEqual(CaptureUtils.looksLikeUiControlText(text, { provider: 'grok' }), true);
