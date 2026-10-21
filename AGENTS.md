@@ -675,6 +675,29 @@ When multiple branches/worktrees are loaded in Chrome at once, build and load a 
   - Click **Reload** if the extension is already loaded so new name/icon metadata is applied.
   - Keep `"key"` unset in `manifest.json` so local unpacked variants can coexist.
 
+## 13) Standalone extension packaging (load a clean folder, not the repo)
+
+Loading the repo root in the browser is supported but noisy (the browser sees `src/`, `tests/`, `node_modules/`, `.git/`). Prefer packing a minimal folder:
+
+- Script: `scripts/dev/pack-extension-dir.mjs` (pure Node, so it works on Windows checkouts with CRLF shell scripts).
+- NPM shortcut: `npm run pack:extension -- --out=<dir>`
+  - Example: `npm run pack:extension -- --out="E:\edge-extensions\multi-agent-council"`
+  - WSL-style `/mnt/e/...` paths are translated to `E:/...` when `node.exe` runs.
+- Flags:
+  - `--mode=dev|release` (default `release`; release strips `version_name`, dev keeps `dev-<label>`).
+  - `--no-build` (pack existing root artifacts without rebuilding).
+  - `--name="<name>"` (override the packaged manifest display name).
+  - `--keep` (don't wipe the target folder first).
+- Behavior:
+  1. Runs `scripts/build/build-from-src.mjs` (unless `--no-build`).
+  2. Regenerates `variant-icons/variant-{16,32,48,128}.png` via `scripts/dev/render-council-icon.mjs` if any are missing (the icon set is gitignored, so a fresh checkout has none).
+  3. Copies only entries in `scripts/release/release-allowlist.txt`.
+  4. Refuses to target the repo root or a drive root.
+  5. Verifies every file referenced by `manifest.json` (service worker, side panel, icons, content scripts) plus `runtime/` exists.
+- Browser support: Chrome and Microsoft Edge both support this MV3 build (`sidePanel`, `scripting`, `storage`, `tabs`, `debugger` are supported in Edge). Arc falls back to an extension tab (`extensionUiOpenFlow.js`).
+- Rebuild loop after editing `src/`: rerun the pack command, then click **Reload** on the unpacked extension.
+- Note: `bash`-based scripts (`npm run build:release`, `npm run icons:ensure`) break on Windows checkouts because the `.sh` files have CRLF line endings (`set: pipefail: invalid option name`). The Node packer avoids them.
+
 ---
 
 ## Maintenance rule (must follow)

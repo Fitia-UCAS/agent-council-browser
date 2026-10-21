@@ -77,25 +77,50 @@ npm ci
 npm run build:src
 ```
 
-### 2. Load it in Chrome or Arc
+### 2. Package a clean extension folder (recommended)
 
-1. Open `chrome://extensions/`.
+Loading the repository root works, but the browser then treats your whole source tree as the
+extension. Instead, pack only the runtime files into a separate folder:
+
+```bash
+npm run pack:extension -- --out="E:\edge-extensions\multi-agent-council"
+```
+
+```bash
+# WSL / macOS / Linux
+npm run pack:extension -- --out=/mnt/e/edge-extensions/multi-agent-council
+```
+
+The command:
+
+- builds `src/` into the root runtime files,
+- regenerates `variant-icons/` if the icon set is missing,
+- copies only the allowlisted extension files (see `scripts/release/release-allowlist.txt`),
+- refuses to pack into the repository itself, and
+- verifies every file referenced by `manifest.json` exists.
+
+Useful flags: `--mode=dev` (keeps the branch label in `version_name`), `--no-build`, `--name="My Name"`,
+`--keep`. Forward slashes also work: `--out=E:/edge-extensions/multi-agent-council`.
+
+### 3. Load it in Chrome or Edge
+
+1. Open `chrome://extensions/` (Edge: `edge://extensions/`).
 2. Turn on `Developer mode`.
 3. Click `Load unpacked`.
-4. Select the repository root: `agent-council-browser/`.
+4. Select the packaged folder from step 2, e.g. `E:\edge-extensions\multi-agent-council`.
 5. Pin `Multi Agent Council` if you want one-click access.
 6. Click the extension icon to open the UI.
-   - Chrome should open the side panel.
+   - Chrome and Edge open the side panel.
    - Arc may open the side panel or fall back to an extension tab running `sidepanel.html`.
 
-### 3. Rebuild when the source changes
+### 4. Rebuild when the source changes
 
-The source of truth lives under `src/`. The root runtime files are generated.
+The source of truth lives under `src/`. The root runtime files and the packaged folder are generated.
 
 After you change source files:
 
 ```bash
-npm run build:src
+npm run pack:extension -- --out="E:\edge-extensions\multi-agent-council"
 ```
 
 Then go back to `chrome://extensions/` and click `Reload` on the unpacked extension.
@@ -192,10 +217,10 @@ Open that provider tab, make sure you are on the correct site, and sign in if ne
 Run:
 
 ```bash
-npm run build:src
+npm run pack:extension -- --out="E:\edge-extensions\multi-agent-council"
 ```
 
-Then reload the unpacked extension in `chrome://extensions/`.
+Then reload the unpacked extension in `chrome://extensions/` or `edge://extensions/`.
 
 ## Development
 

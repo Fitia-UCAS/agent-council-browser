@@ -6,6 +6,7 @@
     "scripts": {
         "build:src": "node scripts/build/build-from-src.mjs --mode=dev",
         "build:src:release": "node scripts/build/build-from-src.mjs --mode=release",
+        "pack:extension": "node scripts/dev/pack-extension-dir.mjs",
         "lint": "eslint --no-error-on-unmatched-pattern \"src/**/*.js\" \"scripts/**/*.js\" \"scripts/**/*.mjs\" \"tests/**/*.js\"",
         "format": "prettier --write \"README.md\" \"CONTRIBUTING.md\" \"SECURITY.md\" \"CODE_OF_CONDUCT.md\" \"package.json\" \"package-lock.json\" \"eslint.config.js\" \"playwright.config.js\" \"vitest.config.js\" \"docs/**/*.md\" \".github/**/*.{yml,yaml,md}\" \"scripts/**/*.mjs\" \"src/**/*.js\" \"src/**/*.css\" \"src/**/*.json\" \"tests/unit/**/*.js\" \"tests/e2e/**/*.js\"",
         "format:check": "prettier --check \"README.md\" \"CONTRIBUTING.md\" \"SECURITY.md\" \"CODE_OF_CONDUCT.md\" \"package.json\" \"package-lock.json\" \"eslint.config.js\" \"playwright.config.js\" \"vitest.config.js\" \"docs/**/*.md\" \".github/**/*.{yml,yaml,md}\" \"scripts/**/*.mjs\" \"src/**/*.js\" \"src/**/*.css\" \"src/**/*.json\" \"tests/unit/**/*.js\" \"tests/e2e/**/*.js\"",
